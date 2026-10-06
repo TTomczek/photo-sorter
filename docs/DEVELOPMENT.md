@@ -8,9 +8,9 @@
 4. In the host window, set a password of at least 12 characters, create a collection, and choose one or more folders.
 5. Log in from a phone using a displayed address on the same private network.
 
-`npm test` runs the unit suite and HTTP workflow tests. `npm run test:unit` and `npm run test:e2e` run either suite independently. `npm run build` checks and packages the unpacked app for the current OS; `npm run dist:win`, `npm run dist:mac`, and `npm run dist:linux` build the native installer/package target.
+`npm run lint` runs ESLint. `npm test` runs the unit suite and HTTP workflow tests. `npm run test:unit` and `npm run test:e2e` run either suite independently. `npm run build` checks and packages the unpacked app for the current OS; `npm run dist:win`, `npm run dist:mac`, and `npm run dist:linux` build the native installer/package target.
 
-GitHub Actions runs tests and the unpacked build on Ubuntu, Windows, and macOS for pushes and pull requests.
+GitHub Actions runs lint, tests, and the unpacked build on Ubuntu, Windows, and macOS for pushes and pull requests. Each successful platform job uploads its unpacked application as a downloadable workflow artifact.
 
 ## Account recovery and app data
 
