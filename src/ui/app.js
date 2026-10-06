@@ -8,9 +8,63 @@ const state = {
   total: 0,
   limit: 60,
   busy: false,
+  lockedItemId: '',
+  lockReady: false,
+  lockTransition: Promise.resolve(),
+  restoreMediaId: '',
 };
 const byId = (id) => document.getElementById(id);
 const mediaGrid = byId('media-grid');
+let stateSaveTimer;
+
+function setDecisionButtons(enabled) {
+  for (const button of document.querySelectorAll('[data-decision]')) {
+    button.disabled = !enabled;
+  }
+}
+
+function saveDeviceState() {
+  if (!state.collectionId) return;
+  clearTimeout(stateSaveTimer);
+  stateSaveTimer = setTimeout(() => {
+    const item = state.items[state.index];
+    request('/api/device-state', {
+      method: 'PUT',
+      body: JSON.stringify({
+        collectionId: state.collectionId,
+        category: state.category,
+        sort: state.sort,
+        mediaId: item?.id || null,
+        offset: state.offset,
+      }),
+    }).catch((error) => setStatus(error.message, true));
+  }, 200);
+}
+
+function updateItemLock(item) {
+  if (item?.id === state.lockedItemId) return;
+  const previousId = state.lockedItemId;
+  state.lockedItemId = item?.id || '';
+  state.lockReady = false;
+  setDecisionButtons(false);
+  state.lockTransition = state.lockTransition.then(async () => {
+    if (previousId) {
+      await request(`/api/media/${encodeURIComponent(previousId)}/lock`, { method: 'DELETE' }).catch(() => {});
+    }
+    if (!item) return;
+    try {
+      await request(`/api/media/${encodeURIComponent(item.id)}/lock`, { method: 'POST' });
+      if (state.lockedItemId !== item.id) {
+        await request(`/api/media/${encodeURIComponent(item.id)}/lock`, { method: 'DELETE' }).catch(() => {});
+        return;
+      }
+      state.lockReady = true;
+      setDecisionButtons(true);
+    } catch (error) {
+      setStatus(error.message, true);
+    }
+  });
+}
 
 async function request(url, options = {}) {
   const response = await fetch(url, {
@@ -71,10 +125,14 @@ function renderCurrent() {
   if (!item) {
     container.append(element('div', state.total ? 'Loading items…' : 'No items in this category.'));
     byId('item-count').textContent = state.total ? `${state.total} items` : '';
+    updateItemLock(null);
+    saveDeviceState();
     return;
   }
   container.append(createPreview(item, item.kind === 'video'));
   byId('item-count').textContent = `${state.index + 1} of ${state.total}`;
+  updateItemLock(item);
+  saveDeviceState();
 }
 
 function renderGrid() {
@@ -110,7 +168,10 @@ async function loadMedia() {
     state.offset = Math.max(0, Math.floor(Math.max(0, state.total - 1) / state.limit) * state.limit);
     return loadMedia();
   }
-  state.index = Math.min(state.index, Math.max(0, state.items.length - 1));
+  const restoredIndex = state.restoreMediaId
+    ? state.items.findIndex((item) => item.id === state.restoreMediaId) : -1;
+  state.index = restoredIndex >= 0 ? restoredIndex : Math.min(state.index, Math.max(0, state.items.length - 1));
+  state.restoreMediaId = '';
   byId('collection-title').textContent = `${state.category[0].toUpperCase()}${state.category.slice(1)} items`;
   renderGrid();
 }
@@ -133,7 +194,27 @@ async function loadCollections(preferredId) {
   state.collectionId = preferredId && result.collections.some((item) => item.id === preferredId)
     ? preferredId : (select.value || result.collections[0].id);
   state.offset = 0;
+  state.index = 0;
   select.value = state.collectionId;
+  const saved = await request(`/api/device-state?collectionId=${encodeURIComponent(state.collectionId)}`);
+  if (saved.state) {
+    state.category = saved.state.category;
+    state.sort = saved.state.sort;
+    state.offset = saved.state.offset;
+    state.restoreMediaId = saved.state.mediaId || '';
+    byId('sort-order').value = state.sort;
+    for (const button of byId('filters').querySelectorAll('button')) {
+      button.setAttribute('aria-pressed', String(button.dataset.category === state.category));
+    }
+  } else {
+    state.category = 'unseen';
+    state.sort = 'date-asc';
+    state.restoreMediaId = '';
+    byId('sort-order').value = state.sort;
+    for (const button of byId('filters').querySelectorAll('button')) {
+      button.setAttribute('aria-pressed', String(button.dataset.category === state.category));
+    }
+  }
   const collection = result.collections.find((item) => item.id === state.collectionId);
   setStatus(collection.offline_roots ? `${collection.offline_roots} root(s) are currently offline.` : '');
   await loadMedia();
@@ -200,7 +281,7 @@ async function showAuthentication() {
 }
 
 async function decide(category, item = state.items[state.index]) {
-  if (!item || state.busy) return;
+  if (!item || state.busy || !state.lockReady || state.lockedItemId !== item.id) return;
   state.busy = true;
   try {
     await request(`/api/media/${encodeURIComponent(item.id)}/decision`, {
@@ -299,9 +380,7 @@ byId('new-collection-form').addEventListener('submit', async (event) => {
 });
 
 byId('collection').addEventListener('change', async (event) => {
-  state.collectionId = event.target.value;
-  state.offset = 0;
-  await loadMedia();
+  await loadCollections(event.target.value);
 });
 byId('sort-order').addEventListener('change', async (event) => {
   state.sort = event.target.value;
@@ -364,6 +443,23 @@ byId('rescan').addEventListener('click', async () => {
     await loadCollections(state.collectionId);
   } catch (error) { setStatus(error.message, true); }
 });
+async function changeDecisionHistory(direction) {
+  try {
+    const result = await request(`/api/decisions/${direction}`, { method: 'POST', body: '{}' });
+    if (!result.changed) {
+      setStatus(result.message);
+      return;
+    }
+    state.restoreMediaId = result.mediaId;
+    state.offset = Math.floor(state.offset / state.limit) * state.limit;
+    setStatus(`${direction === 'undo' ? 'Undid' : 'Redid'} decision: ${result.category}.`);
+    await loadMedia();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+byId('undo-decision').addEventListener('click', () => changeDecisionHistory('undo'));
+byId('redo-decision').addEventListener('click', () => changeDecisionHistory('redo'));
 byId('audit').addEventListener('click', async () => {
   try {
     const { events } = await request('/api/audit');
@@ -379,11 +475,23 @@ byId('audit').addEventListener('click', async () => {
   } catch (error) { setStatus(error.message, true); }
 });
 byId('logout').addEventListener('click', async () => {
+  updateItemLock(null);
+  await state.lockTransition;
   await request('/api/logout', { method: 'POST', body: '{}' });
   byId('app-panel').classList.add('hidden');
   byId('logout').classList.add('hidden');
   await showAuthentication();
 });
+setInterval(async () => {
+  if (!state.lockedItemId || document.hidden) return;
+  try {
+    await request(`/api/media/${encodeURIComponent(state.lockedItemId)}/lock`, { method: 'POST' });
+  } catch (error) {
+    state.lockReady = false;
+    setDecisionButtons(false);
+    setStatus(error.message, true);
+  }
+}, 20_000);
 document.addEventListener('keydown', (event) => {
   if (event.target.matches('input, textarea, select') || byId('app-panel').classList.contains('hidden')) return;
   if (event.key === 'ArrowLeft') decide('delete');

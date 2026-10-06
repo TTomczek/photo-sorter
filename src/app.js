@@ -123,6 +123,31 @@ class PhotoSorter {
         UNIQUE(root_id, relative_path)
       );
       CREATE INDEX IF NOT EXISTS media_root_category ON media(root_id, category);
+      CREATE TABLE IF NOT EXISTS device_state (
+        device_id TEXT NOT NULL,
+        collection_id TEXT NOT NULL REFERENCES collections(id),
+        category TEXT NOT NULL DEFAULT 'unseen',
+        sort_order TEXT NOT NULL DEFAULT 'date-asc',
+        media_id TEXT,
+        page_offset INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(device_id, collection_id)
+      );
+      CREATE TABLE IF NOT EXISTS media_locks (
+        media_id TEXT PRIMARY KEY REFERENCES media(id),
+        device_id TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS decision_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        media_id TEXT NOT NULL REFERENCES media(id),
+        device_id TEXT NOT NULL,
+        previous_category TEXT,
+        next_category TEXT,
+        undone INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS decision_history_device ON decision_history(device_id, id DESC);
       CREATE TABLE IF NOT EXISTS audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         action TEXT NOT NULL,
@@ -384,6 +409,111 @@ class PhotoSorter {
     this.log('decision_changed', { mediaId, previous: item.category, category: next, collectionId: item.collection_id });
   }
 
+  getDeviceState(deviceId, collectionId) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    return this.db.prepare(`
+      SELECT category, sort_order AS sort, media_id AS mediaId, page_offset AS offset
+      FROM device_state WHERE device_id = ? AND collection_id = ?
+    `).get(deviceId, collectionId) || null;
+  }
+
+  saveDeviceState(deviceId, collectionId, state) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    const category = state.category;
+    const sort = state.sort;
+    const offset = state.offset;
+    if (!CATEGORIES.has(category)
+      || !['date-asc', 'date-desc', 'filename'].includes(sort)
+      || !Number.isSafeInteger(offset) || offset < 0 || offset > 2_000_000) {
+      throw new Error('Invalid review position.');
+    }
+    const mediaId = state.mediaId === null || state.mediaId === '' ? null : state.mediaId;
+    if (mediaId !== null && (typeof mediaId !== 'string'
+      || !this.db.prepare('SELECT m.id FROM media m JOIN roots r ON r.id = m.root_id WHERE m.id = ? AND r.collection_id = ?')
+        .get(mediaId, collectionId))) {
+      throw new Error('Media item not found in this collection.');
+    }
+    this.db.prepare(`
+      INSERT INTO device_state(device_id, collection_id, category, sort_order, media_id, page_offset, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(device_id, collection_id) DO UPDATE SET
+        category = excluded.category, sort_order = excluded.sort_order, media_id = excluded.media_id,
+        page_offset = excluded.page_offset, updated_at = excluded.updated_at
+    `).run(deviceId, collectionId, category, sort, mediaId, offset, new Date().toISOString());
+    return this.getDeviceState(deviceId, collectionId);
+  }
+
+  claimMediaLock(mediaId, deviceId) {
+    if (!this.db.prepare('SELECT id FROM media WHERE id = ?').get(mediaId)) {
+      throw new Error('Media item not found.');
+    }
+    const now = Date.now();
+    this.db.prepare('DELETE FROM media_locks WHERE expires_at <= ?').run(now);
+    this.db.prepare(`
+      INSERT INTO media_locks(media_id, device_id, expires_at) VALUES (?, ?, ?)
+      ON CONFLICT(media_id) DO UPDATE SET device_id = excluded.device_id, expires_at = excluded.expires_at
+      WHERE media_locks.device_id = excluded.device_id OR media_locks.expires_at <= ?
+    `).run(mediaId, deviceId, now + 60_000, now);
+    const lock = this.db.prepare('SELECT device_id FROM media_locks WHERE media_id = ?').get(mediaId);
+    if (lock?.device_id !== deviceId) {
+      throw Object.assign(new Error('This item is being reviewed on another device.'), { status: 409 });
+    }
+    return { locked: true, expiresIn: 60 };
+  }
+
+  releaseMediaLock(mediaId, deviceId) {
+    this.db.prepare('DELETE FROM media_locks WHERE media_id = ? AND device_id = ?').run(mediaId, deviceId);
+    return { released: true };
+  }
+
+  setDeviceDecision(mediaId, category, deviceId) {
+    const lock = this.db.prepare('SELECT device_id, expires_at FROM media_locks WHERE media_id = ?').get(mediaId);
+    if (!lock || lock.device_id !== deviceId || lock.expires_at <= Date.now()) {
+      throw Object.assign(new Error('The review lock expired or belongs to another device. Reopen this item to continue.'), { status: 409 });
+    }
+    if (!CATEGORIES.has(category)) throw new Error('Invalid category.');
+    const item = this.db.prepare(`
+      SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id WHERE m.id = ?
+    `).get(mediaId);
+    if (!item) throw new Error('Media item not found.');
+    const next = category === 'unseen' ? null : category;
+    if (item.category === next) return;
+    this.db.prepare(`
+      INSERT INTO decision_history(media_id, device_id, previous_category, next_category, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(mediaId, deviceId, item.category, next, new Date().toISOString());
+    this.db.prepare('DELETE FROM decision_history WHERE device_id = ? AND undone = 1').run(deviceId);
+    this.db.prepare('UPDATE media SET category = ? WHERE id = ?').run(next, mediaId);
+    this.log('decision_changed', { mediaId, previous: item.category, category: next, collectionId: item.collection_id });
+  }
+
+  async changeDecisionHistory(deviceId, direction) {
+    const undone = direction === 'redo' ? 1 : 0;
+    const entry = this.db.prepare(`
+      SELECT h.* FROM decision_history h
+      WHERE h.device_id = ? AND h.undone = ?
+      ORDER BY h.id DESC LIMIT 1
+    `).get(deviceId, undone);
+    if (!entry) return { changed: false, message: `There is no decision to ${direction}.` };
+    this.claimMediaLock(entry.media_id, deviceId);
+    const item = this.db.prepare('SELECT category FROM media WHERE id = ?').get(entry.media_id);
+    const expected = direction === 'undo' ? entry.next_category : entry.previous_category;
+    if (!item || item.category !== expected) {
+      throw Object.assign(new Error('This decision changed on another device; history was not altered.'), { status: 409 });
+    }
+    const category = direction === 'undo' ? entry.previous_category : entry.next_category;
+    this.db.prepare('UPDATE media SET category = ? WHERE id = ?').run(category, entry.media_id);
+    this.db.prepare('UPDATE decision_history SET undone = ? WHERE id = ?').run(direction === 'undo' ? 1 : 0, entry.id);
+    this.log(direction === 'undo' ? 'decision_undone' : 'decision_redone', {
+      mediaId: entry.media_id, category,
+    });
+    return { changed: true, mediaId: entry.media_id, category: category || 'unseen' };
+  }
+
   listAudit(limit = 200) {
     return this.db.prepare('SELECT id, action, details, created_at FROM audit ORDER BY id DESC LIMIT ?')
       .all(limit).map((row) => ({ ...row, details: JSON.parse(row.details) }));
@@ -633,9 +763,27 @@ class PhotoSorter {
     return match?.[1];
   }
 
+  deviceId(request) {
+    const cookie = request.headers.cookie || '';
+    return cookie.match(/(?:^|;\s*)photo_sorter_device=([A-Fa-f0-9]{32})/)?.[1];
+  }
+
+  issueSession(request) {
+    const deviceId = this.deviceId(request) || crypto.randomBytes(16).toString('hex');
+    const token = crypto.randomBytes(32).toString('hex');
+    this.sessions.set(token, { deviceId, createdAt: Date.now() });
+    const cookies = [`photo_sorter_session=${token}; HttpOnly; SameSite=Strict; Path=/`];
+    if (!this.deviceId(request)) {
+      cookies.push(`photo_sorter_device=${deviceId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=315360000`);
+    }
+    return { deviceId, headers: { 'Set-Cookie': cookies } };
+  }
+
   requireSession(request) {
     const token = this.sessionToken(request);
-    if (!token || !this.sessions.has(token)) throw Object.assign(new Error('Authentication required.'), { status: 401 });
+    const session = token && this.sessions.get(token);
+    if (!session) throw Object.assign(new Error('Authentication required.'), { status: 401 });
+    return session;
   }
 
   async handleRequest(request, response) {
@@ -652,11 +800,8 @@ class PhotoSorter {
         }
         const { password } = await this.readJson(request);
         await this.createPassword(password);
-        const token = crypto.randomBytes(32).toString('hex');
-        this.sessions.set(token, Date.now());
-        return this.sendJson(response, 201, { authenticated: true }, {
-          'Set-Cookie': `photo_sorter_session=${token}; HttpOnly; SameSite=Strict; Path=/`,
-        });
+        const session = this.issueSession(request);
+        return this.sendJson(response, 201, { authenticated: true }, session.headers);
       }
       if (request.method === 'POST' && url.pathname === '/api/login') {
         const address = request.socket.remoteAddress || 'unknown';
@@ -670,11 +815,8 @@ class PhotoSorter {
           return this.sendJson(response, 401, { error: 'Incorrect password.' });
         }
         this.loginAttempts.delete(address);
-        const token = crypto.randomBytes(32).toString('hex');
-        this.sessions.set(token, Date.now());
-        return this.sendJson(response, 200, { authenticated: true }, {
-          'Set-Cookie': `photo_sorter_session=${token}; HttpOnly; SameSite=Strict; Path=/`,
-        });
+        const session = this.issueSession(request);
+        return this.sendJson(response, 200, { authenticated: true }, session.headers);
       }
       if (request.method === 'POST' && url.pathname === '/api/logout') {
         const token = this.sessionToken(request);
@@ -686,13 +828,28 @@ class PhotoSorter {
       if (request.method === 'GET' && url.pathname === '/api/network') {
         return this.sendJson(response, 200, { addresses: this.localAddresses(this.port) });
       }
-      this.requireSession(request);
+      const session = this.requireSession(request);
       if (request.method === 'GET' && url.pathname === '/api/collections') {
         return this.sendJson(response, 200, { collections: this.listCollections() });
       }
       if (request.method === 'POST' && url.pathname === '/api/collections') {
         const { name } = await this.readJson(request);
         return this.sendJson(response, 201, { id: this.createCollection(name) });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/device-state') {
+        return this.sendJson(response, 200, {
+          state: this.getDeviceState(session.deviceId, url.searchParams.get('collectionId')),
+        });
+      }
+      if (request.method === 'PUT' && url.pathname === '/api/device-state') {
+        const body = await this.readJson(request);
+        return this.sendJson(response, 200, {
+          state: this.saveDeviceState(session.deviceId, body.collectionId, body),
+        });
+      }
+      if (request.method === 'POST' && ['/api/decisions/undo', '/api/decisions/redo'].includes(url.pathname)) {
+        const direction = url.pathname.endsWith('/undo') ? 'undo' : 'redo';
+        return this.sendJson(response, 200, await this.changeDecisionHistory(session.deviceId, direction));
       }
       if (request.method === 'GET' && url.pathname === '/api/media') {
         const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 60));
@@ -711,10 +868,17 @@ class PhotoSorter {
       }
       const mediaMatch = url.pathname.match(/^\/api\/media\/([0-9a-f-]+)\/content$/i);
       if (request.method === 'GET' && mediaMatch) return this.serveMedia(mediaMatch[1], request, response);
+      const lockMatch = url.pathname.match(/^\/api\/media\/([0-9a-f-]+)\/lock$/i);
+      if (request.method === 'POST' && lockMatch) {
+        return this.sendJson(response, 200, this.claimMediaLock(lockMatch[1], session.deviceId));
+      }
+      if (request.method === 'DELETE' && lockMatch) {
+        return this.sendJson(response, 200, this.releaseMediaLock(lockMatch[1], session.deviceId));
+      }
       const decisionMatch = url.pathname.match(/^\/api\/media\/([0-9a-f-]+)\/decision$/i);
       if (request.method === 'PUT' && decisionMatch) {
         const { category } = await this.readJson(request);
-        this.setDecision(decisionMatch[1], category);
+        this.setDeviceDecision(decisionMatch[1], category, session.deviceId);
         return this.sendJson(response, 200, { saved: true });
       }
       if (request.method === 'POST' && url.pathname === '/api/apply/plan') {

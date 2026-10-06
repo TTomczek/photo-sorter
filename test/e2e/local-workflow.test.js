@@ -43,8 +43,8 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
         ...options.headers,
       },
     });
-    const setCookie = response.headers.get('set-cookie');
-    if (setCookie) cookie = setCookie.split(';')[0];
+    const setCookies = response.headers.getSetCookie?.() || [response.headers.get('set-cookie')].filter(Boolean);
+    if (setCookies.length) cookie = setCookies.map((value) => value.split(';')[0]).join('; ');
     const body = response.headers.get('content-type')?.includes('application/json') ? await response.json() : await response.text();
     return { response, body };
   };
@@ -53,9 +53,35 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
   assert.equal(unauthorized.response.status, 401);
   const login = await api('/api/login', { method: 'POST', body: JSON.stringify({ password: 'a secure test password' }) });
   assert.equal(login.response.status, 200);
+  const otherDevice = async (route, options = {}) => {
+    const response = await fetch(`${baseUrl}${route}`, {
+      ...options,
+      headers: {
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(otherDevice.cookie ? { Cookie: otherDevice.cookie } : {}),
+        ...(options.headers || {}),
+      },
+    });
+    const setCookies = response.headers.getSetCookie?.() || [response.headers.get('set-cookie')].filter(Boolean);
+    if (setCookies.length) otherDevice.cookie = setCookies.map((value) => value.split(';')[0]).join('; ');
+    const body = response.headers.get('content-type')?.includes('application/json') ? await response.json() : await response.text();
+    return { response, body };
+  };
+  otherDevice.cookie = '';
+  const secondLogin = await otherDevice('/api/login', {
+    method: 'POST', body: JSON.stringify({ password: 'a secure test password' }),
+  });
+  assert.equal(secondLogin.response.status, 200);
 
   const collection = await api('/api/collections');
   assert.equal(collection.body.collections[0].name, 'Weekend');
+  const savedPosition = await api('/api/device-state', {
+    method: 'PUT',
+    body: JSON.stringify({ collectionId, category: 'unseen', sort: 'date-asc', mediaId: null, offset: 0 }),
+  });
+  assert.equal(savedPosition.body.state.sort, 'date-asc');
+  assert.equal((await api(`/api/device-state?collectionId=${collectionId}`)).body.state.category, 'unseen');
+  assert.equal((await otherDevice(`/api/device-state?collectionId=${collectionId}`)).body.state, null);
   const arbitraryRoot = await api('/api/roots', { method: 'POST', body: JSON.stringify({ path: '/etc' }) });
   assert.equal(arbitraryRoot.response.status, 404);
   const unseen = await api(`/api/media?collectionId=${collectionId}&category=unseen`);
@@ -74,7 +100,38 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
   const decision = await api(`/api/media/${photo.id}/decision`, {
     method: 'PUT', body: JSON.stringify({ category: 'delete' }),
   });
-  assert.equal(decision.response.status, 200);
+  assert.equal(decision.response.status, 409);
+  const lock = await api(`/api/media/${photo.id}/lock`, { method: 'POST' });
+  assert.equal(lock.response.status, 200);
+  const competingLock = await otherDevice(`/api/media/${photo.id}/lock`, { method: 'POST' });
+  assert.equal(competingLock.response.status, 409);
+  const competingDecision = await otherDevice(`/api/media/${photo.id}/decision`, {
+    method: 'PUT', body: JSON.stringify({ category: 'keep' }),
+  });
+  assert.equal(competingDecision.response.status, 409);
+  const savedItemPosition = await api('/api/device-state', {
+    method: 'PUT',
+    body: JSON.stringify({ collectionId, category: 'unseen', sort: 'date-asc', mediaId: photo.id, offset: 0 }),
+  });
+  assert.equal(savedItemPosition.body.state.mediaId, photo.id);
+  const decisionSaved = await api(`/api/media/${photo.id}/decision`, {
+    method: 'PUT', body: JSON.stringify({ category: 'delete' }),
+  });
+  assert.equal(decisionSaved.response.status, 200);
+  const undone = await api('/api/decisions/undo', { method: 'POST', body: '{}' });
+  assert.equal(undone.body.changed, true);
+  assert.equal(undone.body.category, 'unseen');
+  const redone = await api('/api/decisions/redo', { method: 'POST', body: '{}' });
+  assert.equal(redone.body.changed, true);
+  assert.equal(redone.body.category, 'delete');
+  app.db.prepare('UPDATE media_locks SET expires_at = ? WHERE media_id = ?').run(Date.now() - 1, photo.id);
+  const expiredLockDecision = await api(`/api/media/${photo.id}/decision`, {
+    method: 'PUT', body: JSON.stringify({ category: 'keep' }),
+  });
+  assert.equal(expiredLockDecision.response.status, 409);
+  assert.equal((await otherDevice(`/api/media/${photo.id}/lock`, { method: 'POST' })).response.status, 200);
+  await otherDevice(`/api/media/${photo.id}/lock`, { method: 'DELETE' });
+  await api(`/api/media/${photo.id}/lock`, { method: 'POST' });
   const invalidDecision = await api(`/api/media/${photo.id}/decision`, {
     method: 'PUT', body: JSON.stringify({ category: 'purge' }),
   });

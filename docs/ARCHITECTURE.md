@@ -15,22 +15,25 @@ This document describes what the repository implements today, not the complete M
 
 The SQLite database is `photo-sorter.sqlite` in the OS app-data directory; `PHOTO_SORTER_DATA_DIR` overrides that directory. The current schema is created with `CREATE TABLE IF NOT EXISTS`; a versioned migration system is not implemented. Tables hold one account, collections, roots, indexed media, audit events, apply batches, and apply operations. Sessions and pending apply plans live in memory, so restarting the host requires login again and discards any unconfirmed plan.
 
-All data and media API routes except setup status, login/setup/logout, and LAN address discovery require the session cookie. The API currently provides:
+All data and media API routes except setup status, login/setup/logout, and LAN address discovery require the session cookie. Login also issues a long-lived, HttpOnly device identifier used only for per-device review state and edit locks; the authentication session itself still expires on host restart. The API currently provides:
 
 | Route | Purpose |
 | --- | --- |
 | `GET /api/setup-status`, `POST /api/setup`, `POST /api/login`, `POST /api/logout` | First-run account setup and session handling |
 | `GET /api/network` | Report detected local IPv4 URLs |
 | `GET /api/collections`, `POST /api/collections` | List or create a collection |
+| `GET /api/device-state`, `PUT /api/device-state` | Restore or save a device's collection, category, sort order, current item, and page |
 | `GET /api/media` | List one category page, with modified-time or filename ordering |
 | `GET /api/media/:id/content` | Serve an indexed item, including HTTP byte ranges |
-| `PUT /api/media/:id/decision` | Set a decision (`keep`, `delete`, `unsure`) or clear it to unseen |
+| `POST` / `DELETE /api/media/:id/lock` | Acquire/renew a 60-second item lock or release it |
+| `PUT /api/media/:id/decision` | Set a decision (`keep`, `delete`, `unsure`) or clear it to unseen while holding the item lock |
+| `POST /api/decisions/undo`, `POST /api/decisions/redo` | Undo or redo this device's latest decision, unless it has since changed elsewhere |
 | `POST /api/rescan` | Manually rescan all roots in a collection |
 | `POST /api/apply/plan`, `POST /api/apply/confirm` | Create a move summary, then confirm and run it |
 | `POST /api/restore` | Restore completed operations from the latest batch containing a completed move |
 | `GET /api/audit` | Read the most recent 200 audit events |
 
-There is no API for root removal/archival, settings, queue state, locks, audit export/clear, or history navigation (undo/redo).
+There is no API for root removal/archival, general settings, audit export/clear, or scan/watch progress.
 
 ## Scanning and media
 
@@ -44,7 +47,7 @@ The interface fetches category pages (60 items by default) and offers previous/n
 
 ## Decisions and file operations
 
-Decisions update the database immediately, not the filesystem. The review view supports arrow keys, swipe gestures, explicit buttons, category filters, and video playback. The grid can be ordered by modified time ascending/descending or filename. It does **not** read capture/EXIF dates. Review position and category are not persisted per device, and concurrent edits are not protected by locks.
+Decisions update the database immediately, not the filesystem. The review view supports arrow keys, swipe gestures, explicit buttons, category filters, and video playback. The grid can be ordered by modified time ascending/descending or filename. It does **not** read capture/EXIF dates. Category, sort order, current item, and page are persisted per device and collection. The current item's 60-second lock is renewed every 20 seconds while the page is active; another device cannot change a locked item's decision. Undo/redo applies to the signed-in device's decision history and refuses to overwrite a newer decision from another device.
 
 Apply currently plans `delete` and `unsure` moves. It shows a count and up to five source/destination examples, then requires a separate confirmation. The plan expires after ten minutes. Files are placed in the root's `deleted` or `unsure` folder with their relative subfolder structure preserved. Existing output folders without the app marker require explicit reuse approval. Name collisions receive ` (1)`, ` (2)`, and so on before the extension. Root identity and output paths are checked again before moving.
 
@@ -60,7 +63,7 @@ Audit rows record account/collection/root creation, scans and scan errors, decis
 | Account/password | First-run host-local setup, salted scrypt hash, login/logout, restart reauthentication, and in-memory per-IP throttling are implemented. Passkeys/biometrics are deferred. |
 | Collections and roots | Create and switch collections in the selector, add roots, enforce overlap, and retain history for missing roots. Last-used collection restoration, root removal, archival/re-add lifecycle, and root-management settings are not implemented. |
 | Scanning | Extension-filtered recursive manual scan, symlink/output exclusion, per-path error logging, offline flag, and size/mtime decision reset are implemented. Watchers, startup catch-up, bounded asynchronous indexing, removal reconciliation, and progress reporting are absent. Read-only status is returned by the API and summarized during apply; it is not shown per root in the UI. |
-| Sorting/review | Keep/delete/unsure/unseen decisions, category filters, modified-time/filename ordering, basic paging, keyboard/swipe/buttons, and on-demand video playback are implemented. Capture-date sorting, virtualized 200k navigation, per-device queue persistence, locks, undo/redo, zoom/pan, and dynamic multi-device synchronization behavior are absent. |
+| Sorting/review | Keep/delete/unsure/unseen decisions, category filters, modified-time/filename ordering, basic paging, keyboard/swipe/buttons, on-demand video playback, per-device queue state, expiring item locks, and decision undo/redo are implemented. Capture-date sorting, virtualized 200k navigation, zoom/pan, and live queue refresh across devices are absent. |
 | Previews | Browser-native rendering and range-based video serving are implemented. Generated thumbnails/posters and configurable LRU cache are absent. |
 | Apply/restore | Two-step confirmation, output-folder consent, relative paths, collision numbering, no-overwrite moves, first-failure stop, journal rows, and latest completed-batch restore are implemented. Full keep/category reconciliation, comprehensive interrupted-batch handling, and a broader apply review/count by category remain incomplete. |
 | Audit/help | Basic persistent audit browsing and in-app quick help are implemented. Export, explicit clear, complete audit coverage, and an uninstall data warning are absent. |
