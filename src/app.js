@@ -1,7 +1,9 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
+const fsSync = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { isIP } = require('node:net');
 const { DatabaseSync } = require('node:sqlite');
 
 const IMAGE_EXTENSIONS = new Set([
@@ -35,6 +37,15 @@ function comparePaths(first, second) {
   return process.platform === 'win32' ? first.toLowerCase() === second.toLowerCase() : first === second;
 }
 
+function isLocalNetworkAddress(address) {
+  if (isIP(address) === 6) return /^(fc|fd|fe[89ab])/i.test(address);
+  if (isIP(address) !== 4) return false;
+  const [first, second] = address.split('.').map(Number);
+  return first === 10 || first === 192 && second === 168
+    || first === 172 && second >= 16 && second <= 31
+    || first === 169 && second === 254;
+}
+
 function numberedDestination(destination, exists) {
   const extension = path.extname(destination);
   const stem = destination.slice(0, destination.length - extension.length);
@@ -42,6 +53,26 @@ function numberedDestination(destination, exists) {
   let candidate = destination;
   while (exists(candidate)) candidate = `${stem} (${index++})${extension}`;
   return candidate;
+}
+
+async function pathExists(filename) {
+  try {
+    await fs.lstat(filename);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function moveWithoutOverwrite(source, destination) {
+  await fs.link(source, destination);
+  try {
+    await fs.unlink(source);
+  } catch (error) {
+    try { await fs.unlink(destination); } catch {}
+    throw error;
+  }
 }
 
 class PhotoSorter {
@@ -53,6 +84,8 @@ class PhotoSorter {
     this.applyPlans = new Map();
     this.db = null;
     this.server = null;
+    this.servers = [];
+    this.port = null;
   }
 
   async initialize() {
@@ -111,11 +144,45 @@ class PhotoSorter {
         status TEXT NOT NULL
       );
     `);
+    await this.recoverApplyOperations();
     return this;
   }
 
+  async recoverApplyOperations() {
+    const pending = this.db.prepare("SELECT * FROM apply_operations WHERE status = 'planned'").all();
+    for (const operation of pending) {
+      try {
+        const root = this.db.prepare('SELECT path FROM roots WHERE id = ?').get(operation.root_id)?.path;
+        if (!root || !isWithin(root, operation.from_path) || !isWithin(root, operation.to_path)) {
+          throw new Error('Journal paths are outside the registered root.');
+        }
+        let sourceExists = true;
+        let destinationExists = true;
+        try { await fs.access(operation.from_path); } catch (error) { if (error.code === 'ENOENT') sourceExists = false; else throw error; }
+        try { await fs.access(operation.to_path); } catch (error) { if (error.code === 'ENOENT') destinationExists = false; else throw error; }
+        if (!sourceExists && destinationExists) {
+          this.db.prepare("UPDATE apply_operations SET status = 'completed' WHERE id = ?").run(operation.id);
+          this.db.prepare('UPDATE media SET relative_path = ? WHERE id = ?')
+            .run(path.relative(root, operation.to_path), operation.media_id);
+          this.log('apply_recovered', { batchId: operation.batch_id, mediaId: operation.media_id, status: 'completed' });
+        } else {
+          this.db.prepare("UPDATE apply_operations SET status = 'failed' WHERE id = ?").run(operation.id);
+          this.log('apply_recovered', {
+            batchId: operation.batch_id,
+            mediaId: operation.media_id,
+            status: 'failed',
+            reason: sourceExists && destinationExists ? 'Both paths exist.' : 'Neither path exists.',
+          });
+        }
+      } catch (error) {
+        this.db.prepare("UPDATE apply_operations SET status = 'failed' WHERE id = ?").run(operation.id);
+        this.log('apply_recovered', { batchId: operation.batch_id, mediaId: operation.media_id, status: 'failed', reason: error.message });
+      }
+    }
+  }
+
   close() {
-    if (this.server) this.server.close();
+    for (const server of this.servers) server.close();
     if (this.db) this.db.close();
   }
 
@@ -219,6 +286,9 @@ class PhotoSorter {
         const directory = directories.pop();
         let entries;
         try {
+          const directoryStat = await fs.lstat(directory);
+          if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()
+            || !isWithin(base, await fs.realpath(directory))) continue;
           entries = await fs.readdir(directory, { withFileTypes: true });
         } catch (error) {
           this.log('scan_error', { rootId, path: directory, message: error.message });
@@ -237,11 +307,11 @@ class PhotoSorter {
           const kind = IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : null;
           if (!kind) continue;
           try {
-            const stat = await fs.stat(fullPath);
-            if (!isWithin(base, fullPath)) continue;
+            const stat = await fs.lstat(fullPath);
+            if (!stat.isFile() || stat.isSymbolicLink() || !isWithin(base, await fs.realpath(fullPath))) continue;
             const relativePath = path.relative(base, fullPath);
             upsert.run(crypto.createHash('sha256').update(`${rootId}\0${relativePath}`).digest('hex'),
-              rootId, relativePath, stat.size, Math.trunc(stat.mtimeMs));
+              rootId, relativePath, stat.size, stat.mtimeMs);
             entriesVisited += 1;
           } catch (error) {
             this.log('scan_error', { rootId, path: fullPath, message: error.message });
@@ -261,7 +331,9 @@ class PhotoSorter {
   async rescanCollection(collectionId) {
     const roots = this.db.prepare('SELECT id FROM roots WHERE collection_id = ?').all(collectionId);
     let indexed = 0;
-    for (const root of roots) indexed += await this.scanRoot(root.id);
+    for (const root of roots) {
+      try { indexed += await this.scanRoot(root.id); } catch {}
+    }
     return indexed;
   }
 
@@ -322,10 +394,14 @@ class PhotoSorter {
   }
 
   async planApply(collectionId) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
     const media = this.db.prepare(`
       SELECT m.id, m.root_id, m.relative_path, m.category, r.path, r.read_only
       FROM media m JOIN roots r ON r.id = m.root_id
       WHERE r.collection_id = ? AND m.category IN ('delete', 'unsure')
+        AND m.relative_path NOT LIKE 'deleted/%' AND m.relative_path NOT LIKE 'unsure/%'
       ORDER BY m.relative_path
     `).all(collectionId);
     const operations = [];
@@ -379,6 +455,7 @@ class PhotoSorter {
     this.db.prepare('INSERT INTO apply_batches(id, created_at) VALUES (?, ?)').run(batchId, new Date().toISOString());
     const results = [];
     for (const operation of plan.operations) {
+      let operationId;
       try {
         const currentRoot = await fs.realpath(operation.root);
         const currentSource = await fs.realpath(operation.source);
@@ -387,10 +464,11 @@ class PhotoSorter {
         }
         const stat = await fs.stat(currentSource);
         if (!stat.isFile()) throw new Error('Source is not a regular file.');
-        const output = path.dirname(operation.destination).split(path.sep).includes('deleted')
-          ? path.join(operation.root, 'deleted')
-          : path.join(operation.root, 'unsure');
+        const output = path.join(operation.root, operation.category === 'delete' ? 'deleted' : 'unsure');
         await fs.mkdir(output, { recursive: true });
+        const outputStat = await fs.lstat(output);
+        if (!outputStat.isDirectory() || outputStat.isSymbolicLink()) throw new Error('Output folder must be a real directory.');
+        if (!isWithin(currentRoot, await fs.realpath(output))) throw new Error('Output folder is outside its registered root.');
         const markerPath = path.join(output, OUTPUT_MARKER);
         try {
           const marker = await fs.readFile(markerPath, 'utf8');
@@ -405,7 +483,7 @@ class PhotoSorter {
         const parent = path.dirname(operation.destination);
         await fs.mkdir(parent, { recursive: true });
         const destination = numberedDestination(operation.destination, (candidate) => {
-          try { require('node:fs').accessSync(candidate); return true; } catch { return false; }
+          try { fsSync.lstatSync(candidate); return true; } catch (error) { return error.code !== 'ENOENT'; }
         });
         const destinationParent = await fs.realpath(path.dirname(destination));
         if (!isWithin(currentRoot, destinationParent)) throw new Error('Destination escaped its registered root.');
@@ -413,10 +491,14 @@ class PhotoSorter {
         if (stat.dev !== destinationDevice) throw new Error('Cross-volume moves are not supported.');
         const row = this.db.prepare('INSERT INTO apply_operations(batch_id, media_id, root_id, from_path, to_path, category, status) VALUES (?, ?, ?, ?, ?, ?, ?)')
           .run(batchId, operation.mediaId, operation.rootId, currentSource, destination, operation.category, 'planned');
-        await fs.rename(currentSource, destination);
-        this.db.prepare('UPDATE apply_operations SET status = ? WHERE id = ?').run('completed', row.lastInsertRowid);
+        operationId = row.lastInsertRowid;
+        await moveWithoutOverwrite(currentSource, destination);
+        this.db.prepare('UPDATE apply_operations SET status = ? WHERE id = ?').run('completed', operationId);
+        this.db.prepare('UPDATE media SET relative_path = ? WHERE id = ?')
+          .run(path.relative(currentRoot, destination), operation.mediaId);
         results.push({ source: currentSource, destination, status: 'moved' });
       } catch (error) {
+        if (operationId) this.db.prepare('UPDATE apply_operations SET status = ? WHERE id = ?').run('failed', operationId);
         results.push({ source: operation.source, destination: operation.destination, status: 'failed', error: error.message });
         this.log('apply_failed', { batchId, moved: results.filter((result) => result.status === 'moved'), failed: results.at(-1) });
         return { batchId, results, stoppedOnFailure: true };
@@ -441,15 +523,18 @@ class PhotoSorter {
         }
         const movedFile = await fs.realpath(operation.to_path);
         if (!isWithin(await fs.realpath(root), movedFile)) throw new Error('Moved file is outside the registered root.');
-        try {
-          await fs.access(operation.from_path);
+        if (await pathExists(operation.from_path)) {
           throw new Error('Original path is occupied; refusing to overwrite.');
-        } catch (error) {
-          if (error.code !== 'ENOENT') throw error;
         }
         await fs.mkdir(path.dirname(operation.from_path), { recursive: true });
-        await fs.rename(operation.to_path, operation.from_path);
+        const restoreParent = await fs.realpath(path.dirname(operation.from_path));
+        if (!isWithin(await fs.realpath(root), restoreParent)) throw new Error('Restore destination escaped its registered root.');
+        const movedStat = await fs.stat(movedFile);
+        if (movedStat.dev !== (await fs.stat(restoreParent)).dev) throw new Error('Cross-volume moves are not supported.');
+        await moveWithoutOverwrite(operation.to_path, operation.from_path);
         this.db.prepare('UPDATE apply_operations SET status = ? WHERE id = ?').run('restored', operation.id);
+        this.db.prepare('UPDATE media SET relative_path = ? WHERE id = ?')
+          .run(path.relative(root, operation.from_path), operation.media_id);
         results.push({ source: operation.to_path, destination: operation.from_path, status: 'restored' });
       } catch (error) {
         results.push({ source: operation.to_path, destination: operation.from_path, status: 'conflict', error: error.message });
@@ -463,7 +548,7 @@ class PhotoSorter {
     const addresses = [];
     for (const [name, entries] of Object.entries(os.networkInterfaces())) {
       for (const entry of entries || []) {
-        if (entry.internal || entry.family !== 'IPv4') continue;
+        if (entry.internal || entry.family !== 'IPv4' || !isLocalNetworkAddress(entry.address)) continue;
         addresses.push({ name, address: entry.address, url: `http://${entry.address}:${port}` });
       }
     }
@@ -472,17 +557,37 @@ class PhotoSorter {
 
   async listen(port = Number(process.env.PHOTO_SORTER_PORT) || 43127) {
     const { createServer } = require('node:http');
-    this.server = createServer((request, response) => {
+    const privateAddresses = [...new Set(Object.values(os.networkInterfaces()).flatMap((entries) =>
+      (entries || []).filter((entry) => !entry.internal && entry.family === 'IPv4'
+        && isLocalNetworkAddress(entry.address)).map((entry) => entry.address)))];
+    const bindAddresses = ['127.0.0.1', ...privateAddresses];
+    const makeServer = () => createServer((request, response) => {
       this.handleRequest(request, response).catch((error) => {
         if (!response.headersSent) this.sendJson(response, error.status || 400, { error: error.message });
         else response.destroy();
       });
     });
-    await new Promise((resolve, reject) => {
-      this.server.once('error', reject);
-      this.server.listen(port, '0.0.0.0', resolve);
-    });
-    return this.server.address().port;
+    for (let index = 0; index < bindAddresses.length; index += 1) {
+      const server = makeServer();
+      try {
+        await new Promise((resolve, reject) => {
+          server.once('error', reject);
+          server.listen(index === 0 ? port : this.port, bindAddresses[index], resolve);
+        });
+        this.servers.push(server);
+        if (index === 0) {
+          this.server = server;
+          this.port = server.address().port;
+        }
+      } catch (error) {
+        server.close();
+        if (index === 0) {
+          this.close();
+          throw error;
+        }
+      }
+    }
+    return this.port;
   }
 
   sendJson(response, status, value, headers = {}) {
@@ -566,7 +671,7 @@ class PhotoSorter {
         });
       }
       if (request.method === 'GET' && url.pathname === '/api/network') {
-        return this.sendJson(response, 200, { addresses: this.localAddresses(this.server.address().port) });
+        return this.sendJson(response, 200, { addresses: this.localAddresses(this.port) });
       }
       this.requireSession(request);
       if (request.method === 'GET' && url.pathname === '/api/collections') {
@@ -691,6 +796,7 @@ module.exports = {
   VIDEO_EXTENSIONS,
   PhotoSorter,
   defaultDataDirectory,
+  isLocalNetworkAddress,
   isWithin,
   numberedDestination,
   pathsOverlap,
