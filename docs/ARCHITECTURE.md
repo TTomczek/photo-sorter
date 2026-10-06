@@ -13,7 +13,7 @@ This document describes what the repository implements today, not the complete M
 
 ## Data and API
 
-The SQLite database is `photo-sorter.sqlite` in the OS app-data directory; `PHOTO_SORTER_DATA_DIR` overrides that directory. The current schema is created with `CREATE TABLE IF NOT EXISTS`; a versioned migration system is not implemented. Tables hold one account, collections, roots, indexed media, audit events, apply batches, and apply operations. Sessions and pending apply plans live in memory, so restarting the host requires login again and discards any unconfirmed plan.
+The SQLite database is `photo-sorter.sqlite` in the OS app-data directory; `PHOTO_SORTER_DATA_DIR` overrides that directory. The current schema is created with `CREATE TABLE IF NOT EXISTS`; a versioned migration system is not implemented. Tables hold one account, collections, roots, indexed media, per-device review state, expiring media locks, decision history, audit events, apply batches, and apply operations. Sessions and pending apply plans live in memory, so restarting the host requires login again and discards any unconfirmed plan. Login issues a random, persistent HttpOnly device cookie; it identifies local review state but does not keep an authentication session alive across restart.
 
 All data and media API routes except setup status, login/setup/logout, and LAN address discovery require the session cookie. Login also issues a long-lived, HttpOnly device identifier used only for per-device review state and edit locks; the authentication session itself still expires on host restart. The API currently provides:
 
@@ -33,7 +33,7 @@ All data and media API routes except setup status, login/setup/logout, and LAN a
 | `POST /api/restore` | Restore completed operations from the latest batch containing a completed move |
 | `GET /api/audit` | Read the most recent 200 audit events |
 
-There is no API for root removal/archival, general settings, audit export/clear, or scan/watch progress.
+There is no API for root removal/archival, general settings, audit export/clear, scan/watch progress, or preview-cache management.
 
 ## Scanning and media
 
@@ -47,7 +47,7 @@ The interface fetches category pages (60 items by default) and offers previous/n
 
 ## Decisions and file operations
 
-Decisions update the database immediately, not the filesystem. The review view supports arrow keys, swipe gestures, explicit buttons, category filters, and video playback. The grid can be ordered by modified time ascending/descending or filename. It does **not** read capture/EXIF dates. Category, sort order, current item, and page are persisted per device and collection. The current item's 60-second lock is renewed every 20 seconds while the page is active; another device cannot change a locked item's decision. Undo/redo applies to the signed-in device's decision history and refuses to overwrite a newer decision from another device.
+Decisions update the database immediately, not the filesystem. The review view supports arrow keys, swipe gestures, explicit buttons, category filters, and video playback. The grid can be ordered by modified time ascending/descending or filename. It does **not** read capture/EXIF dates. Category, sort order, current item, and page are persisted per device and collection. The current item's 60-second lock is renewed every 20 seconds while the page is visible; another device cannot change a locked item's decision. Undo/redo applies to the signed-in device's decision history, obtains the item lock, and refuses to overwrite a newer decision from another device. This does not yet provide live queue refresh or synchronously notify other clients.
 
 Apply currently plans `delete` and `unsure` moves. It shows a count and up to five source/destination examples, then requires a separate confirmation. The plan expires after ten minutes. Files are placed in the root's `deleted` or `unsure` folder with their relative subfolder structure preserved. Existing output folders without the app marker require explicit reuse approval. Name collisions receive ` (1)`, ` (2)`, and so on before the extension. Root identity and output paths are checked again before moving.
 
@@ -67,12 +67,14 @@ Audit rows record account/collection/root creation, scans and scan errors, decis
 | Previews | Browser-native rendering and range-based video serving are implemented. Generated thumbnails/posters and configurable LRU cache are absent. |
 | Apply/restore | Two-step confirmation, output-folder consent, relative paths, collision numbering, no-overwrite moves, first-failure stop, journal rows, and latest completed-batch restore are implemented. Full keep/category reconciliation, comprehensive interrupted-batch handling, and a broader apply review/count by category remain incomplete. |
 | Audit/help | Basic persistent audit browsing and in-app quick help are implemented. Export, explicit clear, complete audit coverage, and an uninstall data warning are absent. |
-| Packaging and tests | Per-OS build commands and Ubuntu/Windows/macOS CI build/test jobs are configured. Automated tests exercise the HTTP/domain workflow on the current runner; they do not automate a real Electron UI, phone connection, or native picker across operating systems. |
+| Packaging and tests | Per-OS package commands are available. CI runs lint, tests, and unpacked application builds on Ubuntu/Windows/macOS, then uploads each platform's build artifact. Automated tests exercise the HTTP/domain workflow; they do not automate a real Electron UI, phone connection, or native picker across operating systems. |
 | Deferred by product decision | PWA/passkeys, German localization, theme/grid-density controls, cloud access, and automatic backups are not part of the MVP. |
 
 ## Validation commands
 
 - `npm test` runs all Node test suites.
+- `npm run lint` runs ESLint.
 - `npm run test:unit` and `npm run test:e2e` run the unit and HTTP workflow suites separately. The `e2e` suite name refers to API workflow tests; it does not launch Electron or a phone browser.
 - `npm run build` creates an unpacked package for the current OS.
 - `npm run dist:win`, `npm run dist:mac`, and `npm run dist:linux` request the corresponding NSIS, DMG, and AppImage packages.
+- GitHub Actions runs lint, tests, and `npm run build` on all three desktop OSes for pushes and pull requests; successful jobs upload the unpacked application as artifacts.

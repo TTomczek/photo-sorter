@@ -10,7 +10,7 @@
 
 `npm run lint` runs ESLint. `npm test` runs the unit suite and HTTP workflow tests. `npm run test:unit` and `npm run test:e2e` run either suite independently. `npm run build` checks and packages the unpacked app for the current OS; `npm run dist:win`, `npm run dist:mac`, and `npm run dist:linux` build the native installer/package target.
 
-GitHub Actions runs lint, tests, and the unpacked build on Ubuntu, Windows, and macOS for pushes and pull requests. Each successful platform job uploads its unpacked application as a downloadable workflow artifact.
+GitHub Actions runs lint, tests, and the unpacked build on Ubuntu, Windows, and macOS for pushes and pull requests. Each successful platform job uploads its unpacked application as a downloadable workflow artifact retained for 14 days. CI does not currently produce the native NSIS, DMG, or AppImage installers; those are requested separately with the `dist:*` commands.
 
 ## Account recovery and app data
 
