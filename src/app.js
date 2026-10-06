@@ -272,6 +272,7 @@ class PhotoSorter {
     let base;
     try {
       base = await fs.realpath(root.path);
+      if (!comparePaths(base, root.path)) throw new Error('Registered root no longer resolves to its original directory.');
       const directories = [base];
       const upsert = this.db.prepare(`
         INSERT INTO media(id, root_id, relative_path, size, modified_at, category)
@@ -515,7 +516,11 @@ class PhotoSorter {
   }
 
   async restoreLatest() {
-    const batch = this.db.prepare('SELECT id FROM apply_batches ORDER BY created_at DESC LIMIT 1').get();
+    const batch = this.db.prepare(`
+      SELECT b.id FROM apply_batches b
+      WHERE EXISTS (SELECT 1 FROM apply_operations o WHERE o.batch_id = b.id AND o.status = 'completed')
+      ORDER BY b.created_at DESC LIMIT 1
+    `).get();
     if (!batch) return { results: [], message: 'There is no apply batch to restore.' };
     const operations = this.db.prepare(`
       SELECT * FROM apply_operations WHERE batch_id = ? AND status = 'completed' ORDER BY id DESC
@@ -527,14 +532,16 @@ class PhotoSorter {
         if (!root || !isWithin(root, operation.from_path) || !isWithin(root, operation.to_path)) {
           throw new Error('Restore path is outside the registered root.');
         }
+        const canonicalRoot = await fs.realpath(root);
+        if (!comparePaths(canonicalRoot, root)) throw new Error('Registered root no longer resolves to its original directory.');
         const movedFile = await fs.realpath(operation.to_path);
-        if (!isWithin(await fs.realpath(root), movedFile)) throw new Error('Moved file is outside the registered root.');
+        if (!isWithin(canonicalRoot, movedFile)) throw new Error('Moved file is outside the registered root.');
         if (await pathExists(operation.from_path)) {
           throw new Error('Original path is occupied; refusing to overwrite.');
         }
         await fs.mkdir(path.dirname(operation.from_path), { recursive: true });
         const restoreParent = await fs.realpath(path.dirname(operation.from_path));
-        if (!isWithin(await fs.realpath(root), restoreParent)) throw new Error('Restore destination escaped its registered root.');
+        if (!isWithin(canonicalRoot, restoreParent)) throw new Error('Restore destination escaped its registered root.');
         const movedStat = await fs.stat(movedFile);
         if (movedStat.dev !== (await fs.stat(restoreParent)).dev) throw new Error('Cross-volume moves are not supported.');
         await moveWithoutOverwrite(operation.to_path, operation.from_path);
@@ -741,8 +748,12 @@ class PhotoSorter {
     if (!item) return this.sendJson(response, 404, { error: 'Media item not found.' });
     let resolved;
     try {
+      const canonicalRoot = await fs.realpath(item.path);
+      if (!comparePaths(canonicalRoot, item.path)) {
+        return this.sendJson(response, 403, { error: 'Registered root no longer resolves to its original directory.' });
+      }
       resolved = await fs.realpath(item.fullPath);
-      if (!isWithin(await fs.realpath(item.path), resolved)) return this.sendJson(response, 403, { error: 'Media is outside its registered root.' });
+      if (!isWithin(canonicalRoot, resolved)) return this.sendJson(response, 403, { error: 'Media is outside its registered root.' });
     } catch {
       return this.sendJson(response, 404, { error: 'Media is unavailable.' });
     }
@@ -769,10 +780,19 @@ class PhotoSorter {
         'Content-Range': `bytes ${start}-${end}/${stat.size}`, 'Cache-Control': 'no-store',
         'X-Content-Type-Options': 'nosniff',
       });
-      return require('node:fs').createReadStream(resolved, { start, end }).pipe(response);
+      return this.pipeMedia(resolved, response, { start, end });
     }
     response.writeHead(200, { 'Content-Type': mime, 'Content-Length': stat.size, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' });
-    return require('node:fs').createReadStream(resolved).pipe(response);
+    return this.pipeMedia(resolved, response);
+  }
+
+  pipeMedia(filename, response, range) {
+    const stream = fsSync.createReadStream(filename, range);
+    stream.on('error', () => {
+      if (response.headersSent) response.destroy();
+      else this.sendJson(response, 404, { error: 'Media became unavailable.' });
+    });
+    return stream.pipe(response);
   }
 
   async serveUi(pathname, response) {

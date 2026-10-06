@@ -101,7 +101,10 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
   assert.equal(await fs.readFile(path.join(root, 'deleted', 'trip', 'photo.jpg'), 'utf8'), 'original-photo');
   assert.equal(await fs.readFile(path.join(root, 'deleted', 'photo.jpg'), 'utf8'), 'pre-existing-file');
 
+  app.db.prepare('INSERT INTO apply_batches(id, created_at) VALUES (?, ?)')
+    .run('empty-failed-batch', new Date(Date.now() + 1000).toISOString());
   const restored = await api('/api/restore', { method: 'POST', body: '{}' });
+  assert.equal(restored.body.batchId, applied.body.batchId);
   assert.equal(restored.body.results[0].status, 'restored');
   assert.equal(await fs.readFile(path.join(root, 'trip', 'photo.jpg'), 'utf8'), 'original-photo');
 
@@ -150,4 +153,44 @@ test('a symlinked output directory cannot redirect an apply outside its register
   assert.match(result.results[0].error, /real directory/);
   assert.equal(await fs.readFile(path.join(root, 'keep-safe.jpg'), 'utf8'), 'original');
   assert.equal(await fs.readFile(path.join(externalOutput, 'keep-safe.jpg'), 'utf8'), 'outside-original');
+});
+
+test('replacing a registered root with a symlink cannot expose its new target', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-root-symlink-'));
+  const dataDirectory = path.join(temporary, 'data');
+  const root = path.join(temporary, 'photos');
+  const originalDirectory = path.join(temporary, 'registered-photos');
+  const externalDirectory = path.join(temporary, 'external-photos');
+  await fs.mkdir(root);
+  await fs.mkdir(externalDirectory);
+  await fs.writeFile(path.join(root, 'inside.jpg'), 'registered-original');
+  await fs.writeFile(path.join(externalDirectory, 'inside.jpg'), 'outside-secret');
+  const app = await new PhotoSorter({ dataDirectory }).initialize();
+  t.after(async () => {
+    app.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+  await app.createPassword('a secure test password');
+  const collectionId = app.createCollection('Root identity');
+  const rootId = await app.addRoot(collectionId, root);
+  await fs.rename(root, originalDirectory);
+  try {
+    await fs.symlink(externalDirectory, root, 'dir');
+  } catch {
+    return t.skip('Directory symlinks are unavailable.');
+  }
+  await assert.rejects(app.scanRoot(rootId), /original directory/);
+
+  const port = await app.listen(0);
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const login = await fetch(`${baseUrl}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'a secure test password' }),
+  });
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const item = app.listMedia({ collectionId, category: 'unseen' }).items[0];
+  const preview = await fetch(`${baseUrl}/api/media/${item.id}/content`, { headers: { Cookie: cookie } });
+  assert.equal(preview.status, 403);
+  assert.equal(await fs.readFile(path.join(externalDirectory, 'inside.jpg'), 'utf8'), 'outside-secret');
 });
