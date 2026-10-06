@@ -2,6 +2,8 @@
 
 Photo Sorter is a local-first Electron application for organizing photos and videos on the computer that stores them. Its responsive web interface can also be opened by phones on the same private network.
 
+This repository contains an early working foundation, not the complete MVP described in the implementation handoff. See [implementation status](docs/ARCHITECTURE.md#current-scope-by-handoff-area) for what works and what remains unimplemented.
+
 ## Development
 
 - Requires Node.js 22.13 or newer and npm.
