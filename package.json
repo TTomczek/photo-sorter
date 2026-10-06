@@ -18,7 +18,8 @@
     "reset-password": "node scripts/reset-password.js",
     "dist:win": "electron-builder --win",
     "dist:mac": "electron-builder --mac",
-    "dist:linux": "electron-builder --linux"
+    "dist:linux": "electron-builder --linux",
+    "lint": "eslint ."
   },
   "build": {
     "appId": "local.photosorter",
