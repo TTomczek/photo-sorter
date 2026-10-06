@@ -38,6 +38,12 @@
             <input id="collection-name" aria-label="New collection name" placeholder="New collection" maxlength="80" required>
             <button type="submit">Create</button>
           </form>
+          <label for="sort-order">Sort</label>
+          <select id="sort-order">
+            <option value="date-asc">Modified time ↑</option>
+            <option value="date-desc">Modified time ↓</option>
+            <option value="filename">Filename</option>
+          </select>
           <button id="add-root" type="button" class="hidden">Choose folder</button>
         </div>
         <div class="lan panel">
@@ -79,7 +85,8 @@
           <p id="status" role="status"></p>
           <div id="media-grid" class="media-grid"></div>
           <div class="paging">
-            <button id="load-more" type="button" class="hidden">Load more</button>
+            <button id="previous-page" type="button" class="hidden">Previous page</button>
+            <button id="load-more" type="button" class="hidden">Next page</button>
           </div>
         </section>
         <section id="audit-panel" class="panel hidden">

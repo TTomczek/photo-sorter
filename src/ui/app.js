@@ -1,5 +1,6 @@
 const state = {
   category: 'unseen',
+  sort: 'date-asc',
   collectionId: '',
   items: [],
   index: 0,
@@ -90,22 +91,25 @@ function renderGrid() {
     card.append(createPreview(item), select, element('small', `${item.kind} · ${formatBytes(item.size)}${item.category ? ` · ${item.category}` : ''}`, 'media-name'));
     mediaGrid.append(card);
   }
-  byId('load-more').classList.toggle('hidden', state.items.length >= state.total);
+  byId('load-more').classList.toggle('hidden', state.offset + state.items.length >= state.total);
+  byId('previous-page').classList.toggle('hidden', state.offset === 0);
   renderCurrent();
 }
 
-async function loadMedia({ append = false } = {}) {
+async function loadMedia() {
   if (!state.collectionId) {
     state.items = [];
     state.total = 0;
     renderGrid();
     return;
   }
-  const offset = append ? state.offset : 0;
-  const data = await request(`/api/media?collectionId=${encodeURIComponent(state.collectionId)}&category=${state.category}&offset=${offset}&limit=${state.limit}`);
-  state.items = append ? [...state.items, ...data.items] : data.items;
-  state.offset = state.items.length;
+  const data = await request(`/api/media?collectionId=${encodeURIComponent(state.collectionId)}&category=${state.category}&sort=${state.sort}&offset=${state.offset}&limit=${state.limit}`);
+  state.items = data.items;
   state.total = data.total;
+  if (!state.items.length && state.offset > 0 && state.offset >= state.total) {
+    state.offset = Math.max(0, Math.floor(Math.max(0, state.total - 1) / state.limit) * state.limit);
+    return loadMedia();
+  }
   state.index = Math.min(state.index, Math.max(0, state.items.length - 1));
   byId('collection-title').textContent = `${state.category[0].toUpperCase()}${state.category.slice(1)} items`;
   renderGrid();
@@ -128,6 +132,7 @@ async function loadCollections(preferredId) {
   }
   state.collectionId = preferredId && result.collections.some((item) => item.id === preferredId)
     ? preferredId : (select.value || result.collections[0].id);
+  state.offset = 0;
   select.value = state.collectionId;
   const collection = result.collections.find((item) => item.id === state.collectionId);
   setStatus(collection.offline_roots ? `${collection.offline_roots} root(s) are currently offline.` : '');
@@ -206,9 +211,7 @@ async function decide(category, item = state.items[state.index]) {
     if (state.category !== category) {
       state.total = Math.max(0, state.total - 1);
       state.index = Math.min(state.index, Math.max(0, state.items.length - 1));
-      if (state.items.length < state.limit && state.items.length < state.total) {
-        await loadMedia();
-      } else renderGrid();
+      await loadMedia();
     } else {
       const index = state.items.findIndex((candidate) => candidate.id === item.id);
       if (index >= 0) state.index = index;
@@ -297,6 +300,12 @@ byId('new-collection-form').addEventListener('submit', async (event) => {
 
 byId('collection').addEventListener('change', async (event) => {
   state.collectionId = event.target.value;
+  state.offset = 0;
+  await loadMedia();
+});
+byId('sort-order').addEventListener('change', async (event) => {
+  state.sort = event.target.value;
+  state.offset = 0;
   await loadMedia();
 });
 byId('add-root').addEventListener('click', async () => {
@@ -312,6 +321,7 @@ byId('filters').addEventListener('click', async (event) => {
   const button = event.target.closest('[data-category]');
   if (!button) return;
   state.category = button.dataset.category;
+  state.offset = 0;
   state.index = 0;
   for (const candidate of byId('filters').querySelectorAll('button')) {
     candidate.setAttribute('aria-pressed', String(candidate === button));
@@ -327,7 +337,16 @@ byId('next').addEventListener('click', () => {
 document.querySelectorAll('[data-decision]').forEach((button) => {
   button.addEventListener('click', () => decide(button.dataset.decision));
 });
-byId('load-more').addEventListener('click', () => loadMedia({ append: true }).catch((error) => setStatus(error.message, true)));
+byId('load-more').addEventListener('click', () => {
+  state.offset += state.limit;
+  state.index = 0;
+  loadMedia().catch((error) => setStatus(error.message, true));
+});
+byId('previous-page').addEventListener('click', () => {
+  state.offset = Math.max(0, state.offset - state.limit);
+  state.index = 0;
+  loadMedia().catch((error) => setStatus(error.message, true));
+});
 byId('apply').addEventListener('click', applyDecisions);
 byId('restore').addEventListener('click', async () => {
   const choice = await showDialog('Restore latest apply', ['Move successfully applied files back to their original paths. Occupied paths will be reported and never overwritten.'], { confirmLabel: 'Restore batch' });

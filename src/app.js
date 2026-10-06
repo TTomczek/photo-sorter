@@ -337,7 +337,7 @@ class PhotoSorter {
     return indexed;
   }
 
-  listMedia({ collectionId, category, offset = 0, limit = 60 }) {
+  listMedia({ collectionId, category, sort = 'date-asc', offset = 0, limit = 60 }) {
     const filters = ['r.collection_id = ?'];
     const values = [collectionId];
     if (category === 'unseen') filters.push('m.category IS NULL');
@@ -345,6 +345,12 @@ class PhotoSorter {
       filters.push('m.category = ?');
       values.push(category === 'unseen' ? null : category);
     }
+    const orderBy = {
+      'date-asc': 'm.modified_at ASC, m.relative_path COLLATE NOCASE ASC',
+      'date-desc': 'm.modified_at DESC, m.relative_path COLLATE NOCASE ASC',
+      filename: 'm.relative_path COLLATE NOCASE ASC',
+    }[sort];
+    if (!orderBy) throw new Error('Invalid sort order.');
     const items = this.db.prepare(`
       SELECT m.id, m.relative_path, m.size, m.modified_at, m.category,
         CASE WHEN lower(m.relative_path) GLOB '*.mp4' OR lower(m.relative_path) GLOB '*.mov'
@@ -356,7 +362,7 @@ class PhotoSorter {
         r.online, r.read_only
       FROM media m JOIN roots r ON r.id = m.root_id
       WHERE ${filters.join(' AND ')}
-      ORDER BY m.modified_at ASC, m.relative_path COLLATE NOCASE ASC
+      ORDER BY ${orderBy}
       LIMIT ? OFFSET ?
     `).all(...values, limit, offset);
     const total = this.db.prepare(`
@@ -685,10 +691,12 @@ class PhotoSorter {
         const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 60));
         const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
         const category = url.searchParams.get('category') || 'unseen';
+        const sort = url.searchParams.get('sort') || 'date-asc';
         if (!CATEGORIES.has(category)) throw new Error('Invalid category.');
         const result = this.listMedia({
           collectionId: url.searchParams.get('collectionId'),
           category,
+          sort,
           offset,
           limit,
         });

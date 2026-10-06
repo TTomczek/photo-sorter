@@ -24,6 +24,11 @@ async function createWindow() {
       sandbox: true,
     },
   });
+  const localOrigin = `http://127.0.0.1:${serverPort}`;
+  window.webContents.on('will-navigate', (event, target) => {
+    if (new URL(target).origin !== localOrigin) event.preventDefault();
+  });
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.on('close', (event) => {
     if (!quitting) {
       event.preventDefault();
@@ -44,6 +49,10 @@ app.whenReady().then(async () => {
   service = await new PhotoSorter().initialize();
   serverPort = await service.listen();
   ipcMain.handle('photo-sorter:choose-root', async (_event, collectionId) => {
+    if (_event.senderFrame !== _event.sender.mainFrame
+      || new URL(_event.senderFrame.url).origin !== `http://127.0.0.1:${serverPort}`) {
+      throw new Error('Folder selection is only available in the host app.');
+    }
     if (typeof collectionId !== 'string' || collectionId.length > 64) throw new Error('Invalid collection.');
     const result = await dialog.showOpenDialog(window, {
       title: 'Choose a photo or video folder',
@@ -54,6 +63,10 @@ app.whenReady().then(async () => {
     return { rootId };
   });
   ipcMain.handle('photo-sorter:set-autostart', (_event, enabled) => {
+    if (_event.senderFrame !== _event.sender.mainFrame
+      || new URL(_event.senderFrame.url).origin !== `http://127.0.0.1:${serverPort}`) {
+      throw new Error('This setting is only available in the host app.');
+    }
     if (typeof enabled !== 'boolean') throw new Error('Invalid autostart setting.');
     app.setLoginItemSettings({ openAtLogin: enabled });
     return app.getLoginItemSettings().openAtLogin;

@@ -15,6 +15,7 @@
     "test:unit": "node --test test/unit/*.test.js",
     "test:e2e": "node --test test/e2e/*.test.js",
     "build": "electron-builder --dir",
+    "reset-password": "node scripts/reset-password.js",
     "dist:win": "electron-builder --win",
     "dist:mac": "electron-builder --mac",
     "dist:linux": "electron-builder --linux"
@@ -24,6 +25,7 @@
     "productName": "Photo Sorter",
     "files": [
       "src/**/*",
+      "scripts/**/*",
       "package.json"
     ],
     "directories": {
@@ -42,5 +44,8 @@
   "devDependencies": {
     "electron": "^44.5.1",
     "electron-builder": "^26.15.3"
+  },
+  "overrides": {
+    "@electron/get": "^5.1.0"
   }
 }
