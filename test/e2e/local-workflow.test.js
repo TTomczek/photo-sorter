@@ -510,8 +510,13 @@ test('an interrupted hard-link move is reported precisely and reconciled on rest
   for (const item of items) app.setDecision(item.id, 'delete');
   const plan = await app.planApply(collectionId);
   const originalUnlink = fs.unlink;
+  const injectedSource = path.resolve(path.join(root, 'a.jpg'));
   fs.unlink = async (filename) => {
-    if (filename === path.join(root, 'a.jpg')) {
+    const unlinkPath = path.resolve(filename);
+    const matchesInjectedSource = process.platform === 'win32'
+      ? unlinkPath.toLowerCase() === injectedSource.toLowerCase()
+      : unlinkPath === injectedSource;
+    if (matchesInjectedSource) {
       throw Object.assign(new Error('Injected unlink failure.'), { code: 'EIO' });
     }
     return originalUnlink(filename);
@@ -572,7 +577,7 @@ test('an interrupted hard-link move is reported precisely and reconciled on rest
   assert.equal(await fs.readFile(path.join(root, 'deleted', 'b.jpg'), 'utf8'), 'second-original');
 });
 
-test('restart recovery completes a restore whose filesystem move finished before its journal update', async (t) => {
+test('restart recovery resolves a completed restore when its reverse-move reference is stale', async (t) => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-restore-recovery-'));
   const dataDirectory = path.join(temporary, 'data');
   const root = path.join(temporary, 'photos');
@@ -606,6 +611,13 @@ test('restart recovery completes a restore whose filesystem move finished before
     appliedOperation.category,
     appliedOperation.id,
   );
+  assert.equal(
+    app.db.prepare('SELECT reverses_operation_id FROM apply_operations WHERE id = ?')
+      .get(restoreJournal.lastInsertRowid).reverses_operation_id,
+    appliedOperation.id,
+  );
+  app.db.prepare('UPDATE apply_operations SET reverses_operation_id = -1 WHERE id = ?')
+    .run(restoreJournal.lastInsertRowid);
   await fs.link(moved, original);
   await fs.unlink(moved);
 

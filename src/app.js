@@ -300,13 +300,36 @@ class PhotoSorter {
           if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Journal destination is not a regular file.');
         }
         if (!sourceExists && destinationExists) {
+          if (operation.operation_type === 'restore') {
+            let reversedMove = operation.reverses_operation_id === null
+              || operation.reverses_operation_id === undefined
+              ? undefined
+              : this.db.prepare(`
+                SELECT id, status, from_path, to_path FROM apply_operations
+                WHERE id = ? AND operation_type = 'move' AND media_id = ? AND root_id = ?
+              `).get(operation.reverses_operation_id, operation.media_id, operation.root_id);
+            if (!reversedMove || !comparePaths(reversedMove.from_path, operation.to_path)
+              || !comparePaths(reversedMove.to_path, operation.from_path)) {
+              reversedMove = this.db.prepare(`
+                SELECT id, status, from_path, to_path FROM apply_operations
+                WHERE operation_type = 'move' AND media_id = ? AND root_id = ?
+                  AND status IN ('completed', 'restored')
+                ORDER BY id DESC
+              `).all(operation.media_id, operation.root_id)
+                .find((candidate) => comparePaths(candidate.from_path, operation.to_path)
+                  && comparePaths(candidate.to_path, operation.from_path));
+            }
+            if (!reversedMove || !['completed', 'restored'].includes(reversedMove.status)) {
+              throw new Error('Restore journal does not reference a completed move.');
+            }
+            if (reversedMove.status === 'completed') {
+              this.db.prepare("UPDATE apply_operations SET status = 'restored' WHERE id = ?")
+                .run(reversedMove.id);
+            }
+          }
           this.db.prepare("UPDATE apply_operations SET status = 'completed' WHERE id = ?").run(operation.id);
           this.db.prepare('UPDATE media SET relative_path = ?, present = 1 WHERE id = ?')
             .run(path.relative(root, operation.to_path), operation.media_id);
-          if (operation.operation_type === 'restore' && operation.reverses_operation_id) {
-            this.db.prepare("UPDATE apply_operations SET status = 'restored' WHERE id = ?")
-              .run(operation.reverses_operation_id);
-          }
           this.log(operation.operation_type === 'restore' ? 'restore_recovered' : 'apply_recovered', {
             batchId: operation.batch_id, mediaId: operation.media_id, status: 'completed',
           });
