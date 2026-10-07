@@ -16,9 +16,37 @@ const state = {
 };
 const byId = (id) => document.getElementById(id);
 const mediaGrid = byId('media-grid');
+const videoPosterObserver = typeof IntersectionObserver === 'undefined' ? null : new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    videoPosterObserver.unobserve(entry.target);
+    loadVideoPoster(entry.target);
+  }
+}, { rootMargin: '160px' });
 let stateSaveTimer;
 let scanPollTimer;
 let scanPollBusy = false;
+
+function loadVideoPoster(video) {
+  if (!video.isConnected) return;
+  video.addEventListener('loadeddata', () => {
+    if (!video.videoWidth || !video.videoHeight) return;
+    try {
+      const scale = Math.min(1, 640 / video.videoWidth, 640 / video.videoHeight);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+      video.poster = canvas.toDataURL('image/jpeg', 0.72);
+      video.removeAttribute('src');
+      video.load();
+    } catch {}
+  }, { once: true });
+  video.preload = 'metadata';
+  video.src = video.dataset.posterSource;
+  delete video.dataset.posterSource;
+  video.load();
+}
 
 function setDecisionButtons(enabled) {
   for (const button of document.querySelectorAll('[data-decision]')) {
@@ -130,10 +158,16 @@ function mediaUrl(item) {
 function createPreview(item, controls = false, cached = false) {
   if (item.kind === 'video') {
     const video = element('video');
-    video.src = mediaUrl(item);
     video.controls = controls;
-    video.preload = controls ? 'metadata' : 'none';
-    if (!controls) video.muted = true;
+    if (controls) {
+      video.src = mediaUrl(item);
+      video.preload = 'metadata';
+    } else {
+      video.muted = true;
+      video.dataset.posterSource = mediaUrl(item);
+      if (videoPosterObserver) videoPosterObserver.observe(video);
+      else loadVideoPoster(video);
+    }
     return video;
   }
   const image = element('img');
@@ -170,6 +204,9 @@ function renderCurrent() {
 }
 
 function renderGrid() {
+  for (const video of mediaGrid.querySelectorAll('video[data-poster-source]')) {
+    videoPosterObserver?.unobserve(video);
+  }
   mediaGrid.replaceChildren();
   for (const item of state.items) {
     const card = element('article', undefined, 'media-card');
