@@ -59,8 +59,9 @@ function generatedPng(red, green, blue, width = 96, height = 64) {
 async function createFixture({ imageCount = 3, existingOutput = false } = {}) {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-browser-'));
   const dataDirectory = path.join(temporary, 'data');
-  const root = path.join(temporary, 'library');
-  await fs.mkdir(root);
+  const rootDirectory = path.join(temporary, 'library');
+  await fs.mkdir(rootDirectory);
+  const root = await fs.realpath(rootDirectory);
   for (let index = 0; index < imageCount; index += 1) {
     const filename = TEST_IMAGE_NAMES[index] || `image-${String(index + 1).padStart(3, '0')}.png`;
     const color = index % 3;
@@ -208,11 +209,13 @@ test('first-run setup, generated image previews, review decisions, keyboard, und
     await expect(page.locator('#media-grid')).toContainText('01-red.png');
 
     await page.locator('#undo-decision').click();
-    await expect(page.locator('#status')).toContainText('Undid decision');
+    await expect.poll(() => fixture.app.db.prepare('SELECT category FROM media WHERE id = ?')
+      .get(item.id)?.category).toBe(null);
     await page.locator('#filters [data-category="unseen"]').click();
     await expect(page.locator('#media-grid')).toContainText('01-red.png');
     await page.locator('#redo-decision').click();
-    await expect(page.locator('#status')).toContainText('Redid decision');
+    await expect.poll(() => fixture.app.db.prepare('SELECT category FROM media WHERE id = ?')
+      .get(item.id)?.category).toBe('keep');
     await page.locator('#filters [data-category="keep"]').click();
     await expect(page.locator('#media-grid')).toContainText('01-red.png');
 
