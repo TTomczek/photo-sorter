@@ -82,6 +82,12 @@ class PhotoSorter {
     this.sessions = new Map();
     this.loginAttempts = new Map();
     this.applyPlans = new Map();
+    this.activeScans = new Map();
+    this.scanQueue = [];
+    this.queuedScans = new Set();
+    this.scanWaiters = new Map();
+    this.maxConcurrentScans = 2;
+    this.closed = false;
     this.db = null;
     this.server = null;
     this.servers = [];
@@ -113,6 +119,15 @@ class PhotoSorter {
         read_only INTEGER NOT NULL DEFAULT 0,
         active INTEGER NOT NULL DEFAULT 1,
         UNIQUE(collection_id, path)
+      );
+      CREATE TABLE IF NOT EXISTS scan_jobs (
+        root_id TEXT PRIMARY KEY REFERENCES roots(id),
+        status TEXT NOT NULL,
+        visited INTEGER NOT NULL DEFAULT 0,
+        indexed INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        started_at TEXT,
+        completed_at TEXT
       );
       CREATE TABLE IF NOT EXISTS media (
         id TEXT PRIMARY KEY,
@@ -179,6 +194,14 @@ class PhotoSorter {
     const rootColumns = this.db.prepare('PRAGMA table_info(roots)').all().map((column) => column.name);
     if (!rootColumns.includes('active')) this.db.exec('ALTER TABLE roots ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
     await this.recoverApplyOperations();
+    setImmediate(() => {
+      if (this.closed || !this.db) return;
+      const roots = this.db.prepare(`
+        SELECT r.id FROM roots r JOIN collections c ON c.id = r.collection_id
+        WHERE r.active = 1 AND c.active = 1
+      `).all();
+      for (const root of roots) this.startScan(root.id);
+    });
     return this;
   }
 
@@ -216,8 +239,35 @@ class PhotoSorter {
   }
 
   close() {
-    for (const server of this.servers) server.close();
-    if (this.db) this.db.close();
+    this.closed = true;
+    const closingServers = this.servers.map((server) => new Promise((resolve) => {
+      if (!server.listening) return resolve();
+      server.close(resolve);
+    }));
+    const now = new Date().toISOString();
+    if (this.db) {
+      this.db.prepare(`
+        UPDATE scan_jobs SET status = 'cancelled', completed_at = ?
+        WHERE status IN ('queued', 'running')
+      `).run(now);
+    }
+    for (const rootId of this.queuedScans) {
+      this.scanWaiters.get(rootId)?.resolve(0);
+      this.scanWaiters.delete(rootId);
+    }
+    this.queuedScans.clear();
+    this.scanQueue = [];
+    const closeDatabase = () => {
+      if (this.db) {
+        this.db.close();
+        this.db = null;
+      }
+    };
+    if (this.activeScans.size || closingServers.length) {
+      return Promise.allSettled([...this.activeScans.values(), ...closingServers]).then(closeDatabase);
+    }
+    closeDatabase();
+    return Promise.resolve();
   }
 
   log(action, details) {
@@ -351,7 +401,7 @@ class PhotoSorter {
     return { collectionId };
   }
 
-  async addRoot(collectionId, selectedPath) {
+  async addRoot(collectionId, selectedPath, { waitForScan = true } = {}) {
     const collection = this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId);
     if (!collection) throw new Error('Collection not found.');
     if (typeof selectedPath !== 'string' || !path.isAbsolute(selectedPath)) throw new Error('Invalid selected folder.');
@@ -374,7 +424,8 @@ class PhotoSorter {
       this.db.prepare('UPDATE roots SET active = 1, online = 1, read_only = ? WHERE id = ?')
         .run((rootStat.mode & 0o222) === 0 ? 1 : 0, retainedRoot.id);
       this.log('root_readded', { collectionId, rootId: retainedRoot.id, path: canonicalPath });
-      await this.scanRoot(retainedRoot.id);
+      if (waitForScan) await this.scanRoot(retainedRoot.id);
+      else this.startScan(retainedRoot.id);
       return retainedRoot.id;
     }
     const id = crypto.randomUUID();
@@ -382,13 +433,101 @@ class PhotoSorter {
     this.db.prepare('INSERT INTO roots(id, collection_id, path, read_only) VALUES (?, ?, ?, ?)')
       .run(id, collectionId, canonicalPath, readOnly ? 1 : 0);
     this.log('root_added', { collectionId, rootId: id, path: canonicalPath, readOnly });
-    await this.scanRoot(id);
+    if (waitForScan) await this.scanRoot(id);
+    else this.startScan(id);
     return id;
   }
 
-  async scanRoot(rootId) {
+  startScan(rootId) {
+    if (this.activeScans.has(rootId) || this.queuedScans.has(rootId)) return { started: false, rootId };
+    const root = this.db.prepare('SELECT id FROM roots WHERE id = ? AND active = 1').get(rootId);
+    if (!root) throw new Error('Root not found.');
+    this.db.prepare(`
+      INSERT INTO scan_jobs(root_id, status, visited, indexed, error, started_at, completed_at)
+      VALUES (?, 'queued', 0, 0, NULL, NULL, NULL)
+      ON CONFLICT(root_id) DO UPDATE SET status = 'queued', visited = 0, indexed = 0,
+        error = NULL, started_at = NULL, completed_at = NULL
+    `).run(rootId);
+    let resolveTask;
+    let rejectTask;
+    const task = new Promise((resolve, reject) => {
+      resolveTask = resolve;
+      rejectTask = reject;
+    });
+    task.catch(() => {});
+    this.scanWaiters.set(rootId, { task, resolve: resolveTask, reject: rejectTask });
+    this.queuedScans.add(rootId);
+    this.scanQueue.push(rootId);
+    this.pumpScanQueue();
+    return { started: true, rootId };
+  }
+
+  scanRoot(rootId) {
+    if (this.scanWaiters.has(rootId)) return this.scanWaiters.get(rootId).task;
+    if (this.activeScans.has(rootId)) return this.activeScans.get(rootId);
+    if (!this.queuedScans.has(rootId)) this.startScan(rootId);
+    return this.scanWaiters.get(rootId)?.task || Promise.resolve(0);
+  }
+
+  pumpScanQueue() {
+    while (!this.closed && this.activeScans.size < this.maxConcurrentScans && this.scanQueue.length) {
+      const rootId = this.scanQueue.shift();
+      this.queuedScans.delete(rootId);
+      const waiter = this.scanWaiters.get(rootId);
+      if (!waiter) continue;
+      const task = new Promise((resolve) => setImmediate(resolve))
+        .then(() => this.performScanRoot(rootId))
+        .then((result) => {
+          waiter.resolve(result);
+          return result;
+        }, (error) => {
+          waiter.reject(error);
+          waiter.resolve(0);
+          return 0;
+        })
+        .finally(() => {
+          this.activeScans.delete(rootId);
+          this.scanWaiters.delete(rootId);
+          this.pumpScanQueue();
+        });
+      this.activeScans.set(rootId, task);
+    }
+  }
+
+  startCollectionScan(collectionId) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    const roots = this.db.prepare('SELECT id FROM roots WHERE collection_id = ? AND active = 1').all(collectionId);
+    return roots.map((root) => this.startScan(root.id));
+  }
+
+  listScanStatus(collectionId) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    return this.db.prepare(`
+      SELECT r.id AS rootId, r.path, r.online, s.status, s.visited, s.indexed, s.error,
+        s.started_at AS startedAt, s.completed_at AS completedAt
+      FROM roots r LEFT JOIN scan_jobs s ON s.root_id = r.id
+      WHERE r.collection_id = ? AND r.active = 1 ORDER BY r.path COLLATE NOCASE
+    `).all(collectionId).map((scan) => ({
+      ...scan,
+      status: scan.status || 'idle',
+      visited: scan.visited || 0,
+      indexed: scan.indexed || 0,
+    }));
+  }
+
+  async performScanRoot(rootId) {
     const root = this.db.prepare('SELECT * FROM roots WHERE id = ? AND active = 1').get(rootId);
     if (!root) throw new Error('Root not found.');
+    this.db.prepare(`
+      INSERT INTO scan_jobs(root_id, status, visited, indexed, started_at)
+      VALUES (?, 'running', 0, 0, ?)
+      ON CONFLICT(root_id) DO UPDATE SET status = 'running', visited = 0, indexed = 0,
+        error = NULL, started_at = excluded.started_at, completed_at = NULL
+    `).run(rootId, new Date().toISOString());
     let base;
     try {
       base = await fs.realpath(root.path);
@@ -403,7 +542,20 @@ class PhotoSorter {
           size = excluded.size, modified_at = excluded.modified_at
       `);
       let entriesVisited = 0;
+      let entriesExamined = 0;
+      const updateProgress = (status, error = null) => {
+        this.db.prepare(`
+          UPDATE scan_jobs SET status = ?, visited = ?, indexed = ?, error = ?,
+            completed_at = CASE WHEN ? IN ('completed', 'failed', 'cancelled') THEN ? ELSE NULL END
+          WHERE root_id = ?
+        `).run(status, entriesExamined, entriesVisited, error,
+          status, status === 'running' ? null : new Date().toISOString(), rootId);
+      };
       while (directories.length) {
+        if (this.closed || !this.db.prepare('SELECT 1 FROM roots WHERE id = ? AND active = 1').get(rootId)) {
+          if (!this.closed) updateProgress('cancelled');
+          return entriesVisited;
+        }
         const directory = directories.pop();
         let entries;
         try {
@@ -416,6 +568,12 @@ class PhotoSorter {
           continue;
         }
         for (const entry of entries) {
+          entriesExamined += 1;
+          if (entriesExamined % 128 === 0) {
+            updateProgress('running');
+            await new Promise((resolve) => setImmediate(resolve));
+            if (this.closed) return entriesVisited;
+          }
           if (entry.isSymbolicLink()) continue;
           const fullPath = path.join(directory, entry.name);
           if (directory === base && (entry.name === 'deleted' || entry.name === 'unsure')) continue;
@@ -440,11 +598,20 @@ class PhotoSorter {
         }
       }
       this.db.prepare('UPDATE roots SET online = 1 WHERE id = ?').run(rootId);
+      updateProgress('completed');
       this.log('scan_completed', { rootId, path: base, indexed: entriesVisited });
       return entriesVisited;
     } catch (error) {
-      this.db.prepare('UPDATE roots SET online = 0 WHERE id = ?').run(rootId);
-      this.log('scan_error', { rootId, path: root.path, message: error.message });
+      if (!this.closed) {
+        this.db.prepare('UPDATE roots SET online = 0 WHERE id = ?').run(rootId);
+        this.db.prepare(`
+          INSERT INTO scan_jobs(root_id, status, error, started_at, completed_at)
+          VALUES (?, 'failed', ?, ?, ?)
+          ON CONFLICT(root_id) DO UPDATE SET status = 'failed', error = excluded.error,
+            completed_at = excluded.completed_at
+        `).run(rootId, error.message, new Date().toISOString(), new Date().toISOString());
+        this.log('scan_error', { rootId, path: root.path, message: error.message });
+      }
       throw error;
     }
   }
@@ -1009,6 +1176,11 @@ class PhotoSorter {
         });
         return this.sendJson(response, 200, result);
       }
+      if (request.method === 'GET' && url.pathname === '/api/scans') {
+        return this.sendJson(response, 200, {
+          scans: this.listScanStatus(url.searchParams.get('collectionId')),
+        });
+      }
       const mediaMatch = url.pathname.match(/^\/api\/media\/([0-9a-f-]+)\/content$/i);
       if (request.method === 'GET' && mediaMatch) return this.serveMedia(mediaMatch[1], request, response);
       const lockMatch = url.pathname.match(/^\/api\/media\/([0-9a-f-]+)\/lock$/i);
@@ -1030,10 +1202,7 @@ class PhotoSorter {
       }
       if (request.method === 'POST' && url.pathname === '/api/rescan') {
         const { collectionId } = await this.readJson(request);
-        if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
-          throw new Error('Collection not found.');
-        }
-        return this.sendJson(response, 200, { indexed: await this.rescanCollection(collectionId) });
+        return this.sendJson(response, 202, { scans: this.startCollectionScan(collectionId) });
       }
       if (request.method === 'POST' && url.pathname === '/api/apply/confirm') {
         const body = await this.readJson(request);

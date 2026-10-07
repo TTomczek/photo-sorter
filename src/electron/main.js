@@ -10,6 +10,7 @@ let window;
 let tray;
 let serverPort;
 let quitting = false;
+let shutdownComplete = false;
 
 async function createWindow() {
   window = new BrowserWindow({
@@ -59,7 +60,7 @@ app.whenReady().then(async () => {
       properties: ['openDirectory'],
     });
     if (result.canceled || !result.filePaths[0]) return { canceled: true };
-    const rootId = await service.addRoot(collectionId, result.filePaths[0]);
+    const rootId = await service.addRoot(collectionId, result.filePaths[0], { waitForScan: false });
     return { rootId };
   });
   ipcMain.handle('photo-sorter:set-autostart', (_event, enabled) => {
@@ -92,9 +93,14 @@ app.whenReady().then(async () => {
 });
 
 app.on('activate', showWindow);
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
   quitting = true;
-  service?.close();
+  if (shutdownComplete) return;
+  event.preventDefault();
   tray?.destroy();
+  Promise.resolve(service?.close()).finally(() => {
+    shutdownComplete = true;
+    app.quit();
+  });
 });
 app.on('window-all-closed', () => {});

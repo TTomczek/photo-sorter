@@ -21,7 +21,7 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
 
   const app = await new PhotoSorter({ dataDirectory }).initialize();
   t.after(async () => {
-    app.close();
+    await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
   await app.createPassword('a secure test password');
@@ -205,7 +205,7 @@ test('a symlinked output directory cannot redirect an apply outside its register
   }
   const app = await new PhotoSorter({ dataDirectory }).initialize();
   t.after(async () => {
-    app.close();
+    await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
   await app.createPassword('a secure test password');
@@ -234,7 +234,7 @@ test('replacing a registered root with a symlink cannot expose its new target', 
   await fs.writeFile(path.join(externalDirectory, 'inside.jpg'), 'outside-secret');
   const app = await new PhotoSorter({ dataDirectory }).initialize();
   t.after(async () => {
-    app.close();
+    await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
 
@@ -271,7 +271,7 @@ test('root removal and collection archival preserve history while releasing acti
   await fs.writeFile(path.join(root, 'remember.jpg'), 'history');
   const app = await new PhotoSorter({ dataDirectory }).initialize();
   t.after(async () => {
-    app.close();
+    await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
   await app.createPassword('a secure test password');
@@ -315,4 +315,55 @@ test('root removal and collection archival preserve history while releasing acti
   const cleared = app.clearAudit();
   assert.ok(cleared.clearedCount > 0);
   assert.deepEqual(app.listAudit().map((event) => event.action), ['audit_cleared']);
+});
+
+test('background scans expose incremental progress and finish indexing without blocking the caller', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-scan-progress-'));
+  const dataDirectory = path.join(temporary, 'data');
+  const root = path.join(temporary, 'photos');
+  await fs.mkdir(root);
+  await Promise.all(Array.from({ length: 300 }, (_, index) =>
+    fs.writeFile(path.join(root, `image-${index}.jpg`), `photo-${index}`)));
+  const app = await new PhotoSorter({ dataDirectory }).initialize();
+  t.after(async () => {
+    await app.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+  await app.createPassword('a secure test password');
+  const collectionId = app.createCollection('Large collection');
+  const rootId = await app.addRoot(collectionId, root, { waitForScan: false });
+  const initial = app.listScanStatus(collectionId);
+  assert.equal(initial.length, 1);
+  assert.ok(['queued', 'running'].includes(initial[0].status));
+  assert.ok(app.listMedia({ collectionId, category: 'unseen', limit: 1 }).items.length <= 1);
+
+  await app.scanRoot(rootId);
+  const completed = app.listScanStatus(collectionId)[0];
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.indexed, 300);
+  assert.equal(completed.visited, 300);
+
+  const port = await app.listen(0);
+  const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'a secure test password' }),
+  });
+  const cookies = login.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ');
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const queued = await fetch(`${baseUrl}/api/rescan`, {
+    method: 'POST',
+    headers: { Cookie: cookies, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ collectionId }),
+  });
+  assert.equal(queued.status, 202);
+  const progressResponse = await fetch(`${baseUrl}/api/scans?collectionId=${collectionId}`, {
+    headers: { Cookie: cookies },
+  });
+  assert.equal(progressResponse.status, 200);
+  await app.scanRoot(rootId);
+  const progress = await fetch(`${baseUrl}/api/scans?collectionId=${collectionId}`, {
+    headers: { Cookie: cookies },
+  });
+  assert.equal((await progress.json()).scans[0].status, 'completed');
 });

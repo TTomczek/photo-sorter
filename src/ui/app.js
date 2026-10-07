@@ -16,10 +16,38 @@ const state = {
 const byId = (id) => document.getElementById(id);
 const mediaGrid = byId('media-grid');
 let stateSaveTimer;
+let scanPollTimer;
+let scanPollBusy = false;
 
 function setDecisionButtons(enabled) {
   for (const button of document.querySelectorAll('[data-decision]')) {
     button.disabled = !enabled;
+  }
+}
+
+async function refreshScans() {
+  if (!state.collectionId || scanPollBusy || byId('app-panel').classList.contains('hidden')) return;
+  scanPollBusy = true;
+  try {
+    const { scans } = await request(`/api/scans?collectionId=${encodeURIComponent(state.collectionId)}`);
+    const active = scans.filter((scan) => ['queued', 'running'].includes(scan.status));
+    if (active.length) {
+      const indexed = active.reduce((sum, scan) => sum + scan.indexed, 0);
+      setStatus(`Scanning ${active.length} folder(s); ${indexed} media item(s) indexed so far.`);
+      const current = state.items[state.index];
+      state.restoreMediaId = current?.id || '';
+      await loadMedia();
+    } else if (scans.some((scan) => scan.status === 'failed')) {
+      const failed = scans.filter((scan) => scan.status === 'failed');
+      setStatus(`${failed.length} folder scan(s) failed: ${failed[0].error}`, true);
+    } else if (scans.some((scan) => scan.status === 'completed')) {
+      const indexed = scans.reduce((sum, scan) => sum + scan.indexed, 0);
+      setStatus(`Scanning complete: ${indexed} media item(s) indexed.`);
+    }
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    scanPollBusy = false;
   }
 }
 
@@ -237,6 +265,8 @@ function showApp() {
   byId('add-root').classList.toggle('hidden', !window.photoSorter?.isDesktop);
   refreshNetwork();
   loadCollections().catch((error) => setStatus(error.message, true));
+  refreshScans();
+  if (!scanPollTimer) scanPollTimer = setInterval(refreshScans, 1500);
 }
 
 async function refreshNetwork() {
@@ -465,8 +495,9 @@ byId('add-root').addEventListener('click', async () => {
   try {
     const result = await window.photoSorter.chooseRoot(state.collectionId);
     if (!result.canceled) {
-      setStatus('Folder scanned. New media is available.');
+      setStatus('Folder registered; scanning has started.');
       await loadCollections(state.collectionId);
+      refreshScans();
     }
   } catch (error) { setStatus(error.message, true); }
 });
@@ -513,8 +544,8 @@ byId('restore').addEventListener('click', async () => {
 byId('rescan').addEventListener('click', async () => {
   try {
     const result = await request('/api/rescan', { method: 'POST', body: JSON.stringify({ collectionId: state.collectionId }) });
-    setStatus(`Rescan complete: ${result.indexed} media item(s) indexed.`);
-    await loadCollections(state.collectionId);
+    setStatus(`Started scanning ${result.scans.length} folder(s).`);
+    refreshScans();
   } catch (error) { setStatus(error.message, true); }
 });
 async function changeDecisionHistory(direction) {
@@ -586,6 +617,8 @@ byId('logout').addEventListener('click', async () => {
   await state.lockTransition;
   await request('/api/logout', { method: 'POST', body: '{}' });
   byId('app-panel').classList.add('hidden');
+  clearInterval(scanPollTimer);
+  scanPollTimer = null;
   byId('logout').classList.add('hidden');
   await showAuthentication();
 });
