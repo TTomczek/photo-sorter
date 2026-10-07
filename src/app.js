@@ -26,6 +26,11 @@ function normalizeCaptureDate(metadata) {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
+function isOutputRelativePath(relativePath) {
+  const normalized = relativePath.split(path.sep).join('/');
+  return normalized.startsWith('deleted/') || normalized.startsWith('unsure/');
+}
+
 async function readCaptureDate(filename) {
   try {
     const metadata = await exifr.parse(filename, ['DateTimeOriginal', 'CreateDate', 'DateCreated']);
@@ -248,7 +253,7 @@ class PhotoSorter {
         try { await fs.access(operation.to_path); } catch (error) { if (error.code === 'ENOENT') destinationExists = false; else throw error; }
         if (!sourceExists && destinationExists) {
           this.db.prepare("UPDATE apply_operations SET status = 'completed' WHERE id = ?").run(operation.id);
-          this.db.prepare('UPDATE media SET relative_path = ? WHERE id = ?')
+          this.db.prepare('UPDATE media SET relative_path = ?, present = 1 WHERE id = ?')
             .run(path.relative(root, operation.to_path), operation.media_id);
           this.log('apply_recovered', { batchId: operation.batch_id, mediaId: operation.media_id, status: 'completed' });
         } else {
@@ -702,7 +707,11 @@ class PhotoSorter {
       this.db.prepare('UPDATE roots SET online = 1 WHERE id = ?').run(rootId);
       if (scanErrors === 0) {
         this.db.prepare(`
-          UPDATE media SET present = CASE WHEN last_seen_scan = ? THEN 1 ELSE 0 END
+          UPDATE media SET present = CASE
+            WHEN last_seen_scan = ?
+              OR relative_path GLOB 'deleted/*' OR relative_path GLOB 'deleted\\*'
+              OR relative_path GLOB 'unsure/*' OR relative_path GLOB 'unsure\\*'
+            THEN 1 ELSE 0 END
           WHERE root_id = ?
         `).run(scanId, rootId);
       }
@@ -932,38 +941,95 @@ class PhotoSorter {
       throw new Error('Collection not found.');
     }
     const media = this.db.prepare(`
-      SELECT m.id, m.root_id, m.relative_path, m.category, r.path, r.read_only
+      SELECT m.id, m.root_id, m.relative_path, m.category, r.path, r.read_only,
+        (SELECT o.from_path FROM apply_operations o
+          WHERE o.media_id = m.id AND o.status = 'completed' ORDER BY o.id DESC LIMIT 1) AS latest_from,
+        (SELECT o.to_path FROM apply_operations o
+          WHERE o.media_id = m.id AND o.status = 'completed' ORDER BY o.id DESC LIMIT 1) AS latest_to,
+        (SELECT o.category FROM apply_operations o
+          WHERE o.media_id = m.id AND o.status = 'completed' ORDER BY o.id DESC LIMIT 1) AS latest_category
       FROM media m JOIN roots r ON r.id = m.root_id
-      WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1 AND m.category IN ('delete', 'unsure')
-        AND m.relative_path NOT LIKE 'deleted/%' AND m.relative_path NOT LIKE 'unsure/%'
+      WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1
+        AND (m.category IN ('delete', 'unsure')
+          OR m.relative_path GLOB 'deleted/*' OR m.relative_path GLOB 'deleted\\*'
+          OR m.relative_path GLOB 'unsure/*' OR m.relative_path GLOB 'unsure\\*')
       ORDER BY m.relative_path
     `).all(collectionId);
     const operations = [];
+    let readOnlySkipped = 0;
     for (const item of media) {
-      const categoryDirectory = path.join(item.path, item.category === 'delete' ? 'deleted' : 'unsure');
       const source = path.resolve(item.path, item.relative_path);
-      if (!isWithin(item.path, source) || item.read_only) continue;
+      if (!isWithin(item.path, source)) continue;
+      if (item.read_only) {
+        readOnlySkipped += 1;
+        continue;
+      }
+      const isInOutput = isOutputRelativePath(item.relative_path);
+      const wasApplied = isInOutput && item.latest_to && comparePaths(source, item.latest_to);
+      let type;
+      let targetCategory;
+      let relativePath;
+      let destination;
+      if (wasApplied) {
+        if (item.category === item.latest_category) continue;
+        if (item.category === 'delete' || item.category === 'unsure') {
+          type = 'recategorize';
+          targetCategory = item.category;
+          const completedOperations = this.db.prepare(`
+            SELECT from_path FROM apply_operations
+            WHERE media_id = ? AND status IN ('completed', 'restored') ORDER BY id
+          `).all(item.id);
+          const original = completedOperations.find((entry) => isWithin(item.path, entry.from_path)
+            && !isWithin(path.join(item.path, 'deleted'), entry.from_path)
+            && !isWithin(path.join(item.path, 'unsure'), entry.from_path));
+          relativePath = original ? path.relative(item.path, original.from_path)
+            : path.relative(path.join(item.path, item.latest_category), item.latest_from);
+          destination = path.join(item.path, targetCategory === 'delete' ? 'deleted' : 'unsure', relativePath);
+        } else {
+          type = 'restore';
+          targetCategory = item.category || 'unseen';
+          const completedOperations = this.db.prepare(`
+            SELECT from_path FROM apply_operations
+            WHERE media_id = ? AND status IN ('completed', 'restored') ORDER BY id
+          `).all(item.id);
+          const original = completedOperations.find((entry) => isWithin(item.path, entry.from_path)
+            && !isWithin(path.join(item.path, 'deleted'), entry.from_path)
+            && !isWithin(path.join(item.path, 'unsure'), entry.from_path));
+          destination = original?.from_path || path.resolve(item.path, item.latest_from);
+          relativePath = path.relative(item.path, destination);
+        }
+      } else {
+        if (isInOutput) continue;
+        if (item.category !== 'delete' && item.category !== 'unsure') continue;
+        type = 'move';
+        targetCategory = item.category;
+        relativePath = item.relative_path;
+        destination = path.join(item.path, targetCategory === 'delete' ? 'deleted' : 'unsure', relativePath);
+      }
+      if (!isWithin(item.path, destination) || comparePaths(source, destination)) continue;
+      const targetIsOutput = targetCategory === 'delete' || targetCategory === 'unsure';
+      const categoryDirectory = targetIsOutput
+        ? path.join(item.path, targetCategory === 'delete' ? 'deleted' : 'unsure') : null;
       let existingOutput = false;
-      try {
-        await fs.access(categoryDirectory);
-        existingOutput = true;
-      } catch {}
+      if (categoryDirectory) existingOutput = await pathExists(categoryDirectory);
       let owned = false;
-      if (existingOutput) {
+      if (existingOutput && categoryDirectory) {
         try {
           const marker = await fs.readFile(path.join(categoryDirectory, OUTPUT_MARKER), 'utf8');
           owned = marker === 'photo-sorter-output-v1\n';
         } catch {}
       }
       operations.push({
+        type,
         mediaId: item.id,
         rootId: item.root_id,
         root: item.path,
-        relativePath: item.relative_path,
-        category: item.category,
+        relativePath,
+        category: targetCategory,
         source,
-        destination: path.join(categoryDirectory, item.relative_path),
-        needsReuseConfirmation: existingOutput && !owned,
+        destination,
+        needsReuseConfirmation: Boolean(categoryDirectory && existingOutput && !owned),
+        restoreConflict: type === 'restore' && await pathExists(destination),
       });
     }
     const id = crypto.randomUUID();
@@ -971,7 +1037,10 @@ class PhotoSorter {
     return {
       id,
       moveCount: operations.length,
-      readOnlySkipped: media.filter((item) => item.read_only).length,
+      restoreCount: operations.filter((item) => item.type === 'restore').length,
+      recategorizeCount: operations.filter((item) => item.type === 'recategorize').length,
+      restoreConflictCount: operations.filter((item) => item.restoreConflict).length,
+      readOnlySkipped,
       requiresOutputFolderConsent: operations.some((item) => item.needsReuseConfirmation),
       examples: operations.slice(0, 5).map(({ source, destination }) => ({ source, destination })),
     };
@@ -1003,27 +1072,41 @@ class PhotoSorter {
         }
         const stat = await fs.stat(currentSource);
         if (!stat.isFile()) throw new Error('Source is not a regular file.');
-        const output = path.join(operation.root, operation.category === 'delete' ? 'deleted' : 'unsure');
-        await fs.mkdir(output, { recursive: true });
-        const outputStat = await fs.lstat(output);
-        if (!outputStat.isDirectory() || outputStat.isSymbolicLink()) throw new Error('Output folder must be a real directory.');
-        if (!isWithin(currentRoot, await fs.realpath(output))) throw new Error('Output folder is outside its registered root.');
-        const markerPath = path.join(output, OUTPUT_MARKER);
-        try {
-          const marker = await fs.readFile(markerPath, 'utf8');
-          if (marker !== 'photo-sorter-output-v1\n') throw new Error('Output folder marker is invalid.');
-        } catch (error) {
-          if (error.code !== 'ENOENT') throw error;
-          if (operation.needsReuseConfirmation && reuseOutputFolders !== true) {
-            throw new Error('Existing output folder requires explicit reuse confirmation.');
+        const targetIsOutput = operation.category === 'delete' || operation.category === 'unsure';
+        if (targetIsOutput) {
+          const output = path.join(operation.root, operation.category === 'delete' ? 'deleted' : 'unsure');
+          const outputExisted = await pathExists(output);
+          await fs.mkdir(output, { recursive: true });
+          const outputStat = await fs.lstat(output);
+          if (!outputStat.isDirectory() || outputStat.isSymbolicLink()) throw new Error('Output folder must be a real directory.');
+          if (!isWithin(currentRoot, await fs.realpath(output))) throw new Error('Output folder is outside its registered root.');
+          const markerPath = path.join(output, OUTPUT_MARKER);
+          let outputOwned = false;
+          try {
+            const marker = await fs.readFile(markerPath, 'utf8');
+            if (marker !== 'photo-sorter-output-v1\n') throw new Error('Output folder marker is invalid.');
+            outputOwned = true;
+          } catch (error) {
+            if (error.code !== 'ENOENT') throw error;
           }
-          await fs.writeFile(markerPath, 'photo-sorter-output-v1\n', { flag: 'wx', mode: 0o600 });
+          if (outputExisted && !outputOwned && reuseOutputFolders !== true) {
+            throw new Error('Existing output folder requires explicit reuse confirmation; review a new apply summary.');
+          }
+          if (!outputOwned) {
+            await fs.writeFile(markerPath, 'photo-sorter-output-v1\n', { flag: 'wx', mode: 0o600 });
+          }
         }
         const parent = path.dirname(operation.destination);
         await fs.mkdir(parent, { recursive: true });
-        const destination = numberedDestination(operation.destination, (candidate) => {
-          try { fsSync.lstatSync(candidate); return true; } catch (error) { return error.code !== 'ENOENT'; }
-        });
+        const destination = operation.type === 'restore'
+          ? operation.destination
+          : numberedDestination(operation.destination, (candidate) => {
+            try { fsSync.lstatSync(candidate); return true; } catch (error) { return error.code !== 'ENOENT'; }
+          });
+        if (operation.type === 'restore' && await pathExists(destination)) {
+          throw new Error('Original path is occupied; refusing to overwrite.');
+        }
+        if (!isWithin(currentRoot, destination)) throw new Error('Destination is outside its registered root.');
         const destinationParent = await fs.realpath(path.dirname(destination));
         if (!isWithin(currentRoot, destinationParent)) throw new Error('Destination escaped its registered root.');
         const destinationDevice = (await fs.stat(destinationParent)).dev;
@@ -1033,13 +1116,17 @@ class PhotoSorter {
         operationId = row.lastInsertRowid;
         await moveWithoutOverwrite(currentSource, destination);
         this.db.prepare('UPDATE apply_operations SET status = ? WHERE id = ?').run('completed', operationId);
-        this.db.prepare('UPDATE media SET relative_path = ? WHERE id = ?')
+        this.db.prepare('UPDATE media SET relative_path = ?, present = 1 WHERE id = ?')
           .run(path.relative(currentRoot, destination), operation.mediaId);
-        results.push({ source: currentSource, destination, status: 'moved' });
+        results.push({
+          source: currentSource,
+          destination,
+          status: operation.type === 'restore' ? 'restored' : operation.type === 'recategorize' ? 'recategorized' : 'moved',
+        });
       } catch (error) {
         if (operationId) this.db.prepare('UPDATE apply_operations SET status = ? WHERE id = ?').run('failed', operationId);
         results.push({ source: operation.source, destination: operation.destination, status: 'failed', error: error.message });
-        this.log('apply_failed', { batchId, moved: results.filter((result) => result.status === 'moved'), failed: results.at(-1) });
+        this.log('apply_failed', { batchId, completed: results.filter((result) => result.status !== 'failed'), failed: results.at(-1) });
         return { batchId, results, stoppedOnFailure: true };
       }
     }
@@ -1078,7 +1165,7 @@ class PhotoSorter {
         if (movedStat.dev !== (await fs.stat(restoreParent)).dev) throw new Error('Cross-volume moves are not supported.');
         await moveWithoutOverwrite(operation.to_path, operation.from_path);
         this.db.prepare('UPDATE apply_operations SET status = ? WHERE id = ?').run('restored', operation.id);
-        this.db.prepare('UPDATE media SET relative_path = ? WHERE id = ?')
+        this.db.prepare('UPDATE media SET relative_path = ?, present = 1 WHERE id = ?')
           .run(path.relative(root, operation.from_path), operation.media_id);
         results.push({ source: operation.to_path, destination: operation.from_path, status: 'restored' });
       } catch (error) {

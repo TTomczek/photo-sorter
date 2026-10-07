@@ -413,3 +413,47 @@ test('root watcher indexes additions, resets changed-file decisions, and hides r
   assert.equal(app.db.prepare('SELECT present FROM media WHERE relative_path = ?').get('added.jpg').present, 0);
   assert.equal(app.db.prepare('SELECT category FROM media WHERE id = ?').get(originalItem.id).category, null);
 });
+
+test('confirmed apply reconciles category changes by moving and restoring files', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-reconcile-'));
+  const dataDirectory = path.join(temporary, 'data');
+  const root = path.join(temporary, 'photos');
+  await fs.mkdir(path.join(root, 'trip'), { recursive: true });
+  const original = path.join(root, 'trip', 'photo.jpg');
+  await fs.writeFile(original, 'original');
+  const app = await new PhotoSorter({ dataDirectory }).initialize();
+  t.after(async () => {
+    await app.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+  await app.createPassword('a secure test password');
+  const collectionId = app.createCollection('Reconcile');
+  await app.addRoot(collectionId, root);
+  const item = app.listMedia({ collectionId, category: 'unseen' }).items[0];
+  app.setDecision(item.id, 'delete');
+
+  const apply = async (plan) => app.confirmApply(plan.id, { confirm: true, reuseOutputFolders: true });
+  const firstPlan = await app.planApply(collectionId);
+  assert.equal(firstPlan.moveCount, 1);
+  assert.equal((await apply(firstPlan)).results[0].status, 'moved');
+  const deleted = path.join(root, 'deleted', 'trip', 'photo.jpg');
+  const unsure = path.join(root, 'unsure', 'trip', 'photo.jpg');
+  assert.equal(await fs.readFile(deleted, 'utf8'), 'original');
+  await app.scanRoot(app.db.prepare('SELECT id FROM roots WHERE collection_id = ?').get(collectionId).id);
+  assert.equal(app.listMedia({ collectionId, category: 'delete' }).total, 1);
+
+  app.setDecision(item.id, 'unsure');
+  assert.equal(await fs.readFile(deleted, 'utf8'), 'original');
+  const recategorizePlan = await app.planApply(collectionId);
+  assert.equal(recategorizePlan.recategorizeCount, 1);
+  assert.equal((await apply(recategorizePlan)).results[0].status, 'recategorized');
+  assert.equal(await fs.readFile(unsure, 'utf8'), 'original');
+  assert.equal(await fs.access(deleted).then(() => true, () => false), false);
+
+  app.setDecision(item.id, 'keep');
+  const restorePlan = await app.planApply(collectionId);
+  assert.equal(restorePlan.restoreCount, 1);
+  assert.equal((await apply(restorePlan)).results[0].status, 'restored');
+  assert.equal(await fs.readFile(original, 'utf8'), 'original');
+  assert.equal(await fs.access(unsure).then(() => true, () => false), false);
+});

@@ -435,7 +435,8 @@ async function applyDecisions() {
     }
     const examples = plan.examples.map((item) => `${item.source} → ${item.destination}`);
     const lines = [
-      `This will move ${plan.moveCount} file(s). ${plan.readOnlySkipped} item(s) on read-only roots will be skipped.`,
+      `This will perform ${plan.moveCount} file operation(s): ${plan.moveCount - plan.restoreCount - plan.recategorizeCount} new move(s), ${plan.recategorizeCount} recategorization(s), and ${plan.restoreCount} restore(s). ${plan.readOnlySkipped} item(s) on read-only roots will be skipped.`,
+      ...(plan.restoreConflictCount ? [`${plan.restoreConflictCount} restore destination(s) are already occupied and will not be overwritten.`] : []),
       ...examples,
       ...(plan.moveCount > examples.length ? [`And ${plan.moveCount - examples.length} more…`] : []),
       'No file will be permanently deleted. A failure stops the batch.',
@@ -451,9 +452,11 @@ async function applyDecisions() {
       body: JSON.stringify({ planId: plan.id, confirm: true, reuseOutputFolders: choice.reuseOutputFolders }),
     });
     const moved = result.results.filter((item) => item.status === 'moved').length;
+    const recategorized = result.results.filter((item) => item.status === 'recategorized').length;
+    const restored = result.results.filter((item) => item.status === 'restored').length;
     setStatus(result.stoppedOnFailure
-      ? `Stopped after moving ${moved} file(s). Failure: ${result.results.at(-1)?.error}`
-      : `Moved ${moved} file(s). Batch ${result.batchId} can be restored.`);
+      ? `Stopped after ${moved} move(s), ${recategorized} recategorization(s), and ${restored} restore(s). Failure: ${result.results.at(-1)?.error}`
+      : `Applied ${moved} move(s), ${recategorized} recategorization(s), and ${restored} restore(s). Batch ${result.batchId} can be restored.`);
     await loadMedia();
   } catch (error) {
     setStatus(error.message, true);
