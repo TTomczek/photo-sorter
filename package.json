@@ -17,9 +17,9 @@
     "test:browser": "playwright test",
     "build": "electron-builder --dir",
     "reset-password": "node scripts/reset-password.js",
-    "dist:win": "electron-builder --win",
-    "dist:mac": "electron-builder --mac",
-    "dist:linux": "electron-builder --linux",
+    "dist:win": "electron-builder --win --publish never",
+    "dist:mac": "electron-builder --mac --publish never",
+    "dist:linux": "electron-builder --linux --publish never",
     "lint": "eslint ."
   },
   "build": {

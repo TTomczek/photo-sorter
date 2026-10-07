@@ -493,8 +493,9 @@ test('confirmed apply reconciles category changes by moving and restoring files'
 test('an interrupted hard-link move is reported precisely and reconciled on restart without deleting either path', async (t) => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-apply-recovery-'));
   const dataDirectory = path.join(temporary, 'data');
-  const root = path.join(temporary, 'photos');
-  await fs.mkdir(root);
+  const rootDirectory = path.join(temporary, 'photos');
+  await fs.mkdir(rootDirectory);
+  const root = await fs.realpath(rootDirectory);
   await fs.writeFile(path.join(root, 'a.jpg'), 'first-original');
   await fs.writeFile(path.join(root, 'b.jpg'), 'second-original');
   let app = await new PhotoSorter({ dataDirectory }).initialize();
@@ -510,13 +511,15 @@ test('an interrupted hard-link move is reported precisely and reconciled on rest
   for (const item of items) app.setDecision(item.id, 'delete');
   const plan = await app.planApply(collectionId);
   const originalUnlink = fs.unlink;
-  const injectedSource = path.resolve(path.join(root, 'a.jpg'));
+  const injectedSource = await fs.realpath(path.join(root, 'a.jpg'));
+  let unlinkFailureInjected = false;
   fs.unlink = async (filename) => {
     const unlinkPath = path.resolve(filename);
     const matchesInjectedSource = process.platform === 'win32'
       ? unlinkPath.toLowerCase() === injectedSource.toLowerCase()
       : unlinkPath === injectedSource;
     if (matchesInjectedSource) {
+      unlinkFailureInjected = true;
       throw Object.assign(new Error('Injected unlink failure.'), { code: 'EIO' });
     }
     return originalUnlink(filename);
@@ -528,6 +531,7 @@ test('an interrupted hard-link move is reported precisely and reconciled on rest
     fs.unlink = originalUnlink;
   }
 
+  assert.equal(unlinkFailureInjected, true);
   assert.equal(applied.stoppedOnFailure, true);
   assert.deepEqual(applied.results.map((result) => result.status), ['failed', 'not_attempted']);
   assert.equal(applied.results[0].source, path.join(root, 'a.jpg'));
@@ -580,8 +584,9 @@ test('an interrupted hard-link move is reported precisely and reconciled on rest
 test('restart recovery resolves a completed restore when its reverse-move reference is stale', async (t) => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-restore-recovery-'));
   const dataDirectory = path.join(temporary, 'data');
-  const root = path.join(temporary, 'photos');
-  await fs.mkdir(root);
+  const rootDirectory = path.join(temporary, 'photos');
+  await fs.mkdir(rootDirectory);
+  const root = await fs.realpath(rootDirectory);
   const original = path.join(root, 'photo.jpg');
   const moved = path.join(root, 'deleted', 'photo.jpg');
   await fs.writeFile(original, 'restore-original');
