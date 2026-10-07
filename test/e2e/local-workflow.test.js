@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fsSync = require('node:fs');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -455,6 +456,7 @@ test('confirmed apply reconciles category changes by moving and restoring files'
     await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
+
   await app.createPassword('a secure test password');
   const collectionId = app.createCollection('Reconcile');
   await app.addRoot(collectionId, root);
@@ -485,4 +487,34 @@ test('confirmed apply reconciles category changes by moving and restoring files'
   assert.equal((await apply(restorePlan)).results[0].status, 'restored');
   assert.equal(await fs.readFile(original, 'utf8'), 'original');
   assert.equal(await fs.access(unsure).then(() => true, () => false), false);
+});
+
+test('filesystem watcher retries after a transient setup failure', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-watch-retry-'));
+  const root = path.join(temporary, 'photos');
+  await fs.mkdir(root);
+  const app = await new PhotoSorter({ dataDirectory: path.join(temporary, 'data') }).initialize();
+  t.after(async () => {
+    await app.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+  const collectionId = app.createCollection('Retry');
+  const rootId = await app.addRoot(collectionId, root, { waitForScan: false });
+  app.closeRootWatcher(rootId);
+  const originalWatch = fsSync.watch;
+  let calls = 0;
+  fsSync.watch = (...args) => {
+    calls += 1;
+    if (calls === 1) throw new Error('transient watcher failure');
+    return originalWatch(...args);
+  };
+  try {
+    app.watchRoot(rootId);
+  } finally {
+    fsSync.watch = originalWatch;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 1_200));
+  assert.equal(calls, 1);
+  assert.equal(app.rootWatchers.has(rootId), true);
+  assert.equal(app.watchRetryTimers.has(rootId), false);
 });

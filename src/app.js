@@ -113,6 +113,8 @@ class PhotoSorter {
     this.scanWaiters = new Map();
     this.maxConcurrentScans = 2;
     this.rootWatchers = new Map();
+    this.watchRetryTimers = new Map();
+    this.watchRetryAttempts = new Map();
     this.scanDebounceTimers = new Map();
     this.closed = false;
     this.db = null;
@@ -293,6 +295,9 @@ class PhotoSorter {
     this.closed = true;
     for (const watcher of this.rootWatchers.values()) watcher.close();
     this.rootWatchers.clear();
+    for (const timer of this.watchRetryTimers.values()) clearTimeout(timer);
+    this.watchRetryTimers.clear();
+    this.watchRetryAttempts.clear();
     for (const timer of this.scanDebounceTimers.values()) clearTimeout(timer);
     this.scanDebounceTimers.clear();
     const closingServers = this.servers.map((server) => new Promise((resolve) => {
@@ -402,13 +407,35 @@ class PhotoSorter {
       const watcher = fsSync.watch(root.path, { recursive: true }, () => this.scheduleScan(rootId));
       watcher.on('error', (error) => {
         watcher.close();
-        this.rootWatchers.delete(rootId);
-        if (!this.closed) this.log('watch_error', { rootId, path: root.path, message: error.message });
+        if (this.rootWatchers.get(rootId) === watcher) this.rootWatchers.delete(rootId);
+        this.scheduleWatchRetry(rootId, root.path, error);
       });
       this.rootWatchers.set(rootId, watcher);
+      clearTimeout(this.watchRetryTimers.get(rootId));
+      this.watchRetryTimers.delete(rootId);
+      this.watchRetryAttempts.delete(rootId);
     } catch (error) {
-      this.log('watch_error', { rootId, path: root.path, message: error.message });
+      this.scheduleWatchRetry(rootId, root.path, error);
     }
+  }
+
+  scheduleWatchRetry(rootId, rootPath, error) {
+    if (this.closed || this.watchRetryTimers.has(rootId)) return;
+    const active = this.db?.prepare(`
+      SELECT r.id FROM roots r JOIN collections c ON c.id = r.collection_id
+      WHERE r.id = ? AND r.active = 1 AND c.active = 1
+    `).get(rootId);
+    if (!active) return;
+    const attempt = (this.watchRetryAttempts.get(rootId) || 0) + 1;
+    this.watchRetryAttempts.set(rootId, attempt);
+    const delay = Math.min(60_000, 1_000 * (2 ** Math.min(attempt - 1, 6)));
+    this.log('watch_error', { rootId, path: rootPath, message: error.message, retryInMs: delay });
+    const timer = setTimeout(() => {
+      this.watchRetryTimers.delete(rootId);
+      this.watchRoot(rootId);
+    }, delay);
+    timer.unref?.();
+    this.watchRetryTimers.set(rootId, timer);
   }
 
   scheduleScan(rootId) {
@@ -429,6 +456,9 @@ class PhotoSorter {
   closeRootWatcher(rootId) {
     this.rootWatchers.get(rootId)?.close();
     this.rootWatchers.delete(rootId);
+    clearTimeout(this.watchRetryTimers.get(rootId));
+    this.watchRetryTimers.delete(rootId);
+    this.watchRetryAttempts.delete(rootId);
     clearTimeout(this.scanDebounceTimers.get(rootId));
     this.scanDebounceTimers.delete(rootId);
   }
