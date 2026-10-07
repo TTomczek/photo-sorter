@@ -26,6 +26,8 @@ const videoPosterObserver = typeof IntersectionObserver === 'undefined' ? null :
 let stateSaveTimer;
 let scanPollTimer;
 let scanPollBusy = false;
+let queuePollTimer;
+let queuePollBusy = false;
 
 function loadVideoPoster(video) {
   if (!video.isConnected) return;
@@ -247,6 +249,45 @@ async function loadMedia() {
   renderGrid();
 }
 
+async function refreshQueue() {
+  if (!state.collectionId || queuePollBusy || state.busy
+    || byId('app-panel').classList.contains('hidden')) return;
+  queuePollBusy = true;
+  const snapshot = {
+    collectionId: state.collectionId,
+    category: state.category,
+    sort: state.sort,
+    offset: state.offset,
+  };
+  try {
+    const result = await request(`/api/media?collectionId=${encodeURIComponent(snapshot.collectionId)}&category=${snapshot.category}&sort=${snapshot.sort}&offset=${snapshot.offset}&limit=${state.limit}`);
+    if (snapshot.collectionId !== state.collectionId || snapshot.category !== state.category
+      || snapshot.sort !== state.sort || snapshot.offset !== state.offset) return;
+    const unchanged = result.total === state.total
+      && result.items.length === state.items.length
+      && result.items.every((item, index) => item.id === state.items[index].id
+        && item.category === state.items[index].category
+        && item.size === state.items[index].size
+        && item.modified_at === state.items[index].modified_at);
+    if (unchanged) return;
+    const currentId = state.items[state.index]?.id;
+    state.items = result.items;
+    state.total = result.total;
+    const currentIndex = currentId ? state.items.findIndex((item) => item.id === currentId) : -1;
+    state.index = currentIndex >= 0 ? currentIndex : Math.min(state.index, Math.max(0, state.items.length - 1));
+    if (!state.items.length && state.offset > 0) {
+      state.offset = Math.max(0, Math.floor(Math.max(0, state.total - 1) / state.limit) * state.limit);
+      await loadMedia();
+    } else {
+      renderGrid();
+    }
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    queuePollBusy = false;
+  }
+}
+
 async function loadCollections(preferredId) {
   const result = await request('/api/collections');
   const preferences = await request('/api/preferences');
@@ -310,6 +351,7 @@ function showApp() {
   loadSettings().then(() => loadCollections()).catch((error) => setStatus(error.message, true));
   refreshScans();
   if (!scanPollTimer) scanPollTimer = setInterval(refreshScans, 1500);
+  if (!queuePollTimer) queuePollTimer = setInterval(refreshQueue, 5000);
 }
 
 async function loadSettings() {
@@ -715,6 +757,8 @@ byId('logout').addEventListener('click', async () => {
   byId('app-panel').classList.add('hidden');
   clearInterval(scanPollTimer);
   scanPollTimer = null;
+  clearInterval(queuePollTimer);
+  queuePollTimer = null;
   byId('logout').classList.add('hidden');
   await showAuthentication();
 });
