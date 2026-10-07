@@ -75,6 +75,26 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
 
   const collection = await api('/api/collections');
   assert.equal(collection.body.collections[0].name, 'Weekend');
+  const network = await api('/api/network');
+  assert.equal(network.response.status, 200);
+  assert.ok(network.body.addresses.every((address) => address.qrDataUrl.startsWith('data:image/png;base64,')));
+  assert.deepEqual((await api('/api/settings')).body, {
+    defaultSort: 'capture-asc',
+    previewCacheLimitMb: 2048,
+  });
+  const savedSettings = await api('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ defaultSort: 'filename', previewCacheLimitMb: 0 }),
+  });
+  assert.deepEqual(savedSettings.body, { defaultSort: 'filename', previewCacheLimitMb: 0 });
+  assert.equal((await api('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ defaultSort: 'invalid', previewCacheLimitMb: -1 }),
+  })).response.status, 400);
+  await api('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ defaultSort: 'capture-asc', previewCacheLimitMb: 2048 }),
+  });
   assert.equal((await api('/api/preferences')).body.lastCollectionId, null);
   assert.equal((await api('/api/preferences', {
     method: 'PUT', body: JSON.stringify({ lastCollectionId: collectionId }),
@@ -96,6 +116,7 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
   assert.equal(unseen.body.items.some((item) => item.relative_path.includes('linked')), false);
 
   const photo = unseen.body.items.find((item) => item.relative_path.endsWith('photo.jpg'));
+  assert.equal((await api(`/api/media/${photo.id}/preview`)).response.status, 404);
   const preview = await api(`/api/media/${photo.id}/content`, { headers: { Range: 'bytes=0-3' } });
   assert.equal(preview.response.status, 206);
   assert.equal(preview.body, 'orig');

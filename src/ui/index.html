@@ -47,6 +47,24 @@
           <button id="add-root" type="button" class="hidden">Choose folder</button>
           <button id="archive-collection" type="button">Archive collection</button>
         </div>
+        <details id="settings-panel" class="panel">
+          <summary>Settings</summary>
+          <form id="settings-form">
+            <label for="default-sort">Default sort order</label>
+            <select id="default-sort">
+              <option value="capture-asc">Capture date ↑</option>
+              <option value="capture-desc">Capture date ↓</option>
+              <option value="filename">Filename</option>
+            </select>
+            <label for="preview-cache-limit">Preview cache limit (MB; 0 disables caching)</label>
+            <input id="preview-cache-limit" type="number" min="0" max="102400" step="1" required>
+            <label id="autostart-setting" class="hidden">
+              <input id="autostart" type="checkbox">
+              Start Photo Sorter when I sign in
+            </label>
+            <button type="submit">Save settings</button>
+          </form>
+        </details>
         <details id="root-management" class="panel">
           <summary>Manage collection folders</summary>
           <ul id="root-list"></ul>

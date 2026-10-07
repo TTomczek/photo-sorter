@@ -72,6 +72,13 @@ app.whenReady().then(async () => {
     app.setLoginItemSettings({ openAtLogin: enabled });
     return app.getLoginItemSettings().openAtLogin;
   });
+  ipcMain.handle('photo-sorter:get-autostart', (_event) => {
+    if (_event.senderFrame !== _event.sender.mainFrame
+      || new URL(_event.senderFrame.url).origin !== `http://127.0.0.1:${serverPort}`) {
+      throw new Error('This setting is only available in the host app.');
+    }
+    return app.getLoginItemSettings().openAtLogin;
+  });
   await createWindow();
   tray = new Tray(require('electron').nativeImage.createEmpty());
   tray.setToolTip('Photo Sorter is serving your local network');

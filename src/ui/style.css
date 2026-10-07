@@ -25,6 +25,8 @@ main { display: grid; gap: 1rem; }
 .toolbar { flex-wrap: wrap; }
 .toolbar label { font-weight: 650; }
 #new-collection-form { display: flex; gap: .4rem; }
+#settings-form { display: grid; grid-template-columns: minmax(12rem, 1fr) minmax(10rem, 2fr); gap: .6rem; align-items: center; margin-top: .8rem; }
+#settings-form > button, #autostart-setting { grid-column: 1 / -1; }
 select, input, button { font: inherit; }
 input, select { min-width: 0; padding: .65rem; border: 1px solid #aeb7c0; border-radius: .45rem; }
 button { padding: .65rem .85rem; border: 0; border-radius: .5rem; background: #205fbd; color: white; cursor: pointer; }
@@ -37,6 +39,8 @@ button.keep { background: #1d7542; }
 .lan { flex-wrap: wrap; background: #edf5ff; }
 #lan-addresses { display: flex; flex-wrap: wrap; gap: .75rem; }
 #lan-addresses a { overflow-wrap: anywhere; }
+.lan-address { display: grid; gap: .35rem; }
+.lan-address img { width: 120px; height: 120px; image-rendering: pixelated; }
 .filters { overflow-x: auto; }
 .filters button[aria-pressed="true"] { outline: 3px solid #8db7ef; }
 .review { text-align: center; }
@@ -64,6 +68,8 @@ code { overflow-wrap: anywhere; }
   .toolbar > * { flex: 1 1 auto; }
   #new-collection-form { width: 100%; }
   #new-collection-form input { flex: 1; }
+  #settings-form { grid-template-columns: 1fr; }
+  #settings-form > button, #autostart-setting { grid-column: auto; }
   .decision-actions button { flex: 1; padding-inline: .4rem; }
   .media-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

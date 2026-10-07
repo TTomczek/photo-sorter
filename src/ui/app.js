@@ -1,6 +1,7 @@
 const state = {
   category: 'unseen',
   sort: 'capture-asc',
+  defaultSort: 'capture-asc',
   collectionId: '',
   items: [],
   index: 0,
@@ -126,7 +127,7 @@ function mediaUrl(item) {
   return `/api/media/${encodeURIComponent(item.id)}/content`;
 }
 
-function createPreview(item, controls = false) {
+function createPreview(item, controls = false, cached = false) {
   if (item.kind === 'video') {
     const video = element('video');
     video.src = mediaUrl(item);
@@ -136,10 +137,15 @@ function createPreview(item, controls = false) {
     return video;
   }
   const image = element('img');
-  image.src = mediaUrl(item);
+  image.src = cached ? `/api/media/${encodeURIComponent(item.id)}/preview` : mediaUrl(item);
   image.alt = item.relative_path;
   image.loading = 'lazy';
   image.onerror = () => {
+    if (cached) {
+      cached = false;
+      image.src = mediaUrl(item);
+      return;
+    }
     const placeholder = element('div', 'Preview unavailable. This file can still be sorted.', 'placeholder');
     image.replaceWith(placeholder);
   };
@@ -174,7 +180,7 @@ function renderGrid() {
       state.index = state.items.indexOf(item);
       renderCurrent();
     });
-    card.append(createPreview(item), select, element('small', `${item.kind} · ${formatBytes(item.size)}${item.category ? ` · ${item.category}` : ''}`, 'media-name'));
+    card.append(createPreview(item, false, item.kind === 'image'), select, element('small', `${item.kind} · ${formatBytes(item.size)}${item.category ? ` · ${item.category}` : ''}`, 'media-name'));
     mediaGrid.append(card);
   }
   byId('load-more').classList.toggle('hidden', state.offset + state.items.length >= state.total);
@@ -245,7 +251,7 @@ async function loadCollections(preferredId) {
     }
   } else {
     state.category = 'unseen';
-    state.sort = 'capture-asc';
+    state.sort = state.defaultSort;
     state.restoreMediaId = '';
     byId('sort-order').value = state.sort;
     for (const button of byId('filters').querySelectorAll('button')) {
@@ -264,9 +270,20 @@ function showApp() {
   byId('logout').classList.remove('hidden');
   byId('add-root').classList.toggle('hidden', !window.photoSorter?.isDesktop);
   refreshNetwork();
-  loadCollections().catch((error) => setStatus(error.message, true));
+  loadSettings().then(() => loadCollections()).catch((error) => setStatus(error.message, true));
   refreshScans();
   if (!scanPollTimer) scanPollTimer = setInterval(refreshScans, 1500);
+}
+
+async function loadSettings() {
+  const settings = await request('/api/settings');
+  state.defaultSort = settings.defaultSort;
+  byId('default-sort').value = settings.defaultSort;
+  byId('preview-cache-limit').value = settings.previewCacheLimitMb;
+  if (window.photoSorter?.isDesktop) {
+    byId('autostart-setting').classList.remove('hidden');
+    byId('autostart').checked = await window.photoSorter.getAutostart();
+  }
 }
 
 async function refreshNetwork() {
@@ -279,9 +296,16 @@ async function refreshNetwork() {
       return;
     }
     for (const address of addresses) {
+      const entry = element('div', undefined, 'lan-address');
       const link = element('a', `${address.name}: ${address.url}`);
       link.href = address.url;
-      container.append(link);
+      const qr = element('img');
+      qr.src = address.qrDataUrl;
+      qr.alt = `QR code for ${address.url}`;
+      qr.width = 120;
+      qr.height = 120;
+      entry.append(link, qr);
+      container.append(entry);
     }
   } catch {}
 }
@@ -462,6 +486,38 @@ async function applyDecisions() {
     setStatus(error.message, true);
   }
 }
+
+byId('settings-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  try {
+    const previousDefault = state.defaultSort;
+    const settings = await request('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        defaultSort: byId('default-sort').value,
+        previewCacheLimitMb: Number(byId('preview-cache-limit').value),
+      }),
+    });
+    state.defaultSort = settings.defaultSort;
+    if (state.sort === previousDefault) {
+      state.sort = settings.defaultSort;
+      byId('sort-order').value = state.sort;
+      state.offset = 0;
+      await loadMedia();
+    }
+    setStatus('Settings saved.');
+  } catch (error) { setStatus(error.message, true); }
+});
+
+byId('autostart').addEventListener('change', async (event) => {
+  try {
+    event.target.checked = await window.photoSorter.setAutostart(event.target.checked);
+    setStatus('Sign-in startup setting updated.');
+  } catch (error) {
+    event.target.checked = !event.target.checked;
+    setStatus(error.message, true);
+  }
+});
 
 byId('new-collection-form').addEventListener('submit', async (event) => {
   event.preventDefault();

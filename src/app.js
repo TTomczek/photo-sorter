@@ -6,6 +6,7 @@ const os = require('node:os');
 const { isIP } = require('node:net');
 const { DatabaseSync } = require('node:sqlite');
 const exifr = require('exifr');
+const QRCode = require('qrcode');
 
 const IMAGE_EXTENSIONS = new Set([
   '.avif', '.bmp', '.gif', '.heic', '.heif', '.jpeg', '.jpg', '.png',
@@ -199,6 +200,16 @@ class PhotoSorter {
         preference_value TEXT NOT NULL,
         PRIMARY KEY(device_id, preference_key)
       );
+      CREATE TABLE IF NOT EXISTS app_settings (
+        setting_key TEXT PRIMARY KEY,
+        setting_value TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS preview_cache (
+        cache_key TEXT PRIMARY KEY,
+        filename TEXT NOT NULL UNIQUE,
+        size INTEGER NOT NULL,
+        last_accessed INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         action TEXT NOT NULL,
@@ -226,6 +237,12 @@ class PhotoSorter {
     if (!mediaColumns.includes('capture_at')) this.db.exec('ALTER TABLE media ADD COLUMN capture_at TEXT');
     if (!mediaColumns.includes('present')) this.db.exec('ALTER TABLE media ADD COLUMN present INTEGER NOT NULL DEFAULT 1');
     if (!mediaColumns.includes('last_seen_scan')) this.db.exec('ALTER TABLE media ADD COLUMN last_seen_scan TEXT');
+    this.db.prepare(`
+      INSERT OR IGNORE INTO app_settings(setting_key, setting_value) VALUES ('default_sort', 'capture-asc')
+    `).run();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO app_settings(setting_key, setting_value) VALUES ('preview_cache_limit_mb', '2048')
+    `).run();
     await this.recoverApplyOperations();
     setImmediate(() => {
       if (this.closed || !this.db) return;
@@ -488,6 +505,108 @@ class PhotoSorter {
       ON CONFLICT(device_id, preference_key) DO UPDATE SET preference_value = excluded.preference_value
     `).run(deviceId, collectionId);
     return { collectionId };
+  }
+
+  getSettings() {
+    const settings = Object.fromEntries(this.db.prepare('SELECT setting_key, setting_value FROM app_settings')
+      .all().map((row) => [row.setting_key, row.setting_value]));
+    return {
+      defaultSort: settings.default_sort || 'capture-asc',
+      previewCacheLimitMb: Number(settings.preview_cache_limit_mb || 2048),
+    };
+  }
+
+  async saveSettings(values) {
+    const { defaultSort, previewCacheLimitMb } = values;
+    if (!['capture-asc', 'capture-desc', 'filename'].includes(defaultSort)
+      || !Number.isSafeInteger(previewCacheLimitMb) || previewCacheLimitMb < 0 || previewCacheLimitMb > 102_400) {
+      throw new Error('Invalid settings.');
+    }
+    this.db.prepare('UPDATE app_settings SET setting_value = ? WHERE setting_key = ?')
+      .run(defaultSort, 'default_sort');
+    this.db.prepare('UPDATE app_settings SET setting_value = ? WHERE setting_key = ?')
+      .run(String(previewCacheLimitMb), 'preview_cache_limit_mb');
+    await this.enforcePreviewCacheLimit();
+    this.log('settings_changed', { defaultSort, previewCacheLimitMb });
+    return this.getSettings();
+  }
+
+  async enforcePreviewCacheLimit(excludeCacheKey = null) {
+    const limitMb = this.getSettings().previewCacheLimitMb;
+    let size = this.db.prepare('SELECT COALESCE(SUM(size), 0) AS size FROM preview_cache').get().size;
+    const candidates = this.db.prepare(`
+      SELECT cache_key, filename, size FROM preview_cache
+      WHERE cache_key != ?
+      ORDER BY last_accessed ASC
+    `).all(excludeCacheKey || '');
+    for (const entry of candidates) {
+      if (size <= limitMb * 1024 * 1024) break;
+      this.db.prepare('DELETE FROM preview_cache WHERE cache_key = ?').run(entry.cache_key);
+      await fs.rm(path.join(this.dataDirectory, 'previews', entry.filename), { force: true });
+      size -= entry.size;
+    }
+    if (limitMb === 0 && excludeCacheKey) {
+      const current = this.db.prepare('SELECT filename FROM preview_cache WHERE cache_key = ?').get(excludeCacheKey);
+      if (current) {
+        this.db.prepare('DELETE FROM preview_cache WHERE cache_key = ?').run(excludeCacheKey);
+        await fs.rm(path.join(this.dataDirectory, 'previews', current.filename), { force: true });
+      }
+    }
+  }
+
+  async getPreview(mediaId) {
+    const item = this.mediaPath(mediaId);
+    if (!item) return null;
+    let resolved;
+    try {
+      const root = await fs.realpath(item.path);
+      if (!comparePaths(root, item.path) || !isWithin(root, item.fullPath)) return null;
+      resolved = await fs.realpath(item.fullPath);
+      if (!isWithin(root, resolved)) return null;
+    } catch {
+      return null;
+    }
+    const stat = await fs.stat(resolved);
+    const extension = path.extname(resolved).toLowerCase();
+    if (!IMAGE_EXTENSIONS.has(extension)) return null;
+    const cacheKey = crypto.createHash('sha256')
+      .update(`${item.id}\0${stat.size}\0${stat.mtimeMs}`).digest('hex');
+    const cached = this.db.prepare('SELECT filename FROM preview_cache WHERE cache_key = ?').get(cacheKey);
+    if (cached) {
+      try {
+        const buffer = await fs.readFile(path.join(this.dataDirectory, 'previews', cached.filename));
+        this.db.prepare('UPDATE preview_cache SET last_accessed = ? WHERE cache_key = ?').run(Date.now(), cacheKey);
+        return buffer;
+      } catch {
+        this.db.prepare('DELETE FROM preview_cache WHERE cache_key = ?').run(cacheKey);
+      }
+    }
+    const thumbnail = await exifr.thumbnail(resolved).catch(() => null);
+    if (!thumbnail) return null;
+    const buffer = Buffer.from(thumbnail);
+    if (!buffer.length || buffer.length > 50 * 1024 * 1024) return null;
+    const directory = path.join(this.dataDirectory, 'previews');
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    const filename = `${cacheKey}.jpg`;
+    const filenamePath = path.join(directory, filename);
+    try {
+      await fs.writeFile(filenamePath, buffer, { flag: 'wx', mode: 0o600 });
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+    const limitMb = this.getSettings().previewCacheLimitMb;
+    if (limitMb > 0) {
+      this.db.prepare(`
+        INSERT OR REPLACE INTO preview_cache(cache_key, filename, size, last_accessed)
+        VALUES (?, ?, ?, ?)
+      `).run(cacheKey, filename, buffer.length, Date.now());
+      await this.enforcePreviewCacheLimit(cacheKey);
+      const current = this.db.prepare('SELECT 1 FROM preview_cache WHERE cache_key = ?').get(cacheKey);
+      if (!current) await fs.rm(filenamePath, { force: true });
+    } else {
+      await fs.rm(filenamePath, { force: true });
+    }
+    return buffer;
   }
 
   async addRoot(collectionId, selectedPath, { waitForScan = true } = {}) {
@@ -1315,7 +1434,15 @@ class PhotoSorter {
         });
       }
       if (request.method === 'GET' && url.pathname === '/api/network') {
-        return this.sendJson(response, 200, { addresses: this.localAddresses(this.port) });
+        const addresses = await Promise.all(this.localAddresses(this.port).map(async (address) => ({
+          ...address,
+          qrDataUrl: await QRCode.toDataURL(address.url, {
+            errorCorrectionLevel: 'M',
+            margin: 1,
+            width: 180,
+          }),
+        })));
+        return this.sendJson(response, 200, { addresses });
       }
       const session = this.requireSession(request);
       if (request.method === 'GET' && url.pathname === '/api/collections') {
@@ -1384,6 +1511,24 @@ class PhotoSorter {
         return this.sendJson(response, 200, {
           scans: this.listScanStatus(url.searchParams.get('collectionId')),
         });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/settings') {
+        return this.sendJson(response, 200, this.getSettings());
+      }
+      if (request.method === 'PUT' && url.pathname === '/api/settings') {
+        return this.sendJson(response, 200, await this.saveSettings(await this.readJson(request)));
+      }
+      const previewMatch = url.pathname.match(/^\/api\/media\/([0-9a-f-]+)\/preview$/i);
+      if (request.method === 'GET' && previewMatch) {
+        const preview = await this.getPreview(previewMatch[1]);
+        if (!preview) return this.sendJson(response, 404, { error: 'Preview is unavailable.' });
+        response.writeHead(200, {
+          'Content-Type': 'image/jpeg',
+          'Content-Length': preview.length,
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+        });
+        return response.end(preview);
       }
       const mediaMatch = url.pathname.match(/^\/api\/media\/([0-9a-f-]+)\/content$/i);
       if (request.method === 'GET' && mediaMatch) return this.serveMedia(mediaMatch[1], request, response);
@@ -1495,7 +1640,7 @@ class PhotoSorter {
         'Content-Length': stat.size,
         'Cache-Control': 'no-store',
         'X-Content-Type-Options': 'nosniff',
-        'Content-Security-Policy': "default-src 'self'; img-src 'self' blob:; media-src 'self'; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        'Content-Security-Policy': "default-src 'self'; img-src 'self' blob: data:; media-src 'self'; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
       });
       require('node:fs').createReadStream(filename).pipe(response);
     } catch {
