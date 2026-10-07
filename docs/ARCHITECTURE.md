@@ -5,7 +5,7 @@ This document describes what the repository implements today, not the complete M
 ## Runtime and processes
 
 - `src/electron/main.js` starts the local HTTP host, opens the desktop window, provides a native directory chooser, and offers a tray menu to reopen the window, toggle OS login autostart, or quit the host.
-- `src/electron/preload.js` exposes only the folder chooser and autostart actions to the isolated renderer. The HTTP API has no endpoint for registering a client-supplied path.
+- `src/electron/preload.js` exposes only the folder chooser and autostart controls to the isolated renderer. The HTTP API has no endpoint for registering a client-supplied path.
 - `src/app.js` implements the HTTP service, password authentication, SQLite schema, collection/root operations, recursive scanning, media streaming, decision and audit records, and apply/restore operations.
 - `src/ui/` is the shared responsive browser/Electron interface. The Electron renderer uses context isolation, disables Node integration, and enables Chromium's sandbox.
 - Node.js 22.13+ is the declared development/runtime requirement. SQLite uses Node's built-in `node:sqlite`; Electron supplies its own Node runtime.
@@ -13,7 +13,7 @@ This document describes what the repository implements today, not the complete M
 
 ## Data and API
 
-The SQLite database is `photo-sorter.sqlite` in the OS app-data directory; `PHOTO_SORTER_DATA_DIR` overrides that directory. The current schema is created with `CREATE TABLE IF NOT EXISTS` plus additive column checks; a versioned migration system is not implemented. Tables hold one account, collections, roots, indexed media and presence, per-device review state, expiring media locks, decision history, scan progress, audit events, apply batches, and apply operations. Sessions and pending apply plans live in memory, so restarting the host requires login again and discards any unconfirmed plan. Login issues a random, persistent HttpOnly device cookie; it identifies local review state but does not keep an authentication session alive across restart.
+The SQLite database is `photo-sorter.sqlite` in the OS app-data directory; `PHOTO_SORTER_DATA_DIR` overrides that directory. The current schema is created with `CREATE TABLE IF NOT EXISTS` plus additive column checks; a versioned migration system is not implemented. Tables hold one account, collections, roots, indexed media and presence, per-device review state, expiring media locks, decision history, scan progress, app settings, preview-cache metadata, audit events, apply batches, and apply operations. Sessions and pending apply plans live in memory, so restarting the host requires login again and discards any unconfirmed plan. Login issues a random, persistent HttpOnly device cookie; it identifies local review state but does not keep an authentication session alive across restart.
 
 All data and media API routes except setup status, login/setup/logout, and LAN address discovery require the session cookie. Login also issues a long-lived, HttpOnly device identifier used only for per-device review state and edit locks; the authentication session itself still expires on host restart. The API currently provides:
 
@@ -21,6 +21,7 @@ All data and media API routes except setup status, login/setup/logout, and LAN a
 | --- | --- |
 | `GET /api/setup-status`, `POST /api/setup`, `POST /api/login`, `POST /api/logout` | First-run account setup and session handling |
 | `GET /api/network` | Report detected local IPv4 URLs |
+| `GET /api/settings`, `PUT /api/settings` | Read or update the default sort and preview-cache limit |
 | `GET /api/collections`, `POST /api/collections` | List or create an active collection |
 | `GET /api/collections/archived`, `POST /api/collections/:id/archive`, `POST /api/collections/:id/restore` | Archive or restore a collection while retaining its history |
 | `GET /api/collections/:id/roots`, `DELETE /api/collections/:id/roots/:rootId` | List or remove a registered root; re-adding its path restores its retained index |
@@ -30,6 +31,7 @@ All data and media API routes except setup status, login/setup/logout, and LAN a
 | `GET /api/scans?collectionId=...` | Read persistent per-root scan progress and errors |
 | `POST /api/rescan` | Queue bounded background scans for a collection |
 | `GET /api/media/:id/content` | Serve an indexed item, including HTTP byte ranges |
+| `GET /api/media/:id/preview` | Serve an embedded image thumbnail when available |
 | `POST` / `DELETE /api/media/:id/lock` | Acquire/renew a 60-second item lock or release it |
 | `PUT /api/media/:id/decision` | Set a decision (`keep`, `delete`, `unsure`) or clear it to unseen while holding the item lock |
 | `POST /api/decisions/undo`, `POST /api/decisions/redo` | Undo or redo this device's latest decision, unless it has since changed elsewhere |
@@ -38,7 +40,7 @@ All data and media API routes except setup status, login/setup/logout, and LAN a
 | `GET /api/audit` | Read the most recent 200 audit events |
 | `GET /api/audit/export`, `DELETE /api/audit` | Export all audit events as JSON or clear them explicitly |
 
-There is no API for general settings or preview-cache management.
+The preview-cache limit defaults to 2,048 MB; setting it to zero disables caching and removes cached previews. Changing the limit evicts least-recently-used entries until the stored cache is within the configured limit.
 
 ## Scanning and media
 
@@ -48,7 +50,7 @@ The desktop folder picker registers a root and returns while its scan continues 
 
 Media is looked up by indexed ID and checked against the registered root before serving. The API handles browser range requests for videos. Preview rendering and playback use browser/OS codecs; there is no generated thumbnail/poster pipeline, managed preview cache, or guaranteed support for every allowlisted codec.
 
-The interface fetches category pages (60 items by default) and offers previous/next page controls. This is pagination, not a virtualized grid; it has not been performance-tested at the handoff's 200,000-item target.
+The interface fetches category pages (60 items by default) and offers previous/next page controls. This is pagination, not a virtualized grid; it has not been performance-tested at the handoff's 200,000-item target. The configured default sort applies when a device/collection has no saved review state; subsequent sort choices remain device/collection-specific.
 
 ## Decisions and file operations
 
@@ -64,14 +66,14 @@ Audit rows record account/collection/root lifecycle, scans and scan errors, deci
 
 | Area | Current status |
 | --- | --- |
-| Desktop + LAN access, local warning, host-only folder picker | Implemented; LAN uses plain HTTP and reports IPv4 addresses (no QR code). |
+| Desktop + LAN access, local warning, host-only folder picker | Implemented; LAN uses plain HTTP and displays local QR codes for detected private IPv4 addresses. |
 | Account/password | First-run host-local setup, salted scrypt hash, login/logout, restart reauthentication, and in-memory per-IP throttling are implemented. Passkeys/biometrics are deferred. |
 | Collections and roots | Create/switch collections, remember the last-used collection per device, add/remove roots while retaining their index, archive/restore collections, and enforce active-root overlap. Root registration remains host-picker-only. Broader root-management settings are not implemented. |
 | Scanning | Extension-filtered recursive scans, symlink/output exclusion, per-path errors, offline retention, changed-file decision reset, EXIF capture-date extraction, per-root progress, startup catch-up, two-root bounded background scanning, recursive watchers, and absent-file hiding after complete scans are implemented. Partial scans retain prior presence state; watcher fallback/retry and progress for individual path errors remain limited. |
 | Sorting/review | Keep/delete/unsure/unseen decisions, category filters, capture-date sorting with modified-time fallback, filename ordering, basic paging, keyboard/swipe/buttons, on-demand video playback, per-device queue state, expiring item locks, and decision undo/redo are implemented. Virtualized 200k navigation, zoom/pan, and live queue refresh across devices are absent. |
-| Previews | Browser-native rendering and range-based video serving are implemented. Generated thumbnails/posters and configurable LRU cache are absent. |
+| Previews | Image grids use embedded EXIF thumbnails when available and fall back to the original image. These thumbnails are stored in an app-managed LRU cache (default 2,048 MB, configurable in Settings). There is no generated thumbnail pipeline or video poster cache; videos use browser-native playback. |
 | Apply/restore | Two-step confirmation, output-folder consent, relative paths, collision numbering, no-overwrite moves, first-failure stop, journal rows, latest completed-batch restore, and staged keep/delete/unsure/unseen reconciliation are implemented. Comprehensive interrupted-batch handling remains incomplete. |
-| Audit/help | Persistent audit browsing, full JSON export, explicit clear with a retained clear event, and in-app quick help are implemented. Audit coverage is not yet complete for every settings/scan lifecycle, and there is no uninstall data warning. |
+| Audit/help/settings | Persistent audit browsing, full JSON export, explicit clear with a retained clear event, app default-sort/cache settings, desktop sign-in autostart, and in-app quick help are implemented. Audit coverage is not yet complete for every scan lifecycle, and there is no uninstall data warning. |
 | Packaging and tests | Per-OS package commands are available. CI runs lint, tests, and unpacked application builds on Ubuntu/Windows/macOS, then uploads each platform's build artifact. Automated tests exercise the HTTP/domain workflow; they do not automate a real Electron UI, phone connection, or native picker across operating systems. |
 | Deferred by product decision | PWA/passkeys, German localization, theme/grid-density controls, cloud access, and automatic backups are not part of the MVP. |
 

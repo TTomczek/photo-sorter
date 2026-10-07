@@ -82,11 +82,19 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
     defaultSort: 'capture-asc',
     previewCacheLimitMb: 2048,
   });
+  const cachedPreviewName = `${'a'.repeat(64)}.jpg`;
+  const cachedPreviewPath = path.join(dataDirectory, 'previews', cachedPreviewName);
+  await fs.mkdir(path.dirname(cachedPreviewPath), { recursive: true });
+  await fs.writeFile(cachedPreviewPath, 'cached');
+  app.db.prepare(`
+    INSERT INTO preview_cache(cache_key, filename, size, last_accessed) VALUES (?, ?, ?, ?)
+  `).run('a'.repeat(64), cachedPreviewName, 5, Date.now());
   const savedSettings = await api('/api/settings', {
     method: 'PUT',
     body: JSON.stringify({ defaultSort: 'filename', previewCacheLimitMb: 0 }),
   });
   assert.deepEqual(savedSettings.body, { defaultSort: 'filename', previewCacheLimitMb: 0 });
+  await assert.rejects(fs.stat(cachedPreviewPath), { code: 'ENOENT' });
   assert.equal((await api('/api/settings', {
     method: 'PUT',
     body: JSON.stringify({ defaultSort: 'invalid', previewCacheLimitMb: -1 }),

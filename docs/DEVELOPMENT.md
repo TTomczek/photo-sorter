@@ -18,6 +18,8 @@ Stop the running host before resetting its account password. In a terminal with 
 
 The default data directory is `%APPDATA%/photo-sorter` on Windows, `~/Library/Application Support/photo-sorter` on macOS, and `$XDG_CONFIG_HOME/photo-sorter` or `~/.config/photo-sorter` on Linux. No automatic backups are made. Database removal or loss discards account, collection, decision, apply, and audit history, but never touches original media.
 
+Settings lets you choose the default sort used before a device has saved a review position, set the managed embedded-image preview cache limit (2,048 MB by default; 0 disables it), and, in the desktop host, toggle sign-in autostart. Cached thumbnails are derived from embedded image metadata and stored under app data; images without an embedded thumbnail load from their original path, and videos do not have generated posters.
+
 ## Network warning
 
 The service accepts connections only on loopback and detected private IPv4 interfaces. The LAN site uses HTTP: passwords, sessions, and media are not encrypted in transit. Use a trusted LAN, or configure an HTTPS/VPN reverse proxy yourself. Never expose the service directly to the public internet. The app does not configure firewall or router rules.

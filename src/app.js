@@ -531,26 +531,19 @@ class PhotoSorter {
     return this.getSettings();
   }
 
-  async enforcePreviewCacheLimit(excludeCacheKey = null) {
+  async enforcePreviewCacheLimit() {
     const limitMb = this.getSettings().previewCacheLimitMb;
     let size = this.db.prepare('SELECT COALESCE(SUM(size), 0) AS size FROM preview_cache').get().size;
     const candidates = this.db.prepare(`
-      SELECT cache_key, filename, size FROM preview_cache
-      WHERE cache_key != ?
-      ORDER BY last_accessed ASC
-    `).all(excludeCacheKey || '');
+      SELECT cache_key, filename, size FROM preview_cache ORDER BY last_accessed ASC
+    `).all();
     for (const entry of candidates) {
       if (size <= limitMb * 1024 * 1024) break;
       this.db.prepare('DELETE FROM preview_cache WHERE cache_key = ?').run(entry.cache_key);
-      await fs.rm(path.join(this.dataDirectory, 'previews', entry.filename), { force: true });
-      size -= entry.size;
-    }
-    if (limitMb === 0 && excludeCacheKey) {
-      const current = this.db.prepare('SELECT filename FROM preview_cache WHERE cache_key = ?').get(excludeCacheKey);
-      if (current) {
-        this.db.prepare('DELETE FROM preview_cache WHERE cache_key = ?').run(excludeCacheKey);
-        await fs.rm(path.join(this.dataDirectory, 'previews', current.filename), { force: true });
+      if (/^[0-9a-f]{64}\.jpg$/.test(entry.filename)) {
+        await fs.rm(path.join(this.dataDirectory, 'previews', entry.filename), { force: true });
       }
+      size -= entry.size;
     }
   }
 
@@ -571,10 +564,13 @@ class PhotoSorter {
     if (!IMAGE_EXTENSIONS.has(extension)) return null;
     const cacheKey = crypto.createHash('sha256')
       .update(`${item.id}\0${stat.size}\0${stat.mtimeMs}`).digest('hex');
-    const cached = this.db.prepare('SELECT filename FROM preview_cache WHERE cache_key = ?').get(cacheKey);
-    if (cached) {
+    const cached = this.db.prepare('SELECT filename, size FROM preview_cache WHERE cache_key = ?').get(cacheKey);
+    if (cached && /^[0-9a-f]{64}\.jpg$/.test(cached.filename)) {
       try {
-        const buffer = await fs.readFile(path.join(this.dataDirectory, 'previews', cached.filename));
+        const cachedPath = path.join(this.dataDirectory, 'previews', cached.filename);
+        const cachedStat = await fs.lstat(cachedPath);
+        if (!cachedStat.isFile() || cachedStat.size !== cached.size) throw new Error('Cached preview is invalid.');
+        const buffer = await fs.readFile(cachedPath);
         this.db.prepare('UPDATE preview_cache SET last_accessed = ? WHERE cache_key = ?').run(Date.now(), cacheKey);
         return buffer;
       } catch {
@@ -600,7 +596,7 @@ class PhotoSorter {
         INSERT OR REPLACE INTO preview_cache(cache_key, filename, size, last_accessed)
         VALUES (?, ?, ?, ?)
       `).run(cacheKey, filename, buffer.length, Date.now());
-      await this.enforcePreviewCacheLimit(cacheKey);
+      await this.enforcePreviewCacheLimit();
       const current = this.db.prepare('SELECT 1 FROM preview_cache WHERE cache_key = ?').get(cacheKey);
       if (!current) await fs.rm(filenamePath, { force: true });
     } else {
