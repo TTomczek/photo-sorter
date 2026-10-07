@@ -201,6 +201,12 @@
       const end = value.match(/\s*$/)[0];
       return `${start}${exact}${end}`;
     }
+    const eventSeparator = value.lastIndexOf(' · ');
+    if (eventSeparator >= 0) {
+      const action = value.slice(eventSeparator + 3);
+      const translatedAction = german.get(action);
+      if (translatedAction) return `${value.slice(0, eventSeparator + 3)}${translatedAction}`;
+    }
     return value.replace(/Scanning (\d+) folder\(s\); (\d+) media item\(s\) indexed so far\./,
       (_, folders, items) => `Scanne ${folders} Ordner; bisher ${items} Medienelemente indiziert.`)
       .replace(/Scanning complete: (\d+) media item\(s\) indexed\./,

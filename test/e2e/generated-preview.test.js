@@ -53,12 +53,36 @@ test('authenticated clients can populate bounded JPEG preview cache without acce
   const route = `/api/media/${encodeURIComponent(item.id)}/preview`;
   const videoRoute = `/api/media/${encodeURIComponent(video.id)}/preview`;
 
+  const unauthorized = await fetch(`${origin}${route}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'image/jpeg',
+      'If-Match': `${item.size}:${item.modified_at}`,
+    },
+    body: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+  });
+  assert.equal(unauthorized.status, 401);
+
   const wrongType = await api(route, {
     method: 'POST',
     headers: { 'Content-Type': 'application/octet-stream', 'If-Match': `${item.size}:${item.modified_at}` },
     body: preview,
   });
   assert.equal(wrongType.response.status, 415);
+
+  const malformedJpeg = await api(route, {
+    method: 'POST',
+    headers: { 'Content-Type': 'image/jpeg', 'If-Match': `${item.size}:${item.modified_at}` },
+    body: Buffer.from([0, 1, 2, 3]),
+  });
+  assert.equal(malformedJpeg.response.status, 400);
+
+  const oversized = await api(route, {
+    method: 'POST',
+    headers: { 'Content-Type': 'image/jpeg', 'If-Match': `${item.size}:${item.modified_at}` },
+    body: Buffer.alloc(8 * 1024 * 1024 + 1),
+  });
+  assert.equal(oversized.response.status, 413);
 
   const saved = await api(route, {
     method: 'POST',

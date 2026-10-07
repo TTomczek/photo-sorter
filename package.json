@@ -11,9 +11,10 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
-    "test": "node --test",
+    "test": "npm run test:unit && npm run test:e2e && npm run test:browser",
     "test:unit": "node --test test/unit/*.test.js",
     "test:e2e": "node --test test/e2e/*.test.js",
+    "test:browser": "playwright test",
     "build": "electron-builder --dir",
     "reset-password": "node scripts/reset-password.js",
     "dist:win": "electron-builder --win",
@@ -46,6 +47,7 @@
     }
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "electron": "^44.5.1",
     "electron-builder": "^26.15.3",
     "eslint": "^10.12.0"

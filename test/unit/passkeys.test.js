@@ -37,3 +37,33 @@ test('passkey options are restricted to the configured secure origin and device'
     status: 400,
   });
 });
+
+test('passkeys remain disabled for malformed origins, HTTP addresses and mismatched relying parties', (t) => {
+  const priorOrigin = process.env.PHOTO_SORTER_WEBAUTHN_ORIGIN;
+  const priorRpId = process.env.PHOTO_SORTER_WEBAUTHN_RP_ID;
+  const db = new DatabaseSync(':memory:');
+  t.after(() => {
+    db.close();
+    if (priorOrigin === undefined) delete process.env.PHOTO_SORTER_WEBAUTHN_ORIGIN;
+    else process.env.PHOTO_SORTER_WEBAUTHN_ORIGIN = priorOrigin;
+    if (priorRpId === undefined) delete process.env.PHOTO_SORTER_WEBAUTHN_RP_ID;
+    else process.env.PHOTO_SORTER_WEBAUTHN_RP_ID = priorRpId;
+  });
+
+  const passkeys = new PasskeyService(db);
+  for (const [origin, rpId] of [
+    ['http://photos.example.test', 'example.test'],
+    ['https://photos.example.test/', 'example.test'],
+    ['https://photos.example.test', 'other.test'],
+    ['https://photos.example.test', 'Example.test'],
+    ['http://192.168.1.20', '192.168.1.20'],
+  ]) {
+    process.env.PHOTO_SORTER_WEBAUTHN_ORIGIN = origin;
+    process.env.PHOTO_SORTER_WEBAUTHN_RP_ID = rpId;
+    assert.deepEqual(passkeys.status(), { enabled: false, count: 0 });
+  }
+
+  process.env.PHOTO_SORTER_WEBAUTHN_ORIGIN = 'http://localhost';
+  process.env.PHOTO_SORTER_WEBAUTHN_RP_ID = 'localhost';
+  assert.deepEqual(passkeys.status(), { enabled: true, count: 0 });
+});

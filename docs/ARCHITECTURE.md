@@ -80,14 +80,15 @@ The PWA manifest and service worker are available only in secure contexts (HTTPS
 | Apply/restore | Two-step confirmation, output-folder consent, relative paths, collision numbering, no-overwrite moves, first-failure stop with per-operation outcomes, pre-action move/restore journal rows, conservative restart reconciliation, latest completed-batch restore, and staged keep/delete/unsure/unseen reconciliation are implemented. Ambiguous states preserve both paths and are reported for manual resolution. |
 | Audit/help/settings | Persistent audit browsing/export/clear, scan lifecycle events, passkey audit entries, default-sort/cache settings, per-browser light/dark/system theme and grid density, English/German UI, desktop autostart, and in-app help are implemented. Uninstall preserves app data; help/docs warn that manually deleting it loses history. |
 | PWA/passkeys | The PWA manifest and offline static shell are secure-context gated; passkeys are backed by WebAuthn and require an explicit origin/RP domain configuration. The service worker does not cache API or media responses. |
-| Packaging and tests | CI runs lint, tests, unpacked builds, and native NSIS/DMG/AppImage packages on Windows/macOS/Linux. Automated coverage includes the HTTP/domain workflows and a 200,000-record pagination fixture, but does not launch a real Electron UI, phone browser, authenticator, or native folder picker. |
+| Packaging and tests | CI runs unit, HTTP workflow, and Playwright Chromium browser tests, lint, unpacked builds, and native NSIS/DMG/AppImage packages on Windows/macOS/Linux. Browser tests exercise the real HTTP service and responsive web UI with generated PNGs, and use Chromium's virtual WebAuthn authenticator. They do not launch the Electron shell or native folder picker. |
 | Still excluded by product decision | Cloud access/sync and automatic backups remain excluded. |
 
 ## Validation commands
 
-- `npm test` runs all Node test suites.
+- `npm test` runs unit, HTTP workflow, and Playwright Chromium browser suites.
 - `npm run lint` runs ESLint.
-- `npm run test:unit` and `npm run test:e2e` run the unit and HTTP workflow suites separately. The `e2e` suite name refers to API workflow tests; it does not launch Electron or a phone browser.
+- `npm run test:unit`, `npm run test:e2e`, and `npm run test:browser` run the unit, HTTP workflow, and browser suites separately. HTTP workflow tests exercise the API; Playwright tests launch Chromium against the real local server.
 - `npm run build` creates an unpacked package for the current OS.
 - `npm run dist:win`, `npm run dist:mac`, and `npm run dist:linux` request the corresponding NSIS, DMG, and AppImage packages.
-- GitHub Actions runs lint, tests, and `npm run build` on all three desktop OSes for pushes and pull requests; successful jobs upload the unpacked application as artifacts.
+- GitHub Actions runs lint, unit/HTTP/Playwright tests, `npm run build`, and the NSIS/DMG/AppImage package on Windows, macOS, and Linux for pushes and pull requests. The workflow summary reports each test suite, and platform packages are retained as workflow artifacts.
+- Successful pushes to `main` publish a prerelease with all platform packages under a unique `main-<commit-sha>` tag. Enable the repository's **Settings > General > Releases > Immutable releases** option for GitHub to lock each published release and its assets.

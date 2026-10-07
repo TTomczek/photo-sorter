@@ -476,11 +476,15 @@ function handleGridScroll() {
   const rowStart = Math.floor(mediaViewport.scrollTop / rowHeight) * columns;
   const firstVisibleIndex = state.offset > rowStart && state.offset < rowStart + columns
     ? state.offset : rowStart;
-  const pageOffset = Math.floor(firstVisibleIndex / state.limit) * state.limit;
+  const lastVisibleIndex = Math.min(
+    state.total - 1,
+    Math.floor((mediaViewport.scrollTop + mediaViewport.clientHeight) / rowHeight) * columns,
+  );
+  const pageOffset = Math.floor(Math.max(firstVisibleIndex, lastVisibleIndex) / state.limit) * state.limit;
   if (pageOffset === state.offset) return;
   const previousOffset = state.offset;
   state.offset = pageOffset;
-  state.gridTargetIndex = firstVisibleIndex - pageOffset;
+  state.gridTargetIndex = Math.max(0, firstVisibleIndex - pageOffset);
   state.restoreMediaId = '';
   loadMedia().catch((error) => {
     if (state.offset === pageOffset) {

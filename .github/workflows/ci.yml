@@ -21,8 +21,39 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Install Playwright Chromium
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+      - name: Install Playwright Chromium
+        if: runner.os != 'Linux'
+        run: npx playwright install chromium
       - run: npm run lint
-      - run: npm test
+      - name: Unit tests
+        id: unit
+        run: npm run test:unit
+      - name: HTTP workflow tests
+        id: e2e
+        run: npm run test:e2e
+      - name: Playwright browser tests
+        id: browser
+        run: npm run test:browser
+      - name: Publish test summary
+        if: always()
+        shell: bash
+        env:
+          UNIT_RESULT: ${{ steps.unit.outcome }}
+          E2E_RESULT: ${{ steps.e2e.outcome }}
+          BROWSER_RESULT: ${{ steps.browser.outcome }}
+        run: |
+          {
+            echo "## Test results (${{ matrix.os }})"
+            echo
+            echo "| Suite | Result |"
+            echo "| --- | --- |"
+            echo "| Unit | $UNIT_RESULT |"
+            echo "| HTTP workflow | $E2E_RESULT |"
+            echo "| Playwright browser | $BROWSER_RESULT |"
+          } >> "$GITHUB_STEP_SUMMARY"
       - run: npm run build
       - name: Build Windows installer
         if: runner.os == 'Windows'
@@ -36,6 +67,46 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: photo-sorter-${{ runner.os }}-${{ runner.arch }}
-          path: release/**
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.AppImage
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download platform packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: photo-sorter-*
+          path: release-assets
+          merge-multiple: true
+      - name: Publish immutable main snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -d '' packages < <(
+            find release-assets -maxdepth 1 -type f \
+              \( -iname '*.exe' -o -iname '*.dmg' -o -iname '*.appimage' \) \
+              -print0 | sort -z
+          )
+          if [[ "${#packages[@]}" -ne 3 ]]; then
+            echo "Expected one Windows, macOS, and Linux installer; found ${#packages[@]}."
+            find release-assets -maxdepth 1 -type f -print
+            exit 1
+          fi
+          gh release create "main-${GITHUB_SHA}" "${packages[@]}" \
+            --target "${GITHUB_SHA}" \
+            --title "Main snapshot ${GITHUB_SHA:0:12}" \
+            --notes "Automated release from main commit ${GITHUB_SHA}." \
+            --draft \
+            --prerelease
+          release_id=$(gh release view "main-${GITHUB_SHA}" --json databaseId --jq .databaseId)
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            --field draft=false

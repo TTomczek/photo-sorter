@@ -8,9 +8,9 @@
 4. In the host window, set a password of at least 12 characters, create a collection, and choose one or more folders.
 5. Log in from a phone using a displayed address on the same private network.
 
-`npm run lint` runs ESLint. `npm test` runs the unit suite and HTTP workflow tests. `npm run test:unit` and `npm run test:e2e` run either suite independently. `npm run build` checks and packages the unpacked app for the current OS; `npm run dist:win`, `npm run dist:mac`, and `npm run dist:linux` build the native installer/package target.
+`npm run lint` runs ESLint. `npm test` runs unit tests, HTTP workflow tests, and Playwright browser tests against a real local server. Browser tests launch Chromium and create generated PNG fixtures to exercise image decoding, generated preview caching, responsive review controls, and file operations. Run `npx playwright install chromium` once after installing npm packages. `npm run test:unit`, `npm run test:e2e`, and `npm run test:browser` run the individual suites. `npm run build` checks and packages the unpacked app for the current OS; `npm run dist:win`, `npm run dist:mac`, and `npm run dist:linux` build the native installer/package target.
 
-GitHub Actions runs lint, tests, the unpacked build, and the native NSIS, DMG, or AppImage package on Windows, macOS, and Linux for pushes and pull requests. Each successful platform job uploads its release output as a downloadable workflow artifact retained for 14 days.
+GitHub Actions runs lint, unit and HTTP workflow tests, Playwright browser tests, the unpacked build, and the native NSIS, DMG, or AppImage package on Windows, macOS, and Linux for pushes and pull requests. Each platform job shows its three test-suite outcomes in the workflow summary and uploads its package as a downloadable artifact retained for 14 days. Successful pushes to `main` publish one prerelease containing all three platform packages, tagged `main-<commit-sha>`; existing release tags are never reused or overwritten. To have GitHub lock published releases and their assets, enable **Settings > General > Releases > Immutable releases** in the repository.
 
 ## Account recovery and app data
 
