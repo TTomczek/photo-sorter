@@ -7,6 +7,7 @@ const {
   VIDEO_EXTENSIONS,
   isLocalNetworkAddress,
   isWithin,
+  normalizeCaptureDate,
   numberedDestination,
   pathsOverlap,
 } = require('../../src/app');
@@ -27,6 +28,14 @@ test('collision names are numbered before their extension', () => {
   const existing = new Set(['/photos/deleted/image.jpg', '/photos/deleted/image (1).jpg']);
   const result = numberedDestination('/photos/deleted/image.jpg', (candidate) => existing.has(candidate));
   assert.equal(result, '/photos/deleted/image (2).jpg');
+});
+
+test('capture date normalization prefers original capture metadata and rejects invalid values', () => {
+  const date = new Date('2024-03-18T11:22:33.000Z');
+  assert.equal(normalizeCaptureDate({ DateTimeOriginal: date, CreateDate: '2020-01-01' }), date.toISOString());
+  assert.equal(normalizeCaptureDate({ CreateDate: '2023-06-01T09:00:00Z' }), '2023-06-01T09:00:00.000Z');
+  assert.equal(normalizeCaptureDate({ DateCreated: 'not a date' }), null);
+  assert.equal(normalizeCaptureDate(null), null);
 });
 
 test('media allowlists include common image/video formats and categories are bounded', () => {

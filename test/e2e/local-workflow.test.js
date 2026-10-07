@@ -83,9 +83,9 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
   assert.equal((await otherDevice('/api/preferences')).body.lastCollectionId, null);
   const savedPosition = await api('/api/device-state', {
     method: 'PUT',
-    body: JSON.stringify({ collectionId, category: 'unseen', sort: 'date-asc', mediaId: null, offset: 0 }),
+    body: JSON.stringify({ collectionId, category: 'unseen', sort: 'capture-asc', mediaId: null, offset: 0 }),
   });
-  assert.equal(savedPosition.body.state.sort, 'date-asc');
+  assert.equal(savedPosition.body.state.sort, 'capture-asc');
   assert.equal((await api(`/api/device-state?collectionId=${collectionId}`)).body.state.category, 'unseen');
   assert.equal((await otherDevice(`/api/device-state?collectionId=${collectionId}`)).body.state, null);
   const arbitraryRoot = await api('/api/roots', { method: 'POST', body: JSON.stringify({ path: '/etc' }) });
@@ -117,7 +117,7 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
   assert.equal(competingDecision.response.status, 409);
   const savedItemPosition = await api('/api/device-state', {
     method: 'PUT',
-    body: JSON.stringify({ collectionId, category: 'unseen', sort: 'date-asc', mediaId: photo.id, offset: 0 }),
+    body: JSON.stringify({ collectionId, category: 'unseen', sort: 'capture-asc', mediaId: photo.id, offset: 0 }),
   });
   assert.equal(savedItemPosition.body.state.mediaId, photo.id);
   const decisionSaved = await api(`/api/media/${photo.id}/decision`, {
@@ -342,6 +342,9 @@ test('background scans expose incremental progress and finish indexing without b
   assert.equal(completed.status, 'completed');
   assert.equal(completed.indexed, 300);
   assert.equal(completed.visited, 300);
+  app.db.prepare('UPDATE media SET capture_at = ? WHERE relative_path = ?').run('2020-01-02T00:00:00.000Z', 'image-1.jpg');
+  app.db.prepare('UPDATE media SET capture_at = ? WHERE relative_path = ?').run('2020-01-01T00:00:00.000Z', 'image-2.jpg');
+  assert.equal(app.listMedia({ collectionId, category: 'unseen', sort: 'capture-asc', limit: 1 }).items[0].relative_path, 'image-2.jpg');
 
   const port = await app.listen(0);
   const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
@@ -366,4 +369,47 @@ test('background scans expose incremental progress and finish indexing without b
     headers: { Cookie: cookies },
   });
   assert.equal((await progress.json()).scans[0].status, 'completed');
+});
+
+test('root watcher indexes additions, resets changed-file decisions, and hides removals', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-watch-'));
+  const dataDirectory = path.join(temporary, 'data');
+  const root = path.join(temporary, 'photos');
+  await fs.mkdir(root);
+  const original = path.join(root, 'original.jpg');
+  await fs.writeFile(original, 'before');
+  const app = await new PhotoSorter({ dataDirectory }).initialize();
+  t.after(async () => {
+    await app.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+  await app.createPassword('a secure test password');
+  const collectionId = app.createCollection('Watched');
+  const rootId = await app.addRoot(collectionId, root);
+  if (!app.rootWatchers.has(rootId)) return t.skip('Recursive filesystem watching is unavailable.');
+  const originalItem = app.listMedia({ collectionId, category: 'unseen' }).items[0];
+  app.setDecision(originalItem.id, 'keep');
+
+  const waitFor = async (predicate) => {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      if (predicate()) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.fail('Timed out waiting for filesystem watcher reconciliation.');
+  };
+
+  const added = path.join(root, 'added.jpg');
+  await fs.writeFile(added, 'new');
+  await waitFor(() => app.listMedia({ collectionId, category: 'unseen' }).total === 1);
+  const changed = path.join(root, 'original.jpg');
+  await fs.writeFile(changed, 'changed-content');
+  await waitFor(() => {
+    const row = app.db.prepare('SELECT size, category FROM media WHERE id = ?').get(originalItem.id);
+    return row.size === Buffer.byteLength('changed-content') && row.category === null;
+  });
+  await fs.unlink(added);
+  await waitFor(() => app.db.prepare('SELECT present FROM media WHERE relative_path = ?').get('added.jpg').present === 0);
+  assert.equal(app.db.prepare('SELECT present FROM media WHERE relative_path = ?').get('added.jpg').present, 0);
+  assert.equal(app.db.prepare('SELECT category FROM media WHERE id = ?').get(originalItem.id).category, null);
 });

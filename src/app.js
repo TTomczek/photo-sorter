@@ -5,6 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { isIP } = require('node:net');
 const { DatabaseSync } = require('node:sqlite');
+const exifr = require('exifr');
 
 const IMAGE_EXTENSIONS = new Set([
   '.avif', '.bmp', '.gif', '.heic', '.heif', '.jpeg', '.jpg', '.png',
@@ -16,6 +17,23 @@ const VIDEO_EXTENSIONS = new Set([
 ]);
 const CATEGORIES = new Set(['keep', 'delete', 'unsure', 'unseen']);
 const OUTPUT_MARKER = '.photo-sorter-output';
+const SORT_ORDERS = new Set(['capture-asc', 'capture-desc', 'filename', 'date-asc', 'date-desc']);
+
+function normalizeCaptureDate(metadata) {
+  const value = metadata?.DateTimeOriginal || metadata?.CreateDate || metadata?.DateCreated;
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
+async function readCaptureDate(filename) {
+  try {
+    const metadata = await exifr.parse(filename, ['DateTimeOriginal', 'CreateDate', 'DateCreated']);
+    return normalizeCaptureDate(metadata);
+  } catch {
+    return null;
+  }
+}
 
 function defaultDataDirectory() {
   if (process.env.PHOTO_SORTER_DATA_DIR) return path.resolve(process.env.PHOTO_SORTER_DATA_DIR);
@@ -85,8 +103,11 @@ class PhotoSorter {
     this.activeScans = new Map();
     this.scanQueue = [];
     this.queuedScans = new Set();
+    this.pendingScans = new Set();
     this.scanWaiters = new Map();
     this.maxConcurrentScans = 2;
+    this.rootWatchers = new Map();
+    this.scanDebounceTimers = new Map();
     this.closed = false;
     this.db = null;
     this.server = null;
@@ -136,6 +157,9 @@ class PhotoSorter {
         size INTEGER NOT NULL,
         modified_at INTEGER NOT NULL,
         category TEXT,
+        capture_at TEXT,
+        present INTEGER NOT NULL DEFAULT 1,
+        last_seen_scan TEXT,
         UNIQUE(root_id, relative_path)
       );
       CREATE INDEX IF NOT EXISTS media_root_category ON media(root_id, category);
@@ -143,7 +167,7 @@ class PhotoSorter {
         device_id TEXT NOT NULL,
         collection_id TEXT NOT NULL REFERENCES collections(id),
         category TEXT NOT NULL DEFAULT 'unseen',
-        sort_order TEXT NOT NULL DEFAULT 'date-asc',
+        sort_order TEXT NOT NULL DEFAULT 'capture-asc',
         media_id TEXT,
         page_offset INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL,
@@ -193,6 +217,10 @@ class PhotoSorter {
     `);
     const rootColumns = this.db.prepare('PRAGMA table_info(roots)').all().map((column) => column.name);
     if (!rootColumns.includes('active')) this.db.exec('ALTER TABLE roots ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
+    const mediaColumns = this.db.prepare('PRAGMA table_info(media)').all().map((column) => column.name);
+    if (!mediaColumns.includes('capture_at')) this.db.exec('ALTER TABLE media ADD COLUMN capture_at TEXT');
+    if (!mediaColumns.includes('present')) this.db.exec('ALTER TABLE media ADD COLUMN present INTEGER NOT NULL DEFAULT 1');
+    if (!mediaColumns.includes('last_seen_scan')) this.db.exec('ALTER TABLE media ADD COLUMN last_seen_scan TEXT');
     await this.recoverApplyOperations();
     setImmediate(() => {
       if (this.closed || !this.db) return;
@@ -201,6 +229,7 @@ class PhotoSorter {
         WHERE r.active = 1 AND c.active = 1
       `).all();
       for (const root of roots) this.startScan(root.id);
+      for (const root of roots) this.watchRoot(root.id);
     });
     return this;
   }
@@ -240,6 +269,10 @@ class PhotoSorter {
 
   close() {
     this.closed = true;
+    for (const watcher of this.rootWatchers.values()) watcher.close();
+    this.rootWatchers.clear();
+    for (const timer of this.scanDebounceTimers.values()) clearTimeout(timer);
+    this.scanDebounceTimers.clear();
     const closingServers = this.servers.map((server) => new Promise((resolve) => {
       if (!server.listening) return resolve();
       server.close(resolve);
@@ -257,6 +290,7 @@ class PhotoSorter {
     }
     this.queuedScans.clear();
     this.scanQueue = [];
+    this.pendingScans.clear();
     const closeDatabase = () => {
       if (this.db) {
         this.db.close();
@@ -319,7 +353,7 @@ class PhotoSorter {
   listCollections() {
     return this.db.prepare(`
       SELECT c.id, c.name, c.active,
-        (SELECT COUNT(*) FROM media m JOIN roots r ON r.id = m.root_id WHERE r.collection_id = c.id AND r.active = 1) AS item_count,
+        (SELECT COUNT(*) FROM media m JOIN roots r ON r.id = m.root_id WHERE r.collection_id = c.id AND r.active = 1 AND m.present = 1) AS item_count,
         (SELECT COUNT(*) FROM roots r WHERE r.collection_id = c.id AND r.active = 1 AND r.online = 0) AS offline_roots
       FROM collections c WHERE c.active = 1 ORDER BY c.created_at
     `).all();
@@ -335,6 +369,48 @@ class PhotoSorter {
     `).all(collectionId);
   }
 
+  watchRoot(rootId) {
+    if (this.closed || this.rootWatchers.has(rootId)) return;
+    const root = this.db.prepare(`
+      SELECT r.path FROM roots r JOIN collections c ON c.id = r.collection_id
+      WHERE r.id = ? AND r.active = 1 AND c.active = 1
+    `).get(rootId);
+    if (!root) return;
+    try {
+      const watcher = fsSync.watch(root.path, { recursive: true }, () => this.scheduleScan(rootId));
+      watcher.on('error', (error) => {
+        watcher.close();
+        this.rootWatchers.delete(rootId);
+        if (!this.closed) this.log('watch_error', { rootId, path: root.path, message: error.message });
+      });
+      this.rootWatchers.set(rootId, watcher);
+    } catch (error) {
+      this.log('watch_error', { rootId, path: root.path, message: error.message });
+    }
+  }
+
+  scheduleScan(rootId) {
+    if (this.closed) return;
+    const root = this.db.prepare(`
+      SELECT r.id FROM roots r JOIN collections c ON c.id = r.collection_id
+      WHERE r.id = ? AND r.active = 1 AND c.active = 1
+    `).get(rootId);
+    if (!root) return;
+    clearTimeout(this.scanDebounceTimers.get(rootId));
+    const timer = setTimeout(() => {
+      this.scanDebounceTimers.delete(rootId);
+      if (!this.closed) this.startScan(rootId);
+    }, 500);
+    this.scanDebounceTimers.set(rootId, timer);
+  }
+
+  closeRootWatcher(rootId) {
+    this.rootWatchers.get(rootId)?.close();
+    this.rootWatchers.delete(rootId);
+    clearTimeout(this.scanDebounceTimers.get(rootId));
+    this.scanDebounceTimers.delete(rootId);
+  }
+
   async removeRoot(collectionId, rootId) {
     const root = this.db.prepare(`
       SELECT r.id, r.path FROM roots r JOIN collections c ON c.id = r.collection_id
@@ -342,6 +418,7 @@ class PhotoSorter {
     `).get(rootId, collectionId);
     if (!root) throw new Error('Root not found.');
     this.db.prepare('UPDATE roots SET active = 0 WHERE id = ?').run(rootId);
+    this.closeRootWatcher(rootId);
     this.db.prepare('DELETE FROM media_locks WHERE media_id IN (SELECT id FROM media WHERE root_id = ?)').run(rootId);
     this.log('root_removed', { collectionId, rootId, path: root.path });
     return { removed: true };
@@ -351,6 +428,9 @@ class PhotoSorter {
     const collection = this.db.prepare('SELECT id, name FROM collections WHERE id = ? AND active = 1').get(collectionId);
     if (!collection) throw new Error('Collection not found.');
     this.db.prepare('UPDATE collections SET active = 0 WHERE id = ?').run(collectionId);
+    for (const root of this.db.prepare('SELECT id FROM roots WHERE collection_id = ?').all(collectionId)) {
+      this.closeRootWatcher(root.id);
+    }
     this.log('collection_archived', { collectionId, name: collection.name });
     return { archived: true };
   }
@@ -371,6 +451,10 @@ class PhotoSorter {
       }
     }
     this.db.prepare('UPDATE collections SET active = 1 WHERE id = ?').run(collectionId);
+    for (const root of roots) {
+      this.watchRoot(root.id);
+      this.startScan(root.id);
+    }
     this.log('collection_restored', { collectionId, name: collection.name });
     return { restored: true };
   }
@@ -424,6 +508,7 @@ class PhotoSorter {
       this.db.prepare('UPDATE roots SET active = 1, online = 1, read_only = ? WHERE id = ?')
         .run((rootStat.mode & 0o222) === 0 ? 1 : 0, retainedRoot.id);
       this.log('root_readded', { collectionId, rootId: retainedRoot.id, path: canonicalPath });
+      this.watchRoot(retainedRoot.id);
       if (waitForScan) await this.scanRoot(retainedRoot.id);
       else this.startScan(retainedRoot.id);
       return retainedRoot.id;
@@ -433,13 +518,17 @@ class PhotoSorter {
     this.db.prepare('INSERT INTO roots(id, collection_id, path, read_only) VALUES (?, ?, ?, ?)')
       .run(id, collectionId, canonicalPath, readOnly ? 1 : 0);
     this.log('root_added', { collectionId, rootId: id, path: canonicalPath, readOnly });
+    this.watchRoot(id);
     if (waitForScan) await this.scanRoot(id);
     else this.startScan(id);
     return id;
   }
 
   startScan(rootId) {
-    if (this.activeScans.has(rootId) || this.queuedScans.has(rootId)) return { started: false, rootId };
+    if (this.activeScans.has(rootId) || this.queuedScans.has(rootId)) {
+      this.pendingScans.add(rootId);
+      return { started: false, rootId };
+    }
     const root = this.db.prepare('SELECT id FROM roots WHERE id = ? AND active = 1').get(rootId);
     if (!root) throw new Error('Root not found.');
     this.db.prepare(`
@@ -489,6 +578,7 @@ class PhotoSorter {
           this.activeScans.delete(rootId);
           this.scanWaiters.delete(rootId);
           this.pumpScanQueue();
+          if (!this.closed && this.pendingScans.delete(rootId)) this.startScan(rootId);
         });
       this.activeScans.set(rootId, task);
     }
@@ -534,14 +624,17 @@ class PhotoSorter {
       if (!comparePaths(base, root.path)) throw new Error('Registered root no longer resolves to its original directory.');
       const directories = [base];
       const upsert = this.db.prepare(`
-        INSERT INTO media(id, root_id, relative_path, size, modified_at, category)
-        VALUES (?, ?, ?, ?, ?, NULL)
+        INSERT INTO media(id, root_id, relative_path, size, modified_at, category, capture_at, present, last_seen_scan)
+        VALUES (?, ?, ?, ?, ?, NULL, ?, 1, ?)
         ON CONFLICT(root_id, relative_path) DO UPDATE SET
           category = CASE WHEN media.size != excluded.size OR media.modified_at != excluded.modified_at
             THEN NULL ELSE media.category END,
-          size = excluded.size, modified_at = excluded.modified_at
+          size = excluded.size, modified_at = excluded.modified_at, capture_at = excluded.capture_at,
+          present = 1, last_seen_scan = excluded.last_seen_scan
       `);
       let entriesVisited = 0;
+      let scanErrors = 0;
+      const scanId = crypto.randomUUID();
       let entriesExamined = 0;
       const updateProgress = (status, error = null) => {
         this.db.prepare(`
@@ -564,6 +657,7 @@ class PhotoSorter {
             || !isWithin(base, await fs.realpath(directory))) continue;
           entries = await fs.readdir(directory, { withFileTypes: true });
         } catch (error) {
+          scanErrors += 1;
           this.log('scan_error', { rootId, path: directory, message: error.message });
           continue;
         }
@@ -587,17 +681,31 @@ class PhotoSorter {
           if (!kind) continue;
           try {
             const stat = await fs.lstat(fullPath);
-            if (!stat.isFile() || stat.isSymbolicLink() || !isWithin(base, await fs.realpath(fullPath))) continue;
+            const resolvedPath = await fs.realpath(fullPath);
+            if (!stat.isFile() || stat.isSymbolicLink() || !isWithin(base, resolvedPath)) continue;
             const relativePath = path.relative(base, fullPath);
+            const captureDate = IMAGE_EXTENSIONS.has(extension) ? await readCaptureDate(resolvedPath) : null;
             upsert.run(crypto.createHash('sha256').update(`${rootId}\0${relativePath}`).digest('hex'),
-              rootId, relativePath, stat.size, stat.mtimeMs);
+              rootId, relativePath, stat.size, stat.mtimeMs, captureDate, scanId);
             entriesVisited += 1;
           } catch (error) {
+            scanErrors += 1;
             this.log('scan_error', { rootId, path: fullPath, message: error.message });
           }
         }
       }
+      if (this.closed) return entriesVisited;
+      if (!this.db.prepare('SELECT 1 FROM roots WHERE id = ? AND active = 1').get(rootId)) {
+        updateProgress('cancelled');
+        return entriesVisited;
+      }
       this.db.prepare('UPDATE roots SET online = 1 WHERE id = ?').run(rootId);
+      if (scanErrors === 0) {
+        this.db.prepare(`
+          UPDATE media SET present = CASE WHEN last_seen_scan = ? THEN 1 ELSE 0 END
+          WHERE root_id = ?
+        `).run(scanId, rootId);
+      }
       updateProgress('completed');
       this.log('scan_completed', { rootId, path: base, indexed: entriesVisited });
       return entriesVisited;
@@ -625,8 +733,8 @@ class PhotoSorter {
     return indexed;
   }
 
-  listMedia({ collectionId, category, sort = 'date-asc', offset = 0, limit = 60 }) {
-    const filters = ['r.collection_id = ?', 'r.active = 1'];
+  listMedia({ collectionId, category, sort = 'capture-asc', offset = 0, limit = 60 }) {
+    const filters = ['r.collection_id = ?', 'r.active = 1', 'c.active = 1', 'm.present = 1'];
     const values = [collectionId];
     if (category === 'unseen') filters.push('m.category IS NULL');
     else if (CATEGORIES.has(category)) {
@@ -634,6 +742,8 @@ class PhotoSorter {
       values.push(category === 'unseen' ? null : category);
     }
     const orderBy = {
+      'capture-asc': 'COALESCE(julianday(m.capture_at), m.modified_at / 86400000.0 + 2440587.5) ASC, m.modified_at ASC, m.relative_path COLLATE NOCASE ASC',
+      'capture-desc': 'COALESCE(julianday(m.capture_at), m.modified_at / 86400000.0 + 2440587.5) DESC, m.modified_at DESC, m.relative_path COLLATE NOCASE ASC',
       'date-asc': 'm.modified_at ASC, m.relative_path COLLATE NOCASE ASC',
       'date-desc': 'm.modified_at DESC, m.relative_path COLLATE NOCASE ASC',
       filename: 'm.relative_path COLLATE NOCASE ASC',
@@ -648,13 +758,13 @@ class PhotoSorter {
           OR lower(m.relative_path) GLOB '*.3gp' OR lower(m.relative_path) GLOB '*.wmv'
           OR lower(m.relative_path) GLOB '*.mts' THEN 'video' ELSE 'image' END AS kind,
         r.online, r.read_only
-      FROM media m JOIN roots r ON r.id = m.root_id
+      FROM media m JOIN roots r ON r.id = m.root_id JOIN collections c ON c.id = r.collection_id
       WHERE ${filters.join(' AND ')}
       ORDER BY ${orderBy}
       LIMIT ? OFFSET ?
     `).all(...values, limit, offset);
     const total = this.db.prepare(`
-      SELECT COUNT(*) AS count FROM media m JOIN roots r ON r.id = m.root_id
+      SELECT COUNT(*) AS count FROM media m JOIN roots r ON r.id = m.root_id JOIN collections c ON c.id = r.collection_id
       WHERE ${filters.join(' AND ')}
     `).get(...values).count;
     return { items, total, offset, limit };
@@ -665,7 +775,7 @@ class PhotoSorter {
     const item = this.db.prepare(`
       SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id
       JOIN collections c ON c.id = r.collection_id
-      WHERE m.id = ? AND r.active = 1 AND c.active = 1
+      WHERE m.id = ? AND r.active = 1 AND c.active = 1 AND m.present = 1
     `).get(mediaId);
     if (!item) throw new Error('Media item not found.');
     const next = category === 'unseen' ? null : category;
@@ -678,7 +788,9 @@ class PhotoSorter {
       throw new Error('Collection not found.');
     }
     return this.db.prepare(`
-      SELECT category, sort_order AS sort, media_id AS mediaId, page_offset AS offset
+      SELECT category,
+        CASE sort_order WHEN 'date-asc' THEN 'capture-asc' WHEN 'date-desc' THEN 'capture-desc' ELSE sort_order END AS sort,
+        media_id AS mediaId, page_offset AS offset
       FROM device_state WHERE device_id = ? AND collection_id = ?
     `).get(deviceId, collectionId) || null;
   }
@@ -688,16 +800,18 @@ class PhotoSorter {
       throw new Error('Collection not found.');
     }
     const category = state.category;
-    const sort = state.sort;
+    const sort = state.sort === 'date-asc' ? 'capture-asc'
+      : state.sort === 'date-desc' ? 'capture-desc' : state.sort;
     const offset = state.offset;
     if (!CATEGORIES.has(category)
-      || !['date-asc', 'date-desc', 'filename'].includes(sort)
+      || !SORT_ORDERS.has(sort)
       || !Number.isSafeInteger(offset) || offset < 0 || offset > 2_000_000) {
       throw new Error('Invalid review position.');
     }
     const mediaId = state.mediaId === null || state.mediaId === '' ? null : state.mediaId;
     if (mediaId !== null && (typeof mediaId !== 'string'
-      || !this.db.prepare('SELECT m.id FROM media m JOIN roots r ON r.id = m.root_id WHERE m.id = ? AND r.collection_id = ?')
+      || !this.db.prepare(`SELECT m.id FROM media m JOIN roots r ON r.id = m.root_id
+        WHERE m.id = ? AND r.collection_id = ? AND r.active = 1 AND m.present = 1`)
         .get(mediaId, collectionId))) {
       throw new Error('Media item not found in this collection.');
     }
@@ -712,7 +826,10 @@ class PhotoSorter {
   }
 
   claimMediaLock(mediaId, deviceId) {
-    if (!this.db.prepare('SELECT id FROM media WHERE id = ?').get(mediaId)) {
+    if (!this.db.prepare(`
+      SELECT m.id FROM media m JOIN roots r ON r.id = m.root_id JOIN collections c ON c.id = r.collection_id
+      WHERE m.id = ? AND m.present = 1 AND r.active = 1 AND c.active = 1
+    `).get(mediaId)) {
       throw new Error('Media item not found.');
     }
     const now = Date.now();
@@ -743,7 +860,7 @@ class PhotoSorter {
     const item = this.db.prepare(`
       SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id
       JOIN collections c ON c.id = r.collection_id
-      WHERE m.id = ? AND r.active = 1 AND c.active = 1
+      WHERE m.id = ? AND r.active = 1 AND c.active = 1 AND m.present = 1
     `).get(mediaId);
     if (!item) throw new Error('Media item not found.');
     const next = category === 'unseen' ? null : category;
@@ -802,7 +919,7 @@ class PhotoSorter {
     const item = this.db.prepare(`
       SELECT m.id, m.root_id, m.relative_path, r.path FROM media m
       JOIN roots r ON r.id = m.root_id JOIN collections c ON c.id = r.collection_id
-      WHERE m.id = ? AND r.active = 1 AND c.active = 1
+      WHERE m.id = ? AND r.active = 1 AND c.active = 1 AND m.present = 1
     `).get(mediaId);
     if (!item) return null;
     const fullPath = path.resolve(item.path, item.relative_path);
@@ -817,7 +934,7 @@ class PhotoSorter {
     const media = this.db.prepare(`
       SELECT m.id, m.root_id, m.relative_path, m.category, r.path, r.read_only
       FROM media m JOIN roots r ON r.id = m.root_id
-      WHERE r.collection_id = ? AND r.active = 1 AND m.category IN ('delete', 'unsure')
+      WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1 AND m.category IN ('delete', 'unsure')
         AND m.relative_path NOT LIKE 'deleted/%' AND m.relative_path NOT LIKE 'unsure/%'
       ORDER BY m.relative_path
     `).all(collectionId);
@@ -1165,7 +1282,7 @@ class PhotoSorter {
         const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 60));
         const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
         const category = url.searchParams.get('category') || 'unseen';
-        const sort = url.searchParams.get('sort') || 'date-asc';
+        const sort = url.searchParams.get('sort') || 'capture-asc';
         if (!CATEGORIES.has(category)) throw new Error('Invalid category.');
         const result = this.listMedia({
           collectionId: url.searchParams.get('collectionId'),
@@ -1308,6 +1425,7 @@ module.exports = {
   defaultDataDirectory,
   isLocalNetworkAddress,
   isWithin,
+  normalizeCaptureDate,
   numberedDestination,
   pathsOverlap,
 };

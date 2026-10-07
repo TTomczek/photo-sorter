@@ -1,6 +1,6 @@
 const state = {
   category: 'unseen',
-  sort: 'date-asc',
+  sort: 'capture-asc',
   collectionId: '',
   items: [],
   index: 0,
@@ -245,7 +245,7 @@ async function loadCollections(preferredId) {
     }
   } else {
     state.category = 'unseen';
-    state.sort = 'date-asc';
+    state.sort = 'capture-asc';
     state.restoreMediaId = '';
     byId('sort-order').value = state.sort;
     for (const button of byId('filters').querySelectorAll('button')) {

@@ -49,5 +49,8 @@
   },
   "overrides": {
     "@electron/get": "^5.1.0"
+  },
+  "dependencies": {
+    "exifr": "^7.1.3"
   }
 }
