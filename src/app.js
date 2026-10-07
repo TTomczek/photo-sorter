@@ -111,6 +111,7 @@ class PhotoSorter {
         path TEXT NOT NULL,
         online INTEGER NOT NULL DEFAULT 1,
         read_only INTEGER NOT NULL DEFAULT 0,
+        active INTEGER NOT NULL DEFAULT 1,
         UNIQUE(collection_id, path)
       );
       CREATE TABLE IF NOT EXISTS media (
@@ -148,6 +149,12 @@ class PhotoSorter {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS decision_history_device ON decision_history(device_id, id DESC);
+      CREATE TABLE IF NOT EXISTS device_preferences (
+        device_id TEXT NOT NULL,
+        preference_key TEXT NOT NULL,
+        preference_value TEXT NOT NULL,
+        PRIMARY KEY(device_id, preference_key)
+      );
       CREATE TABLE IF NOT EXISTS audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         action TEXT NOT NULL,
@@ -169,6 +176,8 @@ class PhotoSorter {
         status TEXT NOT NULL
       );
     `);
+    const rootColumns = this.db.prepare('PRAGMA table_info(roots)').all().map((column) => column.name);
+    if (!rootColumns.includes('active')) this.db.exec('ALTER TABLE roots ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
     await this.recoverApplyOperations();
     return this;
   }
@@ -260,10 +269,86 @@ class PhotoSorter {
   listCollections() {
     return this.db.prepare(`
       SELECT c.id, c.name, c.active,
-        (SELECT COUNT(*) FROM media m JOIN roots r ON r.id = m.root_id WHERE r.collection_id = c.id) AS item_count,
-        (SELECT COUNT(*) FROM roots r WHERE r.collection_id = c.id AND r.online = 0) AS offline_roots
+        (SELECT COUNT(*) FROM media m JOIN roots r ON r.id = m.root_id WHERE r.collection_id = c.id AND r.active = 1) AS item_count,
+        (SELECT COUNT(*) FROM roots r WHERE r.collection_id = c.id AND r.active = 1 AND r.online = 0) AS offline_roots
       FROM collections c WHERE c.active = 1 ORDER BY c.created_at
     `).all();
+  }
+
+  listRoots(collectionId) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    return this.db.prepare(`
+      SELECT id, path, online, read_only FROM roots
+      WHERE collection_id = ? AND active = 1 ORDER BY path COLLATE NOCASE
+    `).all(collectionId);
+  }
+
+  async removeRoot(collectionId, rootId) {
+    const root = this.db.prepare(`
+      SELECT r.id, r.path FROM roots r JOIN collections c ON c.id = r.collection_id
+      WHERE r.id = ? AND r.collection_id = ? AND r.active = 1 AND c.active = 1
+    `).get(rootId, collectionId);
+    if (!root) throw new Error('Root not found.');
+    this.db.prepare('UPDATE roots SET active = 0 WHERE id = ?').run(rootId);
+    this.db.prepare('DELETE FROM media_locks WHERE media_id IN (SELECT id FROM media WHERE root_id = ?)').run(rootId);
+    this.log('root_removed', { collectionId, rootId, path: root.path });
+    return { removed: true };
+  }
+
+  archiveCollection(collectionId) {
+    const collection = this.db.prepare('SELECT id, name FROM collections WHERE id = ? AND active = 1').get(collectionId);
+    if (!collection) throw new Error('Collection not found.');
+    this.db.prepare('UPDATE collections SET active = 0 WHERE id = ?').run(collectionId);
+    this.log('collection_archived', { collectionId, name: collection.name });
+    return { archived: true };
+  }
+
+  restoreCollection(collectionId) {
+    const collection = this.db.prepare('SELECT id, name FROM collections WHERE id = ? AND active = 0').get(collectionId);
+    if (!collection) throw new Error('Archived collection not found.');
+    const roots = this.db.prepare('SELECT id, path FROM roots WHERE collection_id = ? AND active = 1').all(collectionId);
+    const activeRoots = this.db.prepare(`
+      SELECT r.id, r.path FROM roots r JOIN collections c ON c.id = r.collection_id
+      WHERE r.active = 1 AND c.active = 1
+    `).all();
+    for (const candidate of roots) {
+      for (const activeRoot of activeRoots) {
+        if (pathsOverlap(candidate.path, activeRoot.path)) {
+          throw new Error(`Cannot restore collection because root ${candidate.path} overlaps an active collection.`);
+        }
+      }
+    }
+    this.db.prepare('UPDATE collections SET active = 1 WHERE id = ?').run(collectionId);
+    this.log('collection_restored', { collectionId, name: collection.name });
+    return { restored: true };
+  }
+
+  listArchivedCollections() {
+    return this.db.prepare(`
+      SELECT id, name, created_at FROM collections WHERE active = 0 ORDER BY created_at
+    `).all();
+  }
+
+  getLastCollection(deviceId) {
+    const value = this.db.prepare(`
+      SELECT preference_value FROM device_preferences
+      WHERE device_id = ? AND preference_key = 'last_collection_id'
+    `).get(deviceId)?.preference_value;
+    return value || null;
+  }
+
+  setLastCollection(deviceId, collectionId) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    this.db.prepare(`
+      INSERT INTO device_preferences(device_id, preference_key, preference_value)
+      VALUES (?, 'last_collection_id', ?)
+      ON CONFLICT(device_id, preference_key) DO UPDATE SET preference_value = excluded.preference_value
+    `).run(deviceId, collectionId);
+    return { collectionId };
   }
 
   async addRoot(collectionId, selectedPath) {
@@ -275,12 +360,22 @@ class PhotoSorter {
     if (!rootStat.isDirectory()) throw new Error('Selected path is not a directory.');
     const activeRoots = this.db.prepare(`
       SELECT r.id, r.path, r.collection_id FROM roots r
-      JOIN collections c ON c.id = r.collection_id WHERE c.active = 1
+      JOIN collections c ON c.id = r.collection_id WHERE c.active = 1 AND r.active = 1
     `).all();
     for (const root of activeRoots) {
       if (!pathsOverlap(root.path, canonicalPath)) continue;
       if (root.collection_id === collectionId && comparePaths(root.path, canonicalPath)) return root.id;
       throw new Error('This folder overlaps a root in an active collection.');
+    }
+    const retainedRoot = this.db.prepare(`
+      SELECT id FROM roots WHERE collection_id = ? AND path = ? AND active = 0
+    `).get(collectionId, canonicalPath);
+    if (retainedRoot) {
+      this.db.prepare('UPDATE roots SET active = 1, online = 1, read_only = ? WHERE id = ?')
+        .run((rootStat.mode & 0o222) === 0 ? 1 : 0, retainedRoot.id);
+      this.log('root_readded', { collectionId, rootId: retainedRoot.id, path: canonicalPath });
+      await this.scanRoot(retainedRoot.id);
+      return retainedRoot.id;
     }
     const id = crypto.randomUUID();
     const readOnly = (rootStat.mode & 0o222) === 0;
@@ -292,7 +387,7 @@ class PhotoSorter {
   }
 
   async scanRoot(rootId) {
-    const root = this.db.prepare('SELECT * FROM roots WHERE id = ?').get(rootId);
+    const root = this.db.prepare('SELECT * FROM roots WHERE id = ? AND active = 1').get(rootId);
     if (!root) throw new Error('Root not found.');
     let base;
     try {
@@ -355,7 +450,7 @@ class PhotoSorter {
   }
 
   async rescanCollection(collectionId) {
-    const roots = this.db.prepare('SELECT id FROM roots WHERE collection_id = ?').all(collectionId);
+    const roots = this.db.prepare('SELECT id FROM roots WHERE collection_id = ? AND active = 1').all(collectionId);
     let indexed = 0;
     for (const root of roots) {
       try { indexed += await this.scanRoot(root.id); } catch {}
@@ -364,7 +459,7 @@ class PhotoSorter {
   }
 
   listMedia({ collectionId, category, sort = 'date-asc', offset = 0, limit = 60 }) {
-    const filters = ['r.collection_id = ?'];
+    const filters = ['r.collection_id = ?', 'r.active = 1'];
     const values = [collectionId];
     if (category === 'unseen') filters.push('m.category IS NULL');
     else if (CATEGORIES.has(category)) {
@@ -401,7 +496,9 @@ class PhotoSorter {
   setDecision(mediaId, category) {
     if (!CATEGORIES.has(category)) throw new Error('Invalid category.');
     const item = this.db.prepare(`
-      SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id WHERE m.id = ?
+      SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id
+      JOIN collections c ON c.id = r.collection_id
+      WHERE m.id = ? AND r.active = 1 AND c.active = 1
     `).get(mediaId);
     if (!item) throw new Error('Media item not found.');
     const next = category === 'unseen' ? null : category;
@@ -477,7 +574,9 @@ class PhotoSorter {
     }
     if (!CATEGORIES.has(category)) throw new Error('Invalid category.');
     const item = this.db.prepare(`
-      SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id WHERE m.id = ?
+      SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id
+      JOIN collections c ON c.id = r.collection_id
+      WHERE m.id = ? AND r.active = 1 AND c.active = 1
     `).get(mediaId);
     if (!item) throw new Error('Media item not found.');
     const next = category === 'unseen' ? null : category;
@@ -519,10 +618,24 @@ class PhotoSorter {
       .all(limit).map((row) => ({ ...row, details: JSON.parse(row.details) }));
   }
 
+  exportAudit() {
+    const events = this.db.prepare('SELECT id, action, details, created_at FROM audit ORDER BY id')
+      .all().map((row) => ({ ...row, details: JSON.parse(row.details) }));
+    return { exportedAt: new Date().toISOString(), events };
+  }
+
+  clearAudit() {
+    const clearedCount = this.db.prepare('SELECT COUNT(*) AS count FROM audit').get().count;
+    this.db.prepare('DELETE FROM audit').run();
+    this.log('audit_cleared', { clearedCount });
+    return { clearedCount };
+  }
+
   mediaPath(mediaId) {
     const item = this.db.prepare(`
       SELECT m.id, m.root_id, m.relative_path, r.path FROM media m
-      JOIN roots r ON r.id = m.root_id WHERE m.id = ?
+      JOIN roots r ON r.id = m.root_id JOIN collections c ON c.id = r.collection_id
+      WHERE m.id = ? AND r.active = 1 AND c.active = 1
     `).get(mediaId);
     if (!item) return null;
     const fullPath = path.resolve(item.path, item.relative_path);
@@ -537,7 +650,7 @@ class PhotoSorter {
     const media = this.db.prepare(`
       SELECT m.id, m.root_id, m.relative_path, m.category, r.path, r.read_only
       FROM media m JOIN roots r ON r.id = m.root_id
-      WHERE r.collection_id = ? AND m.category IN ('delete', 'unsure')
+      WHERE r.collection_id = ? AND r.active = 1 AND m.category IN ('delete', 'unsure')
         AND m.relative_path NOT LIKE 'deleted/%' AND m.relative_path NOT LIKE 'unsure/%'
       ORDER BY m.relative_path
     `).all(collectionId);
@@ -594,6 +707,11 @@ class PhotoSorter {
     for (const operation of plan.operations) {
       let operationId;
       try {
+        const rootIsActive = this.db.prepare(`
+          SELECT 1 FROM roots r JOIN collections c ON c.id = r.collection_id
+          WHERE r.id = ? AND r.active = 1 AND c.active = 1
+        `).get(operation.rootId);
+        if (!rootIsActive) throw new Error('The root or collection is no longer active.');
         const currentRoot = await fs.realpath(operation.root);
         const currentSource = await fs.realpath(operation.source);
         if (!comparePaths(currentRoot, operation.root) || !isWithin(currentRoot, currentSource)) {
@@ -836,6 +954,31 @@ class PhotoSorter {
         const { name } = await this.readJson(request);
         return this.sendJson(response, 201, { id: this.createCollection(name) });
       }
+      if (request.method === 'GET' && url.pathname === '/api/collections/archived') {
+        return this.sendJson(response, 200, { collections: this.listArchivedCollections() });
+      }
+      const collectionAction = url.pathname.match(/^\/api\/collections\/([0-9a-f-]+)\/(archive|restore)$/i);
+      if (request.method === 'POST' && collectionAction) {
+        const [, collectionId, action] = collectionAction;
+        const result = action === 'archive'
+          ? this.archiveCollection(collectionId) : this.restoreCollection(collectionId);
+        return this.sendJson(response, 200, result);
+      }
+      const collectionRoots = url.pathname.match(/^\/api\/collections\/([0-9a-f-]+)\/roots$/i);
+      if (request.method === 'GET' && collectionRoots) {
+        return this.sendJson(response, 200, { roots: this.listRoots(collectionRoots[1]) });
+      }
+      const rootAction = url.pathname.match(/^\/api\/collections\/([0-9a-f-]+)\/roots\/([0-9a-f-]+)$/i);
+      if (request.method === 'DELETE' && rootAction) {
+        return this.sendJson(response, 200, await this.removeRoot(rootAction[1], rootAction[2]));
+      }
+      if (request.method === 'GET' && url.pathname === '/api/preferences') {
+        return this.sendJson(response, 200, { lastCollectionId: this.getLastCollection(session.deviceId) });
+      }
+      if (request.method === 'PUT' && url.pathname === '/api/preferences') {
+        const { lastCollectionId } = await this.readJson(request);
+        return this.sendJson(response, 200, this.setLastCollection(session.deviceId, lastCollectionId));
+      }
       if (request.method === 'GET' && url.pathname === '/api/device-state') {
         return this.sendJson(response, 200, {
           state: this.getDeviceState(session.deviceId, url.searchParams.get('collectionId')),
@@ -901,6 +1044,12 @@ class PhotoSorter {
       }
       if (request.method === 'GET' && url.pathname === '/api/audit') {
         return this.sendJson(response, 200, { events: this.listAudit() });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/audit/export') {
+        return this.sendJson(response, 200, this.exportAudit());
+      }
+      if (request.method === 'DELETE' && url.pathname === '/api/audit') {
+        return this.sendJson(response, 200, this.clearAudit());
       }
       return this.sendJson(response, 404, { error: 'Not found.' });
     }

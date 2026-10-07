@@ -178,6 +178,8 @@ async function loadMedia() {
 
 async function loadCollections(preferredId) {
   const result = await request('/api/collections');
+  const preferences = await request('/api/preferences');
+  const lastUsed = preferredId || preferences.lastCollectionId;
   const select = byId('collection');
   select.replaceChildren();
   for (const collection of result.collections) {
@@ -187,15 +189,22 @@ async function loadCollections(preferredId) {
   }
   if (!result.collections.length) {
     state.collectionId = '';
+    byId('archive-collection').disabled = true;
+    byId('root-list').replaceChildren();
     setStatus('Create a collection, then choose a folder from the host desktop app.');
     await loadMedia();
+    await loadArchivedCollections();
     return;
   }
-  state.collectionId = preferredId && result.collections.some((item) => item.id === preferredId)
-    ? preferredId : (select.value || result.collections[0].id);
+  state.collectionId = lastUsed && result.collections.some((item) => item.id === lastUsed)
+    ? lastUsed : result.collections[0].id;
   state.offset = 0;
   state.index = 0;
   select.value = state.collectionId;
+  byId('archive-collection').disabled = false;
+  await request('/api/preferences', {
+    method: 'PUT', body: JSON.stringify({ lastCollectionId: state.collectionId }),
+  });
   const saved = await request(`/api/device-state?collectionId=${encodeURIComponent(state.collectionId)}`);
   if (saved.state) {
     state.category = saved.state.category;
@@ -217,6 +226,7 @@ async function loadCollections(preferredId) {
   }
   const collection = result.collections.find((item) => item.id === state.collectionId);
   setStatus(collection.offline_roots ? `${collection.offline_roots} root(s) are currently offline.` : '');
+  await Promise.all([loadRootManagement(), loadArchivedCollections()]);
   await loadMedia();
 }
 
@@ -244,6 +254,57 @@ async function refreshNetwork() {
       container.append(link);
     }
   } catch {}
+}
+
+async function loadRootManagement() {
+  const list = byId('root-list');
+  list.replaceChildren();
+  if (!state.collectionId) return;
+  const { roots } = await request(`/api/collections/${encodeURIComponent(state.collectionId)}/roots`);
+  for (const root of roots) {
+    const item = element('li', `${root.path}${root.online ? '' : ' · offline'}${root.read_only ? ' · read-only' : ''}`);
+    const remove = element('button', 'Remove');
+    remove.type = 'button';
+    remove.addEventListener('click', async () => {
+      const choice = await showDialog('Remove folder from collection', [
+        `Stop including ${root.path} in this collection? Its indexed decisions and history will be retained.`,
+      ]);
+      if (!choice.confirmed) return;
+      try {
+        await request(`/api/collections/${encodeURIComponent(state.collectionId)}/roots/${encodeURIComponent(root.id)}`, {
+          method: 'DELETE',
+        });
+        await loadCollections(state.collectionId);
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    });
+    item.append(remove);
+    list.append(item);
+  }
+  if (!roots.length) list.append(element('li', 'No folders are registered.'));
+}
+
+async function loadArchivedCollections() {
+  const list = byId('archived-list');
+  list.replaceChildren();
+  const { collections } = await request('/api/collections/archived');
+  for (const collection of collections) {
+    const item = element('li', collection.name);
+    const restore = element('button', 'Restore');
+    restore.type = 'button';
+    restore.addEventListener('click', async () => {
+      try {
+        await request(`/api/collections/${encodeURIComponent(collection.id)}/restore`, { method: 'POST', body: '{}' });
+        await loadCollections(collection.id);
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    });
+    item.append(restore);
+    list.append(item);
+  }
+  if (!collections.length) list.append(element('li', 'No archived collections.'));
 }
 
 async function showAuthentication() {
@@ -382,6 +443,19 @@ byId('new-collection-form').addEventListener('submit', async (event) => {
 byId('collection').addEventListener('change', async (event) => {
   await loadCollections(event.target.value);
 });
+byId('archive-collection').addEventListener('click', async () => {
+  if (!state.collectionId) return;
+  const choice = await showDialog('Archive collection', [
+    'Archive this collection? Its decisions and indexed history will be kept. Its folders can then be registered by another active collection.',
+  ], { confirmLabel: 'Archive collection' });
+  if (!choice.confirmed) return;
+  try {
+    await request(`/api/collections/${encodeURIComponent(state.collectionId)}/archive`, { method: 'POST', body: '{}' });
+    await loadCollections();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
 byId('sort-order').addEventListener('change', async (event) => {
   state.sort = event.target.value;
   state.offset = 0;
@@ -473,6 +547,39 @@ byId('audit').addEventListener('click', async () => {
     }
     byId('audit-panel').classList.toggle('hidden');
   } catch (error) { setStatus(error.message, true); }
+});
+byId('export-audit').addEventListener('click', async () => {
+  try {
+    const data = await request('/api/audit/export');
+    const file = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const link = element('a');
+    link.href = URL.createObjectURL(file);
+    link.download = `photo-sorter-audit-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+byId('clear-audit').addEventListener('click', async () => {
+  const choice = await showDialog('Clear audit log', [
+    'Permanently remove the current audit entries? A single audit_cleared event will be retained.',
+  ], { confirmLabel: 'Clear audit log' });
+  if (!choice.confirmed) return;
+  try {
+    const result = await request('/api/audit', { method: 'DELETE', body: '{}' });
+    setStatus(`Cleared ${result.clearedCount} audit event(s).`);
+    const { events } = await request('/api/audit');
+    const list = byId('audit-list');
+    list.replaceChildren();
+    for (const event of events) {
+      const entry = element('li', `${event.created_at} · ${event.action}`);
+      entry.append(element('pre', JSON.stringify(event.details)));
+      list.append(entry);
+    }
+  } catch (error) {
+    setStatus(error.message, true);
+  }
 });
 byId('logout').addEventListener('click', async () => {
   updateItemLock(null);

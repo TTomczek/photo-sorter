@@ -21,7 +21,10 @@ All data and media API routes except setup status, login/setup/logout, and LAN a
 | --- | --- |
 | `GET /api/setup-status`, `POST /api/setup`, `POST /api/login`, `POST /api/logout` | First-run account setup and session handling |
 | `GET /api/network` | Report detected local IPv4 URLs |
-| `GET /api/collections`, `POST /api/collections` | List or create a collection |
+| `GET /api/collections`, `POST /api/collections` | List or create an active collection |
+| `GET /api/collections/archived`, `POST /api/collections/:id/archive`, `POST /api/collections/:id/restore` | Archive or restore a collection while retaining its history |
+| `GET /api/collections/:id/roots`, `DELETE /api/collections/:id/roots/:rootId` | List or remove a registered root; re-adding its path restores its retained index |
+| `GET /api/preferences`, `PUT /api/preferences` | Read or save this device's last-used collection |
 | `GET /api/device-state`, `PUT /api/device-state` | Restore or save a device's collection, category, sort order, current item, and page |
 | `GET /api/media` | List one category page, with modified-time or filename ordering |
 | `GET /api/media/:id/content` | Serve an indexed item, including HTTP byte ranges |
@@ -32,12 +35,13 @@ All data and media API routes except setup status, login/setup/logout, and LAN a
 | `POST /api/apply/plan`, `POST /api/apply/confirm` | Create a move summary, then confirm and run it |
 | `POST /api/restore` | Restore completed operations from the latest batch containing a completed move |
 | `GET /api/audit` | Read the most recent 200 audit events |
+| `GET /api/audit/export`, `DELETE /api/audit` | Export all audit events as JSON or clear them explicitly |
 
-There is no API for root removal/archival, general settings, audit export/clear, scan/watch progress, or preview-cache management.
+There is no API for general settings, scan/watch progress, or preview-cache management.
 
 ## Scanning and media
 
-Only the host's native folder picker can register a root. A collection may contain multiple roots; exact duplicate roots within that collection return the existing registration. Any parent/child overlap with another active root is rejected, including overlap in the same collection. Symlinks are skipped and root-level `deleted` and `unsure` directories are excluded from scanning. Image/video recognition uses extension allowlists in `src/app.js`.
+Only the host's native folder picker can register a root. A collection may contain multiple roots; exact duplicate roots within that collection return the existing registration. Any parent/child overlap with another active root is rejected, including overlap in the same collection. Removing a root hides its items but retains its history; registering that same path again in the same collection reactivates its existing index. Archiving a collection retains all its roots, items, decisions, and audit history while releasing its paths for use in other active collections. Restoring an archived collection rejects roots that now overlap another active collection. Symlinks are skipped and root-level `deleted` and `unsure` directories are excluded from scanning. Image/video recognition uses extension allowlists in `src/app.js`.
 
 Scanning is a synchronous recursive pass from the API's perspective: adding a root scans it before returning, and **Rescan roots** runs each root in sequence. Per-file and per-directory read errors are logged and do not stop other paths. A missing/unresolvable root is marked offline and its indexed history is retained. A rescan that finds a changed size or modification time clears that item's decision. A moved or renamed file is treated as a different path; removed files are not reconciled out of the index. Scanning does not start automatically at service startup, watch for changes, or expose live scan progress. Read-only detection is based on the root's permission bits; the API exposes this flag and apply reports skipped items, but the UI does not show read-only status per root.
 
@@ -53,7 +57,7 @@ Apply currently plans `delete` and `unsure` moves. It shows a count and up to fi
 
 Moves use a same-filesystem hard link followed by unlink; the app does not copy-and-delete across volumes. Unsupported filesystems, read-only roots, and operation errors are reported, and a batch stops at its first failure. Operation rows are journaled before the move, and startup attempts to reconcile rows left in `planned` state. This is basic recovery, not a complete transaction/reconciliation system. Restore processes completed moves from the latest batch that has a completed operation, refuses occupied originals, and reports conflicts; it does not reconcile new decisions or restore a previous category automatically.
 
-Audit rows record account/collection/root creation, scans and scan errors, decision changes, apply outcomes, recovery, password reset, and restore outcomes. The UI displays at most 200 recent events. There is no audit export, clear action, or automatic app-data backup. Losing/removing app data loses account, decision, operation, and audit history; original media is not removed by uninstall or data loss.
+Audit rows record account/collection/root lifecycle, scans and scan errors, decision changes and history navigation, apply outcomes, recovery, password reset, and restore outcomes. The UI displays at most 200 recent events; export downloads the full audit history as JSON. Explicit clear removes existing rows while recording an `audit_cleared` event with the number removed. There is no automatic app-data backup. Losing/removing app data loses account, decision, operation, and audit history; original media is not removed by uninstall or data loss.
 
 ## Current scope by handoff area
 
@@ -61,12 +65,12 @@ Audit rows record account/collection/root creation, scans and scan errors, decis
 | --- | --- |
 | Desktop + LAN access, local warning, host-only folder picker | Implemented; LAN uses plain HTTP and reports IPv4 addresses (no QR code). |
 | Account/password | First-run host-local setup, salted scrypt hash, login/logout, restart reauthentication, and in-memory per-IP throttling are implemented. Passkeys/biometrics are deferred. |
-| Collections and roots | Create and switch collections in the selector, add roots, enforce overlap, and retain history for missing roots. Last-used collection restoration, root removal, archival/re-add lifecycle, and root-management settings are not implemented. |
+| Collections and roots | Create/switch collections, remember the last-used collection per device, add/remove roots while retaining their index, archive/restore collections, and enforce active-root overlap. Root registration remains host-picker-only. Broader root-management settings are not implemented. |
 | Scanning | Extension-filtered recursive manual scan, symlink/output exclusion, per-path error logging, offline flag, and size/mtime decision reset are implemented. Watchers, startup catch-up, bounded asynchronous indexing, removal reconciliation, and progress reporting are absent. Read-only status is returned by the API and summarized during apply; it is not shown per root in the UI. |
 | Sorting/review | Keep/delete/unsure/unseen decisions, category filters, modified-time/filename ordering, basic paging, keyboard/swipe/buttons, on-demand video playback, per-device queue state, expiring item locks, and decision undo/redo are implemented. Capture-date sorting, virtualized 200k navigation, zoom/pan, and live queue refresh across devices are absent. |
 | Previews | Browser-native rendering and range-based video serving are implemented. Generated thumbnails/posters and configurable LRU cache are absent. |
 | Apply/restore | Two-step confirmation, output-folder consent, relative paths, collision numbering, no-overwrite moves, first-failure stop, journal rows, and latest completed-batch restore are implemented. Full keep/category reconciliation, comprehensive interrupted-batch handling, and a broader apply review/count by category remain incomplete. |
-| Audit/help | Basic persistent audit browsing and in-app quick help are implemented. Export, explicit clear, complete audit coverage, and an uninstall data warning are absent. |
+| Audit/help | Persistent audit browsing, full JSON export, explicit clear with a retained clear event, and in-app quick help are implemented. Audit coverage is not yet complete for every settings/scan lifecycle, and there is no uninstall data warning. |
 | Packaging and tests | Per-OS package commands are available. CI runs lint, tests, and unpacked application builds on Ubuntu/Windows/macOS, then uploads each platform's build artifact. Automated tests exercise the HTTP/domain workflow; they do not automate a real Electron UI, phone connection, or native picker across operating systems. |
 | Deferred by product decision | PWA/passkeys, German localization, theme/grid-density controls, cloud access, and automatic backups are not part of the MVP. |
 

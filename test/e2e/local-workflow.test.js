@@ -75,6 +75,12 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
 
   const collection = await api('/api/collections');
   assert.equal(collection.body.collections[0].name, 'Weekend');
+  assert.equal((await api('/api/preferences')).body.lastCollectionId, null);
+  assert.equal((await api('/api/preferences', {
+    method: 'PUT', body: JSON.stringify({ lastCollectionId: collectionId }),
+  })).body.collectionId, collectionId);
+  assert.equal((await api('/api/preferences')).body.lastCollectionId, collectionId);
+  assert.equal((await otherDevice('/api/preferences')).body.lastCollectionId, null);
   const savedPosition = await api('/api/device-state', {
     method: 'PUT',
     body: JSON.stringify({ collectionId, category: 'unseen', sort: 'date-asc', mediaId: null, offset: 0 }),
@@ -176,6 +182,10 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
   assert.equal(conflict.body.results[0].status, 'conflict');
   assert.equal(await fs.readFile(path.join(root, 'trip', 'photo.jpg'), 'utf8'), 'new-file-at-original');
   assert.equal((await api('/api/audit')).body.events.some((event) => event.action === 'decision_changed'), true);
+  assert.equal((await api('/api/audit/export')).body.events.length > 0, true);
+  const clearedAudit = await api('/api/audit', { method: 'DELETE', body: '{}' });
+  assert.ok(clearedAudit.body.clearedCount > 0);
+  assert.deepEqual((await api('/api/audit')).body.events.map((event) => event.action), ['audit_cleared']);
 });
 
 test('a symlinked output directory cannot redirect an apply outside its registered root', async (t) => {
@@ -227,6 +237,7 @@ test('replacing a registered root with a symlink cannot expose its new target', 
     app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
+
   await app.createPassword('a secure test password');
   const collectionId = app.createCollection('Root identity');
   const rootId = await app.addRoot(collectionId, root);
@@ -250,4 +261,58 @@ test('replacing a registered root with a symlink cannot expose its new target', 
   const preview = await fetch(`${baseUrl}/api/media/${item.id}/content`, { headers: { Cookie: cookie } });
   assert.equal(preview.status, 403);
   assert.equal(await fs.readFile(path.join(externalDirectory, 'inside.jpg'), 'utf8'), 'outside-secret');
+});
+
+test('root removal and collection archival preserve history while releasing active root ownership', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-collections-'));
+  const dataDirectory = path.join(temporary, 'data');
+  const root = path.join(temporary, 'photos');
+  await fs.mkdir(root);
+  await fs.writeFile(path.join(root, 'remember.jpg'), 'history');
+  const app = await new PhotoSorter({ dataDirectory }).initialize();
+  t.after(async () => {
+    app.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+  await app.createPassword('a secure test password');
+  const originalCollection = app.createCollection('Original');
+  const registeredRoot = await app.addRoot(originalCollection, root);
+  const media = app.listMedia({ collectionId: originalCollection, category: 'unseen' }).items[0];
+  app.setDecision(media.id, 'keep');
+  const nestedRoot = path.join(root, 'nested');
+  await fs.mkdir(nestedRoot);
+  const replacementCollection = app.createCollection('Replacement');
+  await assert.rejects(app.addRoot(replacementCollection, nestedRoot), /overlaps/);
+
+  const port = await app.listen(0);
+  const response = await fetch(`http://127.0.0.1:${port}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'a secure test password' }),
+  });
+  const cookies = response.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ');
+  app.archiveCollection(originalCollection);
+  const replacementRoot = await app.addRoot(replacementCollection, nestedRoot);
+  assert.ok(replacementRoot);
+  await assert.rejects(async () => app.restoreCollection(originalCollection), /overlaps/);
+  app.archiveCollection(replacementCollection);
+  assert.equal(app.listCollections().some((item) => item.id === replacementCollection), false);
+  assert.equal(app.listArchivedCollections().some((item) => item.id === replacementCollection), true);
+  app.restoreCollection(originalCollection);
+  assert.equal(app.db.prepare('SELECT category FROM media WHERE id = ?').get(media.id).category, 'keep');
+
+  const removeResponse = await fetch(
+    `http://127.0.0.1:${port}/api/collections/${originalCollection}/roots/${registeredRoot}`,
+    { method: 'DELETE', headers: { Cookie: cookies } },
+  );
+  assert.equal(removeResponse.status, 200);
+  assert.equal(app.listMedia({ collectionId: originalCollection, category: 'keep' }).total, 0);
+  assert.equal(await app.addRoot(originalCollection, root), registeredRoot);
+  assert.equal(app.db.prepare('SELECT category FROM media WHERE id = ?').get(media.id).category, 'keep');
+
+  const exported = app.exportAudit();
+  assert.ok(exported.events.some((event) => event.action === 'root_removed'));
+  const cleared = app.clearAudit();
+  assert.ok(cleared.clearedCount > 0);
+  assert.deepEqual(app.listAudit().map((event) => event.action), ['audit_cleared']);
 });

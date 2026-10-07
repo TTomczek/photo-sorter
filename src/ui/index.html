@@ -45,7 +45,16 @@
             <option value="filename">Filename</option>
           </select>
           <button id="add-root" type="button" class="hidden">Choose folder</button>
+          <button id="archive-collection" type="button">Archive collection</button>
         </div>
+        <details id="root-management" class="panel">
+          <summary>Manage collection folders</summary>
+          <ul id="root-list"></ul>
+        </details>
+        <details id="archived-collections" class="panel">
+          <summary>Archived collections</summary>
+          <ul id="archived-list"></ul>
+        </details>
         <div class="lan panel">
           <strong>Connect a phone on this local network</strong>
           <span id="lan-addresses">Loading local addresses…</span>
@@ -93,6 +102,8 @@
         </section>
         <section id="audit-panel" class="panel hidden">
           <h2>Audit log</h2>
+          <button id="export-audit" type="button">Export audit log</button>
+          <button id="clear-audit" type="button">Clear audit log</button>
           <ol id="audit-list"></ol>
         </section>
         <details class="panel help">
