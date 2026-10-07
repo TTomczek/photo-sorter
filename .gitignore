@@ -2,3 +2,6 @@
 .idea
 node_modules/
 release/
+test-results/
+playwright-report/
+blob-report/

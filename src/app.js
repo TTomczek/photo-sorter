@@ -7,6 +7,7 @@ const { isIP } = require('node:net');
 const { DatabaseSync } = require('node:sqlite');
 const exifr = require('exifr');
 const QRCode = require('qrcode');
+const { PasskeyService } = require('./passkeys');
 
 const IMAGE_EXTENSIONS = new Set([
   '.avif', '.bmp', '.gif', '.heic', '.heif', '.jpeg', '.jpg', '.png',
@@ -91,12 +92,7 @@ async function pathExists(filename) {
 
 async function moveWithoutOverwrite(source, destination) {
   await fs.link(source, destination);
-  try {
-    await fs.unlink(source);
-  } catch (error) {
-    try { await fs.unlink(destination); } catch {}
-    throw error;
-  }
+  await fs.unlink(source);
 }
 
 class PhotoSorter {
@@ -105,6 +101,7 @@ class PhotoSorter {
     this.uiDirectory = uiDirectory;
     this.sessions = new Map();
     this.loginAttempts = new Map();
+    this.passkeys = null;
     this.applyPlans = new Map();
     this.activeScans = new Map();
     this.scanQueue = [];
@@ -116,6 +113,7 @@ class PhotoSorter {
     this.watchRetryTimers = new Map();
     this.watchRetryAttempts = new Map();
     this.scanDebounceTimers = new Map();
+    this.eventStreams = new Set();
     this.closed = false;
     this.db = null;
     this.server = null;
@@ -230,7 +228,9 @@ class PhotoSorter {
         from_path TEXT NOT NULL,
         to_path TEXT NOT NULL,
         category TEXT NOT NULL,
-        status TEXT NOT NULL
+        status TEXT NOT NULL,
+        operation_type TEXT NOT NULL DEFAULT 'move',
+        reverses_operation_id INTEGER
       );
     `);
     const rootColumns = this.db.prepare('PRAGMA table_info(roots)').all().map((column) => column.name);
@@ -239,6 +239,13 @@ class PhotoSorter {
     if (!mediaColumns.includes('capture_at')) this.db.exec('ALTER TABLE media ADD COLUMN capture_at TEXT');
     if (!mediaColumns.includes('present')) this.db.exec('ALTER TABLE media ADD COLUMN present INTEGER NOT NULL DEFAULT 1');
     if (!mediaColumns.includes('last_seen_scan')) this.db.exec('ALTER TABLE media ADD COLUMN last_seen_scan TEXT');
+    const operationColumns = this.db.prepare('PRAGMA table_info(apply_operations)').all().map((column) => column.name);
+    if (!operationColumns.includes('operation_type')) {
+      this.db.exec("ALTER TABLE apply_operations ADD COLUMN operation_type TEXT NOT NULL DEFAULT 'move'");
+    }
+    if (!operationColumns.includes('reverses_operation_id')) {
+      this.db.exec('ALTER TABLE apply_operations ADD COLUMN reverses_operation_id INTEGER');
+    }
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS media_capture_order
       ON media(root_id, category, COALESCE(julianday(capture_at), modified_at / 86400000.0 + 2440587.5),
@@ -254,6 +261,7 @@ class PhotoSorter {
     this.db.prepare(`
       INSERT OR IGNORE INTO app_settings(setting_key, setting_value) VALUES ('preview_cache_limit_mb', '2048')
     `).run();
+    this.passkeys = new PasskeyService(this.db);
     await this.recoverApplyOperations();
     setImmediate(() => {
       if (this.closed || !this.db) return;
@@ -275,33 +283,81 @@ class PhotoSorter {
         if (!root || !isWithin(root, operation.from_path) || !isWithin(root, operation.to_path)) {
           throw new Error('Journal paths are outside the registered root.');
         }
-        let sourceExists = true;
-        let destinationExists = true;
-        try { await fs.access(operation.from_path); } catch (error) { if (error.code === 'ENOENT') sourceExists = false; else throw error; }
-        try { await fs.access(operation.to_path); } catch (error) { if (error.code === 'ENOENT') destinationExists = false; else throw error; }
+        const canonicalRoot = await fs.realpath(root);
+        if (!comparePaths(canonicalRoot, root)) throw new Error('Registered root no longer resolves to its original directory.');
+        for (const filename of [operation.from_path, operation.to_path]) {
+          const parent = await fs.realpath(path.dirname(filename));
+          if (!isWithin(canonicalRoot, parent)) throw new Error('Journal path parent escaped its registered root.');
+        }
+        const sourceExists = await pathExists(operation.from_path);
+        const destinationExists = await pathExists(operation.to_path);
+        if (sourceExists) {
+          const stat = await fs.lstat(operation.from_path);
+          if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Journal source is not a regular file.');
+        }
+        if (destinationExists) {
+          const stat = await fs.lstat(operation.to_path);
+          if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Journal destination is not a regular file.');
+        }
         if (!sourceExists && destinationExists) {
+          if (operation.operation_type === 'restore') {
+            let reversedMove = operation.reverses_operation_id === null
+              || operation.reverses_operation_id === undefined
+              ? undefined
+              : this.db.prepare(`
+                SELECT id, status, from_path, to_path FROM apply_operations
+                WHERE id = ? AND operation_type = 'move' AND media_id = ? AND root_id = ?
+              `).get(operation.reverses_operation_id, operation.media_id, operation.root_id);
+            if (!reversedMove || !comparePaths(reversedMove.from_path, operation.to_path)
+              || !comparePaths(reversedMove.to_path, operation.from_path)) {
+              reversedMove = this.db.prepare(`
+                SELECT id, status, from_path, to_path FROM apply_operations
+                WHERE operation_type = 'move' AND media_id = ? AND root_id = ?
+                  AND status IN ('completed', 'restored')
+                ORDER BY id DESC
+              `).all(operation.media_id, operation.root_id)
+                .find((candidate) => comparePaths(candidate.from_path, operation.to_path)
+                  && comparePaths(candidate.to_path, operation.from_path));
+            }
+            if (!reversedMove || !['completed', 'restored'].includes(reversedMove.status)) {
+              throw new Error('Restore journal does not reference a completed move.');
+            }
+            if (reversedMove.status === 'completed') {
+              this.db.prepare("UPDATE apply_operations SET status = 'restored' WHERE id = ?")
+                .run(reversedMove.id);
+            }
+          }
           this.db.prepare("UPDATE apply_operations SET status = 'completed' WHERE id = ?").run(operation.id);
           this.db.prepare('UPDATE media SET relative_path = ?, present = 1 WHERE id = ?')
             .run(path.relative(root, operation.to_path), operation.media_id);
-          this.log('apply_recovered', { batchId: operation.batch_id, mediaId: operation.media_id, status: 'completed' });
+          this.log(operation.operation_type === 'restore' ? 'restore_recovered' : 'apply_recovered', {
+            batchId: operation.batch_id, mediaId: operation.media_id, status: 'completed',
+          });
         } else {
+          const reason = sourceExists && destinationExists
+            ? 'Both paths exist; preserving both because the interrupted link cannot be attributed safely.'
+            : 'Neither path exists.';
           this.db.prepare("UPDATE apply_operations SET status = 'failed' WHERE id = ?").run(operation.id);
-          this.log('apply_recovered', {
-            batchId: operation.batch_id,
-            mediaId: operation.media_id,
-            status: 'failed',
-            reason: sourceExists && destinationExists ? 'Both paths exist.' : 'Neither path exists.',
+          this.log(operation.operation_type === 'restore' ? 'restore_recovered' : 'apply_recovered', {
+            batchId: operation.batch_id, mediaId: operation.media_id, status: 'failed', reason,
           });
         }
       } catch (error) {
         this.db.prepare("UPDATE apply_operations SET status = 'failed' WHERE id = ?").run(operation.id);
-        this.log('apply_recovered', { batchId: operation.batch_id, mediaId: operation.media_id, status: 'failed', reason: error.message });
+        this.log(operation.operation_type === 'restore' ? 'restore_recovered' : 'apply_recovered', {
+          batchId: operation.batch_id, mediaId: operation.media_id, status: 'failed', reason: error.message,
+        });
       }
     }
   }
 
   close() {
     this.closed = true;
+    for (const stream of this.eventStreams) {
+      clearInterval(stream.heartbeat);
+      stream.response.end();
+    }
+    this.eventStreams.clear();
     for (const watcher of this.rootWatchers.values()) watcher.close();
     this.rootWatchers.clear();
     for (const timer of this.watchRetryTimers.values()) clearTimeout(timer);
@@ -343,6 +399,27 @@ class PhotoSorter {
   log(action, details) {
     this.db.prepare('INSERT INTO audit(action, details, created_at) VALUES (?, ?, ?)')
       .run(action, JSON.stringify(details), new Date().toISOString());
+  }
+
+  publishQueueChange(collectionId = null) {
+    const payload = `event: queue\ndata: ${JSON.stringify({ collectionId })}\n\n`;
+    for (const stream of this.eventStreams) {
+      if (stream.collectionId && collectionId && stream.collectionId !== collectionId) continue;
+      if (stream.response.destroyed || stream.response.writableEnded) continue;
+      stream.response.write(payload);
+    }
+  }
+
+  closeEventStreamsForSession(token) {
+    for (const stream of this.eventStreams) {
+      if (stream.token !== token) continue;
+      clearInterval(stream.heartbeat);
+      this.eventStreams.delete(stream);
+      if (!stream.response.destroyed && !stream.response.writableEnded) {
+        stream.response.write('event: auth-expired\ndata: {}\n\n');
+      }
+      stream.response.end();
+    }
   }
 
   isSetupComplete() {
@@ -600,7 +677,8 @@ class PhotoSorter {
     }
     const stat = await fs.stat(resolved);
     const extension = path.extname(resolved).toLowerCase();
-    if (!IMAGE_EXTENSIONS.has(extension)) return null;
+    const isImage = IMAGE_EXTENSIONS.has(extension);
+    if (!isImage && !VIDEO_EXTENSIONS.has(extension)) return null;
     const cacheKey = crypto.createHash('sha256')
       .update(`${item.id}\0${stat.size}\0${stat.mtimeMs}`).digest('hex');
     const cached = this.db.prepare('SELECT filename, size FROM preview_cache WHERE cache_key = ?').get(cacheKey);
@@ -614,8 +692,12 @@ class PhotoSorter {
         return buffer;
       } catch {
         this.db.prepare('DELETE FROM preview_cache WHERE cache_key = ?').run(cacheKey);
+        if (/^[0-9a-f]{64}\.jpg$/.test(cached.filename)) {
+          await fs.rm(path.join(this.dataDirectory, 'previews', cached.filename), { force: true });
+        }
       }
     }
+    if (!isImage) return null;
     const thumbnail = await exifr.thumbnail(resolved).catch(() => null);
     if (!thumbnail) return null;
     const buffer = Buffer.from(thumbnail);
@@ -639,6 +721,58 @@ class PhotoSorter {
     const current = this.db.prepare('SELECT 1 FROM preview_cache WHERE cache_key = ?').get(cacheKey);
     if (!current) await fs.rm(filenamePath, { force: true });
     return buffer;
+  }
+
+  async saveGeneratedPreview(mediaId, buffer, expectedVersion) {
+    if (!Buffer.isBuffer(buffer) || buffer.length < 4 || buffer.length > 8 * 1024 * 1024
+      || buffer[0] !== 0xff || buffer[1] !== 0xd8
+      || buffer.at(-2) !== 0xff || buffer.at(-1) !== 0xd9) {
+      throw Object.assign(new Error('Generated preview must be a valid-sized JPEG image.'), { status: 400 });
+    }
+    const item = this.mediaPath(mediaId);
+    if (!item) throw Object.assign(new Error('Media item not found.'), { status: 404 });
+    if (expectedVersion !== `${item.size}:${item.modified_at}`) {
+      throw Object.assign(new Error('Media changed; rescan before generating a preview.'), { status: 409 });
+    }
+    const extension = path.extname(item.fullPath).toLowerCase();
+    if (!IMAGE_EXTENSIONS.has(extension) && !VIDEO_EXTENSIONS.has(extension)) {
+      throw Object.assign(new Error('Only photo and video previews can be generated.'), { status: 415 });
+    }
+    const root = await fs.realpath(item.path);
+    if (!comparePaths(root, item.path) || !isWithin(root, item.fullPath)) {
+      throw Object.assign(new Error('Registered root no longer resolves to its original directory.'), { status: 403 });
+    }
+    const resolved = await fs.realpath(item.fullPath);
+    if (!isWithin(root, resolved)) {
+      throw Object.assign(new Error('Media is outside its registered root.'), { status: 403 });
+    }
+    const stat = await fs.stat(resolved);
+    if (!stat.isFile() || stat.size !== item.size || stat.mtimeMs !== item.modified_at) {
+      throw Object.assign(new Error('Media changed; rescan before generating a preview.'), { status: 409 });
+    }
+    const limitMb = this.getSettings().previewCacheLimitMb;
+    if (limitMb === 0) return { stored: false };
+    const cacheKey = crypto.createHash('sha256')
+      .update(`${item.id}\0${stat.size}\0${stat.mtimeMs}`).digest('hex');
+    const directory = path.join(this.dataDirectory, 'previews');
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    const filename = `${cacheKey}.jpg`;
+    const filenamePath = path.join(directory, filename);
+    let storedSize = buffer.length;
+    try {
+      await fs.writeFile(filenamePath, buffer, { flag: 'wx', mode: 0o600 });
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      storedSize = (await fs.stat(filenamePath)).size;
+    }
+    this.db.prepare(`
+      INSERT OR REPLACE INTO preview_cache(cache_key, filename, size, last_accessed)
+      VALUES (?, ?, ?, ?)
+    `).run(cacheKey, filename, storedSize, Date.now());
+    await this.enforcePreviewCacheLimit();
+    return {
+      stored: Boolean(this.db.prepare('SELECT 1 FROM preview_cache WHERE cache_key = ?').get(cacheKey)),
+    };
   }
 
   async addRoot(collectionId, selectedPath, { waitForScan = true } = {}) {
@@ -774,6 +908,7 @@ class PhotoSorter {
       ON CONFLICT(root_id) DO UPDATE SET status = 'running', visited = 0, indexed = 0,
         error = NULL, started_at = excluded.started_at, completed_at = NULL
     `).run(rootId, new Date().toISOString());
+    this.log('scan_started', { rootId, path: root.path });
     let base;
     try {
       base = await fs.realpath(root.path);
@@ -799,10 +934,16 @@ class PhotoSorter {
           WHERE root_id = ?
         `).run(status, entriesExamined, entriesVisited, error,
           status, status === 'running' ? null : new Date().toISOString(), rootId);
+        if (status !== 'running' || entriesExamined % 512 === 0) {
+          this.publishQueueChange(root.collection_id);
+        }
       };
       while (directories.length) {
         if (this.closed || !this.db.prepare('SELECT 1 FROM roots WHERE id = ? AND active = 1').get(rootId)) {
-          if (!this.closed) updateProgress('cancelled');
+          if (!this.closed) {
+            updateProgress('cancelled');
+            this.log('scan_cancelled', { rootId, path: base });
+          }
           return entriesVisited;
         }
         const directory = directories.pop();
@@ -1032,6 +1173,7 @@ class PhotoSorter {
     this.db.prepare('DELETE FROM decision_history WHERE device_id = ? AND undone = 1').run(deviceId);
     this.db.prepare('UPDATE media SET category = ? WHERE id = ?').run(next, mediaId);
     this.log('decision_changed', { mediaId, previous: item.category, category: next, collectionId: item.collection_id });
+    this.publishQueueChange(item.collection_id);
   }
 
   async changeDecisionHistory(deviceId, direction) {
@@ -1043,7 +1185,9 @@ class PhotoSorter {
     `).get(deviceId, undone);
     if (!entry) return { changed: false, message: `There is no decision to ${direction}.` };
     this.claimMediaLock(entry.media_id, deviceId);
-    const item = this.db.prepare('SELECT category FROM media WHERE id = ?').get(entry.media_id);
+    const item = this.db.prepare(`
+      SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id WHERE m.id = ?
+    `).get(entry.media_id);
     const expected = direction === 'undo' ? entry.next_category : entry.previous_category;
     if (!item || item.category !== expected) {
       throw Object.assign(new Error('This decision changed on another device; history was not altered.'), { status: 409 });
@@ -1054,6 +1198,7 @@ class PhotoSorter {
     this.log(direction === 'undo' ? 'decision_undone' : 'decision_redone', {
       mediaId: entry.media_id, category,
     });
+    this.publishQueueChange(item.collection_id);
     return { changed: true, mediaId: entry.media_id, category: category || 'unseen' };
   }
 
@@ -1077,7 +1222,7 @@ class PhotoSorter {
 
   mediaPath(mediaId) {
     const item = this.db.prepare(`
-      SELECT m.id, m.root_id, m.relative_path, r.path FROM media m
+      SELECT m.id, m.root_id, m.relative_path, m.size, m.modified_at, r.path FROM media m
       JOIN roots r ON r.id = m.root_id JOIN collections c ON c.id = r.collection_id
       WHERE m.id = ? AND r.active = 1 AND c.active = 1 AND m.present = 1
     `).get(mediaId);
@@ -1094,11 +1239,14 @@ class PhotoSorter {
     const media = this.db.prepare(`
       SELECT m.id, m.root_id, m.relative_path, m.category, r.path, r.read_only,
         (SELECT o.from_path FROM apply_operations o
-          WHERE o.media_id = m.id AND o.status = 'completed' ORDER BY o.id DESC LIMIT 1) AS latest_from,
+          WHERE o.media_id = m.id AND o.operation_type = 'move' AND o.status = 'completed'
+          ORDER BY o.id DESC LIMIT 1) AS latest_from,
         (SELECT o.to_path FROM apply_operations o
-          WHERE o.media_id = m.id AND o.status = 'completed' ORDER BY o.id DESC LIMIT 1) AS latest_to,
+          WHERE o.media_id = m.id AND o.operation_type = 'move' AND o.status = 'completed'
+          ORDER BY o.id DESC LIMIT 1) AS latest_to,
         (SELECT o.category FROM apply_operations o
-          WHERE o.media_id = m.id AND o.status = 'completed' ORDER BY o.id DESC LIMIT 1) AS latest_category
+          WHERE o.media_id = m.id AND o.operation_type = 'move' AND o.status = 'completed'
+          ORDER BY o.id DESC LIMIT 1) AS latest_category
       FROM media m JOIN roots r ON r.id = m.root_id
       WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1
         AND (m.category IN ('delete', 'unsure')
@@ -1128,7 +1276,7 @@ class PhotoSorter {
           targetCategory = item.category;
           const completedOperations = this.db.prepare(`
             SELECT from_path FROM apply_operations
-            WHERE media_id = ? AND status IN ('completed', 'restored') ORDER BY id
+            WHERE media_id = ? AND operation_type = 'move' AND status IN ('completed', 'restored') ORDER BY id
           `).all(item.id);
           const original = completedOperations.find((entry) => isWithin(item.path, entry.from_path)
             && !isWithin(path.join(item.path, 'deleted'), entry.from_path)
@@ -1141,7 +1289,7 @@ class PhotoSorter {
           targetCategory = item.category || 'unseen';
           const completedOperations = this.db.prepare(`
             SELECT from_path FROM apply_operations
-            WHERE media_id = ? AND status IN ('completed', 'restored') ORDER BY id
+            WHERE media_id = ? AND operation_type = 'move' AND status IN ('completed', 'restored') ORDER BY id
           `).all(item.id);
           const original = completedOperations.find((entry) => isWithin(item.path, entry.from_path)
             && !isWithin(path.join(item.path, 'deleted'), entry.from_path)
@@ -1208,8 +1356,10 @@ class PhotoSorter {
     const batchId = crypto.randomUUID();
     this.db.prepare('INSERT INTO apply_batches(id, created_at) VALUES (?, ?)').run(batchId, new Date().toISOString());
     const results = [];
-    for (const operation of plan.operations) {
+    for (let index = 0; index < plan.operations.length; index += 1) {
+      const operation = plan.operations[index];
       let operationId;
+      let effectiveDestination = operation.destination;
       try {
         const rootIsActive = this.db.prepare(`
           SELECT 1 FROM roots r JOIN collections c ON c.id = r.collection_id
@@ -1221,8 +1371,8 @@ class PhotoSorter {
         if (!comparePaths(currentRoot, operation.root) || !isWithin(currentRoot, currentSource)) {
           throw new Error('Source no longer resolves inside its registered root.');
         }
-        const stat = await fs.stat(currentSource);
-        if (!stat.isFile()) throw new Error('Source is not a regular file.');
+        const stat = await fs.lstat(operation.source);
+        if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Source is not a regular file.');
         const targetIsOutput = operation.category === 'delete' || operation.category === 'unsure';
         if (targetIsOutput) {
           const output = path.join(operation.root, operation.category === 'delete' ? 'deleted' : 'unsure');
@@ -1254,6 +1404,7 @@ class PhotoSorter {
           : numberedDestination(operation.destination, (candidate) => {
             try { fsSync.lstatSync(candidate); return true; } catch (error) { return error.code !== 'ENOENT'; }
           });
+        effectiveDestination = destination;
         if (operation.type === 'restore' && await pathExists(destination)) {
           throw new Error('Original path is occupied; refusing to overwrite.');
         }
@@ -1262,7 +1413,9 @@ class PhotoSorter {
         if (!isWithin(currentRoot, destinationParent)) throw new Error('Destination escaped its registered root.');
         const destinationDevice = (await fs.stat(destinationParent)).dev;
         if (stat.dev !== destinationDevice) throw new Error('Cross-volume moves are not supported.');
-        const row = this.db.prepare('INSERT INTO apply_operations(batch_id, media_id, root_id, from_path, to_path, category, status) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        const row = this.db.prepare(`INSERT INTO apply_operations
+          (batch_id, media_id, root_id, from_path, to_path, category, status, operation_type)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'move')`)
           .run(batchId, operation.mediaId, operation.rootId, currentSource, destination, operation.category, 'planned');
         operationId = row.lastInsertRowid;
         await moveWithoutOverwrite(currentSource, destination);
@@ -1275,28 +1428,63 @@ class PhotoSorter {
           status: operation.type === 'restore' ? 'restored' : operation.type === 'recategorize' ? 'recategorized' : 'moved',
         });
       } catch (error) {
-        if (operationId) this.db.prepare('UPDATE apply_operations SET status = ? WHERE id = ?').run('failed', operationId);
-        results.push({ source: operation.source, destination: operation.destination, status: 'failed', error: error.message });
-        this.log('apply_failed', { batchId, completed: results.filter((result) => result.status !== 'failed'), failed: results.at(-1) });
+        let sourceExists = true;
+        let destinationExists = false;
+        try {
+          sourceExists = await pathExists(operation.source);
+          destinationExists = await pathExists(effectiveDestination);
+        } catch {}
+        if (operationId && !sourceExists && destinationExists) {
+          const status = operation.type === 'restore' ? 'restored'
+            : operation.type === 'recategorize' ? 'recategorized' : 'moved';
+          this.db.prepare("UPDATE apply_operations SET status = 'completed' WHERE id = ?").run(operationId);
+          this.db.prepare('UPDATE media SET relative_path = ?, present = 1 WHERE id = ?')
+            .run(path.relative(operation.root, effectiveDestination), operation.mediaId);
+          results.push({ source: operation.source, destination: effectiveDestination, status });
+          continue;
+        }
+        if (operationId) {
+          this.db.prepare("UPDATE apply_operations SET status = 'failed' WHERE id = ?").run(operationId);
+        }
+        results.push({
+          source: operation.source,
+          destination: effectiveDestination,
+          status: 'failed',
+          error: error.message,
+        });
+        for (const unattempted of plan.operations.slice(index + 1)) {
+          results.push({ source: unattempted.source, destination: unattempted.destination, status: 'not_attempted' });
+        }
+        this.log('apply_failed', {
+          batchId,
+          completed: results.filter((result) => ['moved', 'restored', 'recategorized'].includes(result.status)),
+          failed: results.find((result) => result.status === 'failed'),
+          notAttempted: results.filter((result) => result.status === 'not_attempted'),
+        });
+        this.publishQueueChange(plan.collectionId);
         return { batchId, results, stoppedOnFailure: true };
       }
     }
     this.log('apply_completed', { batchId, results });
+    this.publishQueueChange(plan.collectionId);
     return { batchId, results, stoppedOnFailure: false };
   }
 
   async restoreLatest() {
     const batch = this.db.prepare(`
       SELECT b.id FROM apply_batches b
-      WHERE EXISTS (SELECT 1 FROM apply_operations o WHERE o.batch_id = b.id AND o.status = 'completed')
-      ORDER BY b.created_at DESC LIMIT 1
+      WHERE EXISTS (SELECT 1 FROM apply_operations o
+        WHERE o.batch_id = b.id AND o.operation_type = 'move' AND o.status = 'completed')
+      ORDER BY b.created_at DESC, b.id DESC LIMIT 1
     `).get();
     if (!batch) return { results: [], message: 'There is no apply batch to restore.' };
     const operations = this.db.prepare(`
-      SELECT * FROM apply_operations WHERE batch_id = ? AND status = 'completed' ORDER BY id DESC
+      SELECT * FROM apply_operations
+      WHERE batch_id = ? AND operation_type = 'move' AND status = 'completed' ORDER BY id DESC
     `).all(batch.id);
     const results = [];
     for (const operation of operations) {
+      let restoreOperationId;
       try {
         const root = this.db.prepare('SELECT path FROM roots WHERE id = ?').get(operation.root_id)?.path;
         if (!root || !isWithin(root, operation.from_path) || !isWithin(root, operation.to_path)) {
@@ -1304,6 +1492,8 @@ class PhotoSorter {
         }
         const canonicalRoot = await fs.realpath(root);
         if (!comparePaths(canonicalRoot, root)) throw new Error('Registered root no longer resolves to its original directory.');
+        const movedStat = await fs.lstat(operation.to_path);
+        if (!movedStat.isFile() || movedStat.isSymbolicLink()) throw new Error('Moved file is not a regular file.');
         const movedFile = await fs.realpath(operation.to_path);
         if (!isWithin(canonicalRoot, movedFile)) throw new Error('Moved file is outside the registered root.');
         if (await pathExists(operation.from_path)) {
@@ -1312,18 +1502,43 @@ class PhotoSorter {
         await fs.mkdir(path.dirname(operation.from_path), { recursive: true });
         const restoreParent = await fs.realpath(path.dirname(operation.from_path));
         if (!isWithin(canonicalRoot, restoreParent)) throw new Error('Restore destination escaped its registered root.');
-        const movedStat = await fs.stat(movedFile);
         if (movedStat.dev !== (await fs.stat(restoreParent)).dev) throw new Error('Cross-volume moves are not supported.');
+        const row = this.db.prepare(`INSERT INTO apply_operations
+          (batch_id, media_id, root_id, from_path, to_path, category, status, operation_type, reverses_operation_id)
+          VALUES (?, ?, ?, ?, ?, ?, 'planned', 'restore', ?)`)
+          .run(batch.id, operation.media_id, operation.root_id, operation.to_path, operation.from_path,
+            operation.category, operation.id);
+        restoreOperationId = row.lastInsertRowid;
         await moveWithoutOverwrite(operation.to_path, operation.from_path);
+        this.db.prepare("UPDATE apply_operations SET status = 'completed' WHERE id = ?").run(restoreOperationId);
         this.db.prepare('UPDATE apply_operations SET status = ? WHERE id = ?').run('restored', operation.id);
         this.db.prepare('UPDATE media SET relative_path = ?, present = 1 WHERE id = ?')
           .run(path.relative(root, operation.from_path), operation.media_id);
         results.push({ source: operation.to_path, destination: operation.from_path, status: 'restored' });
       } catch (error) {
+        let sourceExists = true;
+        let destinationExists = false;
+        try {
+          sourceExists = await pathExists(operation.to_path);
+          destinationExists = await pathExists(operation.from_path);
+        } catch {}
+        if (restoreOperationId && !sourceExists && destinationExists) {
+          this.db.prepare("UPDATE apply_operations SET status = 'completed' WHERE id = ?").run(restoreOperationId);
+          this.db.prepare("UPDATE apply_operations SET status = 'restored' WHERE id = ?").run(operation.id);
+          this.db.prepare('UPDATE media SET relative_path = ?, present = 1 WHERE id = ?')
+            .run(path.relative(this.db.prepare('SELECT path FROM roots WHERE id = ?').get(operation.root_id).path,
+              operation.from_path), operation.media_id);
+          results.push({ source: operation.to_path, destination: operation.from_path, status: 'restored' });
+          continue;
+        }
+        if (restoreOperationId) {
+          this.db.prepare("UPDATE apply_operations SET status = 'failed' WHERE id = ?").run(restoreOperationId);
+        }
         results.push({ source: operation.to_path, destination: operation.from_path, status: 'conflict', error: error.message });
       }
     }
     this.log('restore_completed', { batchId: batch.id, results });
+    this.publishQueueChange();
     return { batchId: batch.id, results };
   }
 
@@ -1397,6 +1612,19 @@ class PhotoSorter {
     return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
   }
 
+  async readImageBuffer(request) {
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of request) {
+      size += chunk.length;
+      if (size > 8 * 1024 * 1024) {
+        throw Object.assign(new Error('Generated preview is too large.'), { status: 413 });
+      }
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  }
+
   sessionToken(request) {
     const cookie = request.headers.cookie || '';
     const match = cookie.match(/(?:^|;\s*)photo_sorter_session=([A-Fa-f0-9]+)/);
@@ -1412,9 +1640,10 @@ class PhotoSorter {
     const deviceId = this.deviceId(request) || crypto.randomBytes(16).toString('hex');
     const token = crypto.randomBytes(32).toString('hex');
     this.sessions.set(token, { deviceId, createdAt: Date.now() });
-    const cookies = [`photo_sorter_session=${token}; HttpOnly; SameSite=Strict; Path=/`];
-    if (!this.deviceId(request)) {
-      cookies.push(`photo_sorter_device=${deviceId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=315360000`);
+    const secure = this.passkeys?.configuredOrigin()?.origin === request.headers.origin ? '; Secure' : '';
+    const cookies = [`photo_sorter_session=${token}; HttpOnly; SameSite=Strict; Path=/${secure}`];
+    if (!this.deviceId(request) || secure) {
+      cookies.push(`photo_sorter_device=${deviceId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=315360000${secure}`);
     }
     return { deviceId, headers: { 'Set-Cookie': cookies } };
   }
@@ -1431,6 +1660,9 @@ class PhotoSorter {
     if (url.pathname.startsWith('/api/')) {
       if (request.method === 'GET' && url.pathname === '/api/setup-status') {
         return this.sendJson(response, 200, { setupComplete: this.isSetupComplete() });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/passkeys/status') {
+        return this.sendJson(response, 200, this.passkeys.status());
       }
       if (request.method === 'POST' && url.pathname === '/api/setup') {
         const hostname = (request.headers.host || '').split(':')[0].toLowerCase();
@@ -1458,11 +1690,29 @@ class PhotoSorter {
         const session = this.issueSession(request);
         return this.sendJson(response, 200, { authenticated: true }, session.headers);
       }
+      if (request.method === 'POST' && url.pathname === '/api/passkeys/authentication/options') {
+        if (!this.isSetupComplete()) {
+          return this.sendJson(response, 403, { error: 'Complete host setup before using passkeys.' });
+        }
+        return this.sendJson(response, 200, await this.passkeys.authenticationOptions(request));
+      }
+      if (request.method === 'POST' && url.pathname === '/api/passkeys/authentication/verify') {
+        if (!this.isSetupComplete()) {
+          return this.sendJson(response, 403, { error: 'Complete host setup before using passkeys.' });
+        }
+        await this.passkeys.verifyAuthentication(request, await this.readJson(request));
+        const session = this.issueSession(request);
+        return this.sendJson(response, 200, { authenticated: true }, session.headers);
+      }
       if (request.method === 'POST' && url.pathname === '/api/logout') {
         const token = this.sessionToken(request);
-        if (token) this.sessions.delete(token);
+        if (token) {
+          this.sessions.delete(token);
+          this.closeEventStreamsForSession(token);
+        }
+        const secure = this.passkeys?.configuredOrigin()?.origin === request.headers.origin ? '; Secure' : '';
         return this.sendJson(response, 200, { authenticated: false }, {
-          'Set-Cookie': 'photo_sorter_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0',
+          'Set-Cookie': `photo_sorter_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure}`,
         });
       }
       if (request.method === 'GET' && url.pathname === '/api/network') {
@@ -1477,6 +1727,49 @@ class PhotoSorter {
         return this.sendJson(response, 200, { addresses });
       }
       const session = this.requireSession(request);
+      if (request.method === 'GET' && url.pathname === '/api/events') {
+        const collectionId = url.searchParams.get('collectionId');
+        if (collectionId && !this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+          return this.sendJson(response, 404, { error: 'Collection not found.' });
+        }
+        response.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+          'X-Accel-Buffering': 'no',
+        });
+        const stream = {
+          response,
+          token: this.sessionToken(request),
+          collectionId,
+          heartbeat: setInterval(() => {
+            if (!response.destroyed && !response.writableEnded) response.write(': keepalive\n\n');
+          }, 20_000),
+        };
+        stream.heartbeat.unref?.();
+        this.eventStreams.add(stream);
+        response.on('close', () => {
+          clearInterval(stream.heartbeat);
+          this.eventStreams.delete(stream);
+        });
+        response.write(': connected\n\n');
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/api/passkeys') {
+        return this.sendJson(response, 200, { passkeys: this.passkeys.list() });
+      }
+      if (request.method === 'POST' && url.pathname === '/api/passkeys/registration/options') {
+        return this.sendJson(response, 200, await this.passkeys.registrationOptions(request, session.deviceId));
+      }
+      if (request.method === 'POST' && url.pathname === '/api/passkeys/registration/verify') {
+        return this.sendJson(response, 201, await this.passkeys.verifyRegistration(
+          request, session.deviceId, await this.readJson(request),
+        ));
+      }
+      const passkeyMatch = url.pathname.match(/^\/api\/passkeys\/([A-Za-z0-9_-]+)$/);
+      if (request.method === 'DELETE' && passkeyMatch) {
+        return this.sendJson(response, 200, this.passkeys.remove(passkeyMatch[1]));
+      }
       if (request.method === 'GET' && url.pathname === '/api/collections') {
         return this.sendJson(response, 200, { collections: this.listCollections() });
       }
@@ -1551,6 +1844,16 @@ class PhotoSorter {
         return this.sendJson(response, 200, await this.saveSettings(await this.readJson(request)));
       }
       const previewMatch = url.pathname.match(/^\/api\/media\/([0-9a-f-]+)\/preview$/i);
+      if (request.method === 'POST' && previewMatch) {
+        if (!/^image\/jpeg(?:\s*;|$)/i.test(request.headers['content-type'] || '')) {
+          return this.sendJson(response, 415, { error: 'Generated preview must use image/jpeg.' });
+        }
+        const preview = await this.readImageBuffer(request);
+        const expectedVersion = request.headers['if-match'] || '';
+        return this.sendJson(response, 201, await this.saveGeneratedPreview(
+          previewMatch[1], preview, expectedVersion,
+        ));
+      }
       if (request.method === 'GET' && previewMatch) {
         const preview = await this.getPreview(previewMatch[1]);
         if (!preview) return this.sendJson(response, 404, { error: 'Preview is unavailable.' });
@@ -1666,7 +1969,10 @@ class PhotoSorter {
       const stat = await fs.stat(filename);
       if (!stat.isFile()) return this.sendJson(response, 404, { error: 'Not found.' });
       const mime = filename.endsWith('.css') ? 'text/css; charset=utf-8'
-        : filename.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/html; charset=utf-8';
+        : filename.endsWith('.js') ? 'text/javascript; charset=utf-8'
+          : filename.endsWith('.webmanifest') ? 'application/manifest+json; charset=utf-8'
+            : filename.endsWith('.svg') ? 'image/svg+xml'
+              : 'text/html; charset=utf-8';
       response.writeHead(200, {
         'Content-Type': mime,
         'Content-Length': stat.size,

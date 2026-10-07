@@ -2,14 +2,16 @@
 
 Photo Sorter is a local-first Electron application for organizing photos and videos on the computer that stores them. Its responsive web interface can also be opened by phones on the same private network.
 
-This repository contains an early working foundation, not the complete MVP described in the implementation handoff. See [implementation status](docs/ARCHITECTURE.md#current-scope-by-handoff-area) for what works and what remains unimplemented.
+The application includes password and optional passkey sign-in, local collections and watched folders, responsive photo/video review, safe apply/restore with recovery journaling, an audit log, English/German UI, appearance preferences, generated previews, and a static-shell PWA. Cloud sync and automatic backups are intentionally excluded. See [implementation status](docs/ARCHITECTURE.md#current-scope-by-handoff-area) for the full scope and limitations.
 
 ## Development
 
 - Requires Node.js 22.13 or newer and npm.
-- `npm install` installs Electron and packaging tools.
+- `npm install` installs Electron, packaging tools, and the Playwright test runner.
+- `npx playwright install chromium` installs the browser used by UI tests.
 - `npm run dev` starts the desktop host.
-- `npm test` runs unit and local HTTP workflow tests.
+- `npm test` runs unit tests, HTTP/API workflow tests, and real-browser Playwright tests.
+- `npm run test:unit`, `npm run test:e2e`, and `npm run test:browser` run those suites individually.
 - `npm run build` builds the unpacked desktop application for the current OS.
 - `npm run dist:win`, `npm run dist:mac`, and `npm run dist:linux` create native packages for their target OS.
 

@@ -13,14 +13,28 @@ const state = {
   lockReady: false,
   lockTransition: Promise.resolve(),
   restoreMediaId: '',
+  zoomScale: 1,
+  panX: 0,
+  panY: 0,
+  pointers: new Map(),
+  pinchDistance: 0,
+  pinchScale: 1,
+  lastPointer: null,
+  gridTargetIndex: null,
+  restoreGridScroll: false,
+  mediaRequestId: 0,
 };
 const byId = (id) => document.getElementById(id);
 const mediaGrid = byId('media-grid');
+const mediaViewport = byId('media-viewport');
 const videoPosterObserver = typeof IntersectionObserver === 'undefined' ? null : new IntersectionObserver((entries) => {
   for (const entry of entries) {
     if (!entry.isIntersecting) continue;
     videoPosterObserver.unobserve(entry.target);
-    loadVideoPoster(entry.target);
+    loadVideoPoster(entry.target).catch((error) => {
+      setStatus(error.message, true);
+      if (entry.target.isConnected) showVideoUnavailable(entry.target);
+    });
   }
 }, { rootMargin: '160px' });
 let stateSaveTimer;
@@ -28,25 +42,123 @@ let scanPollTimer;
 let scanPollBusy = false;
 let queuePollTimer;
 let queuePollBusy = false;
+let queueEvents;
+let queueEventRefreshTimer;
+let pendingInstallPrompt;
+let activePreviewJobs = 0;
+const previewQueue = [];
+const previewJobs = new Map();
 
-function loadVideoPoster(video) {
+function applyVisualPreferences() {
+  const theme = localStorage.getItem('photo-sorter-theme');
+  const gridColumns = localStorage.getItem('photo-sorter-grid-columns');
+  const validTheme = ['system', 'light', 'dark'].includes(theme) ? theme : 'system';
+  const validColumns = ['auto', '2', '3', '4', '5', '6'].includes(gridColumns) ? gridColumns : 'auto';
+  document.documentElement.dataset.theme = validTheme;
+  document.documentElement.dataset.gridColumns = validColumns;
+  byId('theme').value = validTheme;
+  byId('grid-columns').value = validColumns;
+}
+
+function setZoom(scale) {
+  state.zoomScale = Math.min(4, Math.max(1, scale));
+  if (state.zoomScale === 1) {
+    state.panX = 0;
+    state.panY = 0;
+  }
+  const image = byId('current-media').querySelector('img');
+  if (!image) return;
+  image.classList.toggle('zoomable', state.zoomScale > 1);
+  image.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoomScale})`;
+}
+
+function resetZoom() {
+  state.zoomScale = 1;
+  state.panX = 0;
+  state.panY = 0;
+  state.pointers.clear();
+  state.lastPointer = null;
+  setZoom(1);
+}
+
+function pointerDistance(first, second) {
+  return Math.hypot(first.x - second.x, first.y - second.y);
+}
+
+function clampPan() {
+  const container = byId('current-media');
+  const limitX = container.clientWidth * (state.zoomScale - 1) / 2;
+  const limitY = container.clientHeight * (state.zoomScale - 1) / 2;
+  state.panX = Math.min(limitX, Math.max(-limitX, state.panX));
+  state.panY = Math.min(limitY, Math.max(-limitY, state.panY));
+}
+
+function gridMetrics() {
+  const style = getComputedStyle(mediaGrid);
+  const columns = style.gridTemplateColumns.split(/\s+/).filter(Boolean).length || 1;
+  const rowHeight = Number.parseFloat(style.gridAutoRows) || 190;
+  const rowGap = Number.parseFloat(style.rowGap) || 12;
+  return { columns, rowHeight: rowHeight + rowGap };
+}
+
+function alignGridToSelection() {
+  const { columns, rowHeight } = gridMetrics();
+  mediaViewport.scrollTop = Math.floor((state.offset + state.index) / columns) * rowHeight;
+}
+
+function showVideoUnavailable(video) {
+  video.replaceWith(element('div', 'Video preview unavailable. This file can still be sorted.', 'placeholder'));
+}
+
+async function loadVideoPoster(video) {
   if (!video.isConnected) return;
+  const item = {
+    id: video.dataset.mediaId,
+    size: Number(video.dataset.mediaSize),
+    modified_at: Number(video.dataset.mediaModified),
+  };
+  const previewUrl = `/api/media/${encodeURIComponent(item.id)}/preview`;
+  const cached = await fetch(previewUrl);
+  if (cached.ok) {
+    const posterUrl = URL.createObjectURL(await cached.blob());
+    video.dataset.posterObjectUrl = posterUrl;
+    video.poster = posterUrl;
+    return;
+  }
+  if (cached.status !== 404) throw new Error(`Video poster request failed (${cached.status}).`);
   video.addEventListener('loadeddata', () => {
     if (!video.videoWidth || !video.videoHeight) return;
-    try {
+    enqueuePreviewJob(async () => {
       const scale = Math.min(1, 640 / video.videoWidth, 640 / video.videoHeight);
       const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
       canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
-      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-      video.poster = canvas.toDataURL('image/jpeg', 0.72);
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Video poster generation is unavailable in this browser.');
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const poster = await new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => {
+          if (blob) resolve(blob);
+          else reject(new Error('The browser could not encode this video poster.'));
+        }, 'image/jpeg', 0.82);
+      });
+      const result = await cachePreviewBlob(item, poster);
+      if (!video.isConnected) {
+        if (result.objectUrl) URL.revokeObjectURL(result.src);
+        return;
+      }
+      if (result.objectUrl) video.dataset.posterObjectUrl = result.src;
+      video.poster = result.src;
       video.removeAttribute('src');
       video.load();
-    } catch {}
+    }).catch((error) => {
+      setStatus(error.message, true);
+      if (video.isConnected) showVideoUnavailable(video);
+    });
   }, { once: true });
+  video.addEventListener('error', () => showVideoUnavailable(video), { once: true });
   video.preload = 'metadata';
   video.src = video.dataset.posterSource;
-  delete video.dataset.posterSource;
   video.load();
 }
 
@@ -125,6 +237,77 @@ function updateItemLock(item) {
   });
 }
 
+function runPreviewQueue() {
+  while (activePreviewJobs < 2 && previewQueue.length) {
+    const task = previewQueue.shift();
+    activePreviewJobs += 1;
+    Promise.resolve().then(task.run).then(task.resolve, task.reject).finally(() => {
+      activePreviewJobs -= 1;
+      runPreviewQueue();
+    });
+  }
+}
+
+function enqueuePreviewJob(job) {
+  const promise = new Promise((resolve, reject) => {
+    previewQueue.push({ run: job, resolve, reject });
+  });
+  runPreviewQueue();
+  return promise;
+}
+
+async function cachePreviewBlob(item, preview) {
+  const version = `${item.size}:${item.modified_at}`;
+  const previewUrl = `/api/media/${encodeURIComponent(item.id)}/preview`;
+  const upload = await fetch(previewUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'image/jpeg', 'If-Match': version },
+    body: preview,
+  });
+  const result = upload.headers.get('content-type')?.includes('application/json')
+    ? await upload.json() : null;
+  if (!upload.ok) throw new Error(result?.error || `Preview save failed (${upload.status}).`);
+  if (!result) throw new Error('The host returned an invalid preview response.');
+  if (result.stored) return { src: previewUrl };
+  return { src: URL.createObjectURL(preview), objectUrl: true };
+}
+
+function generateImagePreview(item) {
+  const version = `${item.size}:${item.modified_at}`;
+  const key = `${item.id}:${version}`;
+  if (previewJobs.has(key)) return previewJobs.get(key);
+  const promise = enqueuePreviewJob(async () => {
+    const sourceResponse = await fetch(mediaUrl(item));
+    if (!sourceResponse.ok) throw new Error(`Image request failed (${sourceResponse.status}).`);
+    const bitmap = await createImageBitmap(await sourceResponse.blob());
+    const scale = Math.min(1, 640 / bitmap.width, 640 / bitmap.height);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext('2d');
+    if (!context) {
+      bitmap.close();
+      throw new Error('Image preview generation is unavailable in this browser.');
+    }
+    let preview;
+    try {
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      preview = await new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => {
+          if (blob) resolve(blob);
+          else reject(new Error('The browser could not encode this image preview.'));
+        }, 'image/jpeg', 0.82);
+      });
+    } finally {
+      bitmap.close();
+    }
+    return cachePreviewBlob(item, preview);
+  });
+  previewJobs.set(key, promise);
+  promise.then(() => previewJobs.delete(key), () => previewJobs.delete(key));
+  return promise;
+}
+
 async function request(url, options = {}) {
   const response = await fetch(url, {
     ...options,
@@ -167,8 +350,14 @@ function createPreview(item, controls = false, cached = false) {
     } else {
       video.muted = true;
       video.dataset.posterSource = mediaUrl(item);
+      video.dataset.mediaId = item.id;
+      video.dataset.mediaSize = String(item.size);
+      video.dataset.mediaModified = String(item.modified_at);
       if (videoPosterObserver) videoPosterObserver.observe(video);
-      else loadVideoPoster(video);
+      else loadVideoPoster(video).catch((error) => {
+        setStatus(error.message, true);
+        if (video.isConnected) showVideoUnavailable(video);
+      });
     }
     return video;
   }
@@ -179,7 +368,21 @@ function createPreview(item, controls = false, cached = false) {
   image.onerror = () => {
     if (cached) {
       cached = false;
-      image.src = mediaUrl(item);
+      generateImagePreview(item).then(({ src, objectUrl }) => {
+        if (!image.isConnected) {
+          if (objectUrl) URL.revokeObjectURL(src);
+          return;
+        }
+        if (objectUrl) {
+          const release = () => URL.revokeObjectURL(src);
+          image.addEventListener('load', release, { once: true });
+          image.addEventListener('error', release, { once: true });
+        }
+        image.src = src;
+      }).catch((error) => {
+        setStatus(error.message, true);
+        image.src = mediaUrl(item);
+      });
       return;
     }
     const placeholder = element('div', 'Preview unavailable. This file can still be sorted.', 'placeholder');
@@ -190,7 +393,9 @@ function createPreview(item, controls = false, cached = false) {
 
 function renderCurrent() {
   const container = byId('current-media');
+  resetZoom();
   container.replaceChildren();
+  byId('zoom-controls').classList.add('hidden');
   const item = state.items[state.index];
   if (!item) {
     container.append(element('div', state.total ? 'Loading items…' : 'No items in this category.'));
@@ -200,34 +405,46 @@ function renderCurrent() {
     return;
   }
   container.append(createPreview(item, item.kind === 'video'));
-  byId('item-count').textContent = `${state.index + 1} of ${state.total}`;
+  if (item.kind === 'image') byId('zoom-controls').classList.remove('hidden');
+  byId('item-count').textContent = `${state.offset + state.index + 1} of ${state.total}`;
   updateItemLock(item);
   saveDeviceState();
 }
 
 function renderGrid() {
-  for (const video of mediaGrid.querySelectorAll('video[data-poster-source]')) {
+  for (const video of mediaGrid.querySelectorAll('video')) {
     videoPosterObserver?.unobserve(video);
+    if (video.dataset.posterObjectUrl) URL.revokeObjectURL(video.dataset.posterObjectUrl);
   }
   mediaGrid.replaceChildren();
+  const { columns, rowHeight } = gridMetrics();
+  byId('media-virtual-space').style.height = `${Math.ceil(state.total / columns) * rowHeight}px`;
+  mediaGrid.style.top = `${Math.floor(state.offset / columns) * rowHeight}px`;
   for (const item of state.items) {
     const card = element('article', undefined, 'media-card');
     const select = element('button', item.relative_path);
+    select.setAttribute('translate', 'no');
     select.type = 'button';
     select.className = 'quiet media-name';
     select.addEventListener('click', () => {
       state.index = state.items.indexOf(item);
       renderCurrent();
     });
+    if (mediaGrid.childElementCount === 0 && state.offset % columns) {
+      card.style.gridColumnStart = String(state.offset % columns + 1);
+    }
     card.append(createPreview(item, false, item.kind === 'image'), select, element('small', `${item.kind} · ${formatBytes(item.size)}${item.category ? ` · ${item.category}` : ''}`, 'media-name'));
     mediaGrid.append(card);
   }
-  byId('load-more').classList.toggle('hidden', state.offset + state.items.length >= state.total);
-  byId('previous-page').classList.toggle('hidden', state.offset === 0);
+  if (state.restoreGridScroll) {
+    mediaViewport.scrollTop = Math.floor((state.offset + state.index) / columns) * rowHeight;
+    state.restoreGridScroll = false;
+  }
   renderCurrent();
 }
 
 async function loadMedia() {
+  const requestId = ++state.mediaRequestId;
   if (!state.collectionId) {
     state.items = [];
     state.total = 0;
@@ -235,18 +452,70 @@ async function loadMedia() {
     return;
   }
   const data = await request(`/api/media?collectionId=${encodeURIComponent(state.collectionId)}&category=${state.category}&sort=${state.sort}&offset=${state.offset}&limit=${state.limit}`);
+  if (requestId !== state.mediaRequestId) return;
   state.items = data.items;
   state.total = data.total;
   if (!state.items.length && state.offset > 0 && state.offset >= state.total) {
     state.offset = Math.max(0, Math.floor(Math.max(0, state.total - 1) / state.limit) * state.limit);
+    state.gridTargetIndex = Math.max(0, state.total - state.offset - 1);
     return loadMedia();
   }
-  const restoredIndex = state.restoreMediaId
+  const restoredIndex = state.gridTargetIndex !== null
+    ? state.gridTargetIndex : state.restoreMediaId
     ? state.items.findIndex((item) => item.id === state.restoreMediaId) : -1;
   state.index = restoredIndex >= 0 ? restoredIndex : Math.min(state.index, Math.max(0, state.items.length - 1));
+  state.gridTargetIndex = null;
   state.restoreMediaId = '';
   byId('collection-title').textContent = `${state.category[0].toUpperCase()}${state.category.slice(1)} items`;
   renderGrid();
+}
+
+function handleGridScroll() {
+  if (!state.total || state.busy) return;
+  const { columns, rowHeight } = gridMetrics();
+  const rowStart = Math.floor(mediaViewport.scrollTop / rowHeight) * columns;
+  const firstVisibleIndex = state.offset > rowStart && state.offset < rowStart + columns
+    ? state.offset : rowStart;
+  const lastVisibleIndex = Math.min(
+    state.total - 1,
+    Math.floor((mediaViewport.scrollTop + mediaViewport.clientHeight) / rowHeight) * columns,
+  );
+  const pageOffset = Math.floor(Math.max(firstVisibleIndex, lastVisibleIndex) / state.limit) * state.limit;
+  if (pageOffset === state.offset) return;
+  const previousOffset = state.offset;
+  state.offset = pageOffset;
+  state.gridTargetIndex = Math.max(0, firstVisibleIndex - pageOffset);
+  state.restoreMediaId = '';
+  loadMedia().catch((error) => {
+    if (state.offset === pageOffset) {
+      state.offset = previousOffset;
+      state.gridTargetIndex = null;
+    }
+    setStatus(error.message, true);
+  });
+}
+
+function moveSelection(direction) {
+  const absoluteIndex = state.offset + state.index + direction;
+  if (absoluteIndex < 0 || absoluteIndex >= state.total) return;
+  const pageOffset = Math.floor(absoluteIndex / state.limit) * state.limit;
+  const index = absoluteIndex - pageOffset;
+  if (pageOffset !== state.offset) {
+    const previousOffset = state.offset;
+    state.offset = pageOffset;
+    state.gridTargetIndex = index;
+    state.restoreMediaId = '';
+    loadMedia().catch((error) => {
+      if (state.offset === pageOffset) {
+        state.offset = previousOffset;
+        state.gridTargetIndex = null;
+      }
+      setStatus(error.message, true);
+    });
+    return;
+  }
+  state.index = index;
+  renderCurrent();
 }
 
 async function refreshQueue() {
@@ -297,6 +566,7 @@ async function loadCollections(preferredId) {
   for (const collection of result.collections) {
     const option = element('option', `${collection.name} (${collection.item_count})`);
     option.value = collection.id;
+    option.setAttribute('translate', 'no');
     select.append(option);
   }
   if (!result.collections.length) {
@@ -322,6 +592,7 @@ async function loadCollections(preferredId) {
     state.category = saved.state.category;
     state.sort = saved.state.sort;
     state.offset = saved.state.offset;
+    state.restoreGridScroll = true;
     state.restoreMediaId = saved.state.mediaId || '';
     byId('sort-order').value = state.sort;
     for (const button of byId('filters').querySelectorAll('button')) {
@@ -330,6 +601,8 @@ async function loadCollections(preferredId) {
   } else {
     state.category = 'unseen';
     state.sort = state.defaultSort;
+    state.offset = 0;
+    state.restoreGridScroll = true;
     state.restoreMediaId = '';
     byId('sort-order').value = state.sort;
     for (const button of byId('filters').querySelectorAll('button')) {
@@ -349,9 +622,31 @@ function showApp() {
   byId('add-root').classList.toggle('hidden', !window.photoSorter?.isDesktop);
   refreshNetwork();
   loadSettings().then(() => loadCollections()).catch((error) => setStatus(error.message, true));
+  loadPasskeys().catch((error) => setStatus(error.message, true));
   refreshScans();
   if (!scanPollTimer) scanPollTimer = setInterval(refreshScans, 1500);
   if (!queuePollTimer) queuePollTimer = setInterval(refreshQueue, 5000);
+  if (!queueEvents && 'EventSource' in window) {
+    queueEvents = new EventSource('/api/events');
+    queueEvents.addEventListener('queue', (event) => {
+      const change = JSON.parse(event.data);
+      if (!change.collectionId || change.collectionId === state.collectionId) {
+        clearTimeout(queueEventRefreshTimer);
+        queueEventRefreshTimer = setTimeout(refreshQueue, 100);
+      }
+    });
+    queueEvents.addEventListener('auth-expired', () => {
+      queueEvents.close();
+      queueEvents = null;
+      clearInterval(scanPollTimer);
+      clearInterval(queuePollTimer);
+      scanPollTimer = null;
+      queuePollTimer = null;
+      byId('app-panel').classList.add('hidden');
+      byId('logout').classList.add('hidden');
+      showAuthentication().catch((error) => setStatus(error.message, true));
+    });
+  }
 }
 
 async function loadSettings() {
@@ -424,6 +719,7 @@ async function loadArchivedCollections() {
   const { collections } = await request('/api/collections/archived');
   for (const collection of collections) {
     const item = element('li', collection.name);
+    item.setAttribute('translate', 'no');
     const restore = element('button', 'Restore');
     restore.type = 'button';
     restore.addEventListener('click', async () => {
@@ -440,8 +736,83 @@ async function loadArchivedCollections() {
   if (!collections.length) list.append(element('li', 'No archived collections.'));
 }
 
+async function updatePasskeyStatus(setupComplete) {
+  const loginButton = byId('passkey-login');
+  const management = byId('passkey-management');
+  if (!window.isSecureContext || !navigator.credentials) {
+    loginButton.classList.add('hidden');
+    management.classList.add('hidden');
+    return;
+  }
+  const status = await request('/api/passkeys/status');
+  loginButton.classList.toggle('hidden', !setupComplete || !status.enabled || status.count === 0);
+  management.classList.toggle('hidden', !status.enabled);
+  byId('passkey-info').textContent = status.enabled
+    ? `${status.count} passkey(s) registered. Password sign-in remains available.`
+    : 'Passkeys require a configured HTTPS origin and relying-party domain.';
+}
+
+async function loadPasskeys() {
+  if (!window.isSecureContext || !navigator.credentials) return;
+  const status = await request('/api/passkeys/status');
+  if (!status.enabled) return;
+  const { passkeys } = await request('/api/passkeys');
+  const list = byId('passkey-list');
+  list.replaceChildren();
+  for (const passkey of passkeys) {
+    const addedDate = new Date(passkey.createdAt).toLocaleDateString(document.documentElement.lang);
+    const item = element('li', `Passkey added ${addedDate}`);
+    const remove = element('button', 'Remove');
+    remove.type = 'button';
+    remove.addEventListener('click', async () => {
+      try {
+        await request(`/api/passkeys/${encodeURIComponent(passkey.id)}`, { method: 'DELETE' });
+        await loadPasskeys();
+        await updatePasskeyStatus(true);
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    });
+    item.append(remove);
+    list.append(item);
+  }
+  await updatePasskeyStatus(true);
+}
+
+async function registerPasskey() {
+  try {
+    const { challengeId, options } = await request('/api/passkeys/registration/options', {
+      method: 'POST', body: '{}',
+    });
+    const response = await window.photoSorterPasskeys.create(options);
+    await request('/api/passkeys/registration/verify', {
+      method: 'POST', body: JSON.stringify({ challengeId, response }),
+    });
+    await loadPasskeys();
+    setStatus('Passkey registered.');
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+async function loginWithPasskey() {
+  try {
+    const { challengeId, options } = await request('/api/passkeys/authentication/options', {
+      method: 'POST', body: '{}',
+    });
+    const response = await window.photoSorterPasskeys.get(options);
+    await request('/api/passkeys/authentication/verify', {
+      method: 'POST', body: JSON.stringify({ challengeId, response }),
+    });
+    showApp();
+  } catch (error) {
+    byId('auth-error').textContent = error.message;
+  }
+}
+
 async function showAuthentication() {
   const { setupComplete } = await request('/api/setup-status');
+  await updatePasskeyStatus(setupComplete);
   const desktop = Boolean(window.photoSorter?.isDesktop);
   if (!setupComplete && !desktop) {
     byId('auth-panel').classList.remove('hidden');
@@ -566,6 +937,44 @@ async function applyDecisions() {
   }
 }
 
+byId('theme').addEventListener('change', (event) => {
+  localStorage.setItem('photo-sorter-theme', event.target.value);
+  document.documentElement.dataset.theme = event.target.value;
+});
+byId('grid-columns').addEventListener('change', (event) => {
+  localStorage.setItem('photo-sorter-grid-columns', event.target.value);
+  document.documentElement.dataset.gridColumns = event.target.value;
+  renderGrid();
+  alignGridToSelection();
+});
+byId('language').addEventListener('change', (event) => {
+  window.photoSorterI18n.setLanguage(event.target.value);
+});
+byId('register-passkey').addEventListener('click', registerPasskey);
+byId('passkey-login').addEventListener('click', loginWithPasskey);
+window.addEventListener('beforeinstallprompt', (event) => {
+  event.preventDefault();
+  pendingInstallPrompt = event;
+  byId('install-app').classList.remove('hidden');
+});
+byId('install-app').addEventListener('click', async () => {
+  if (!pendingInstallPrompt) return;
+  try {
+    await pendingInstallPrompt.prompt();
+    pendingInstallPrompt = null;
+    byId('install-app').classList.add('hidden');
+  } catch (error) {
+    setStatus(`Unable to start installation: ${error.message}`, true);
+  }
+});
+window.addEventListener('appinstalled', () => {
+  pendingInstallPrompt = null;
+  byId('install-app').classList.add('hidden');
+});
+byId('zoom-in').addEventListener('click', () => setZoom(state.zoomScale + 0.5));
+byId('zoom-out').addEventListener('click', () => setZoom(state.zoomScale - 0.5));
+byId('zoom-reset').addEventListener('click', resetZoom);
+
 byId('settings-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   try {
@@ -577,6 +986,7 @@ byId('settings-form').addEventListener('submit', async (event) => {
         previewCacheLimitMb: Number(byId('preview-cache-limit').value),
       }),
     });
+
     state.defaultSort = settings.defaultSort;
     if (state.sort === previousDefault) {
       state.sort = settings.defaultSort;
@@ -627,6 +1037,8 @@ byId('archive-collection').addEventListener('click', async () => {
 byId('sort-order').addEventListener('change', async (event) => {
   state.sort = event.target.value;
   state.offset = 0;
+  state.gridTargetIndex = null;
+  state.restoreGridScroll = true;
   await loadMedia();
 });
 byId('add-root').addEventListener('click', async () => {
@@ -645,29 +1057,22 @@ byId('filters').addEventListener('click', async (event) => {
   state.category = button.dataset.category;
   state.offset = 0;
   state.index = 0;
+  state.gridTargetIndex = null;
+  state.restoreGridScroll = true;
   for (const candidate of byId('filters').querySelectorAll('button')) {
     candidate.setAttribute('aria-pressed', String(candidate === button));
   }
   await loadMedia();
 });
-byId('previous').addEventListener('click', () => {
-  if (state.index > 0) { state.index -= 1; renderCurrent(); }
-});
-byId('next').addEventListener('click', () => {
-  if (state.index + 1 < state.items.length) { state.index += 1; renderCurrent(); }
-});
+byId('previous').addEventListener('click', () => moveSelection(-1));
+byId('next').addEventListener('click', () => moveSelection(1));
 document.querySelectorAll('[data-decision]').forEach((button) => {
   button.addEventListener('click', () => decide(button.dataset.decision));
 });
-byId('load-more').addEventListener('click', () => {
-  state.offset += state.limit;
-  state.index = 0;
-  loadMedia().catch((error) => setStatus(error.message, true));
-});
-byId('previous-page').addEventListener('click', () => {
-  state.offset = Math.max(0, state.offset - state.limit);
-  state.index = 0;
-  loadMedia().catch((error) => setStatus(error.message, true));
+mediaViewport.addEventListener('scroll', handleGridScroll, { passive: true });
+window.addEventListener('resize', () => {
+  renderGrid();
+  alignGridToSelection();
 });
 byId('apply').addEventListener('click', applyDecisions);
 byId('restore').addEventListener('click', async () => {
@@ -753,6 +1158,10 @@ byId('clear-audit').addEventListener('click', async () => {
 byId('logout').addEventListener('click', async () => {
   updateItemLock(null);
   await state.lockTransition;
+  queueEvents?.close();
+  queueEvents = null;
+  clearTimeout(queueEventRefreshTimer);
+  queueEventRefreshTimer = null;
   await request('/api/logout', { method: 'POST', body: '{}' });
   byId('app-panel').classList.add('hidden');
   clearInterval(scanPollTimer);
@@ -777,7 +1186,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'ArrowLeft') decide('delete');
   if (event.key === 'ArrowRight') decide('keep');
   if (event.key === 'ArrowDown') decide('unsure');
-  if (event.key === 'ArrowUp' && state.index > 0) { state.index -= 1; renderCurrent(); }
+  if (event.key === 'ArrowUp') moveSelection(-1);
 });
 let touchStart;
 byId('current-media').addEventListener('touchstart', (event) => {
@@ -785,6 +1194,10 @@ byId('current-media').addEventListener('touchstart', (event) => {
 }, { passive: true });
 byId('current-media').addEventListener('touchend', (event) => {
   if (!touchStart) return;
+  if (state.zoomScale > 1) {
+    touchStart = null;
+    return;
+  }
   const dx = event.changedTouches[0].clientX - touchStart.x;
   const dy = event.changedTouches[0].clientY - touchStart.y;
   if (Math.abs(dx) > 65 && Math.abs(dx) > Math.abs(dy)) decide(dx < 0 ? 'delete' : 'keep');
@@ -792,8 +1205,52 @@ byId('current-media').addEventListener('touchend', (event) => {
   touchStart = null;
 }, { passive: true });
 
+byId('current-media').addEventListener('pointerdown', (event) => {
+  if (!byId('current-media').querySelector('img') || event.button !== 0) return;
+  const point = { x: event.clientX, y: event.clientY };
+  state.pointers.set(event.pointerId, point);
+  if (state.pointers.size === 1 && state.zoomScale > 1) {
+    byId('current-media').setPointerCapture(event.pointerId);
+    state.lastPointer = point;
+  } else if (state.pointers.size === 2) {
+    const [first, second] = state.pointers.values();
+    state.pinchDistance = pointerDistance(first, second);
+    state.pinchScale = state.zoomScale;
+  }
+});
+byId('current-media').addEventListener('pointermove', (event) => {
+  if (!state.pointers.has(event.pointerId)) return;
+  const point = { x: event.clientX, y: event.clientY };
+  state.pointers.set(event.pointerId, point);
+  if (state.pointers.size >= 2 && state.pinchDistance > 0) {
+    const [first, second] = state.pointers.values();
+    setZoom(state.pinchScale * pointerDistance(first, second) / state.pinchDistance);
+    clampPan();
+    setZoom(state.zoomScale);
+  } else if (state.pointers.size === 1 && state.lastPointer && state.zoomScale > 1) {
+    state.panX += point.x - state.lastPointer.x;
+    state.panY += point.y - state.lastPointer.y;
+    state.lastPointer = point;
+    clampPan();
+    setZoom(state.zoomScale);
+  }
+});
+for (const eventName of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+  byId('current-media').addEventListener(eventName, (event) => {
+    state.pointers.delete(event.pointerId);
+    state.pinchDistance = 0;
+    state.lastPointer = null;
+  });
+}
+
 request('/api/setup-status').then(showAuthentication).catch((error) => {
   byId('auth-panel').classList.remove('hidden');
   byId('auth-title').textContent = 'Cannot reach the local host';
   byId('auth-description').textContent = error.message;
 });
+
+applyVisualPreferences();
+if (window.isSecureContext && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/service-worker.js')
+    .catch((error) => setStatus(`Offline install support unavailable: ${error.message}`, true));
+}

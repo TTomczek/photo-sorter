@@ -212,6 +212,7 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
   assert.equal(conflict.body.results[0].status, 'conflict');
   assert.equal(await fs.readFile(path.join(root, 'trip', 'photo.jpg'), 'utf8'), 'new-file-at-original');
   assert.equal((await api('/api/audit')).body.events.some((event) => event.action === 'decision_changed'), true);
+  assert.equal((await api('/api/audit')).body.events.some((event) => event.action === 'scan_started'), true);
   assert.equal((await api('/api/audit/export')).body.events.length > 0, true);
   const clearedAudit = await api('/api/audit', { method: 'DELETE', body: '{}' });
   assert.ok(clearedAudit.body.clearedCount > 0);
@@ -487,6 +488,191 @@ test('confirmed apply reconciles category changes by moving and restoring files'
   assert.equal((await apply(restorePlan)).results[0].status, 'restored');
   assert.equal(await fs.readFile(original, 'utf8'), 'original');
   assert.equal(await fs.access(unsure).then(() => true, () => false), false);
+});
+
+test('an interrupted hard-link move is reported precisely and reconciled on restart without deleting either path', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-apply-recovery-'));
+  const dataDirectory = path.join(temporary, 'data');
+  const rootDirectory = path.join(temporary, 'photos');
+  await fs.mkdir(rootDirectory);
+  const root = await fs.realpath(rootDirectory);
+  await fs.writeFile(path.join(root, 'a.jpg'), 'first-original');
+  await fs.writeFile(path.join(root, 'b.jpg'), 'second-original');
+  let app = await new PhotoSorter({ dataDirectory }).initialize();
+  t.after(async () => {
+    await app.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+
+  const collectionId = app.createCollection('Interrupted apply');
+  const rootId = await app.addRoot(collectionId, root);
+  app.closeRootWatcher(rootId);
+  const items = app.listMedia({ collectionId, category: 'unseen' }).items;
+  for (const item of items) app.setDecision(item.id, 'delete');
+  const plan = await app.planApply(collectionId);
+  const originalUnlink = fs.unlink;
+  const injectedSource = await fs.realpath(path.join(root, 'a.jpg'));
+  let unlinkFailureInjected = false;
+  fs.unlink = async (filename) => {
+    const unlinkPath = path.resolve(filename);
+    const matchesInjectedSource = process.platform === 'win32'
+      ? unlinkPath.toLowerCase() === injectedSource.toLowerCase()
+      : unlinkPath === injectedSource;
+    if (matchesInjectedSource) {
+      unlinkFailureInjected = true;
+      throw Object.assign(new Error('Injected unlink failure.'), { code: 'EIO' });
+    }
+    return originalUnlink(filename);
+  };
+  let applied;
+  try {
+    applied = await app.confirmApply(plan.id, { confirm: true, reuseOutputFolders: true });
+  } finally {
+    fs.unlink = originalUnlink;
+  }
+
+  assert.equal(unlinkFailureInjected, true);
+  assert.equal(applied.stoppedOnFailure, true);
+  assert.deepEqual(applied.results.map((result) => result.status), ['failed', 'not_attempted']);
+  assert.equal(applied.results[0].source, path.join(root, 'a.jpg'));
+  assert.equal(applied.results[0].destination, path.join(root, 'deleted', 'a.jpg'));
+  assert.equal(applied.results[1].source, path.join(root, 'b.jpg'));
+  assert.equal(await fs.readFile(path.join(root, 'a.jpg'), 'utf8'), 'first-original');
+  assert.equal(await fs.readFile(path.join(root, 'deleted', 'a.jpg'), 'utf8'), 'first-original');
+  assert.equal(await fs.access(path.join(root, 'b.jpg')).then(() => true, () => false), true);
+  const interruptedOperation = app.db.prepare('SELECT id, media_id, status FROM apply_operations').get();
+  assert.equal(interruptedOperation.status, 'failed');
+  const recoveryBatchId = 'interrupted-during-link';
+  app.db.prepare('INSERT INTO apply_batches(id, created_at) VALUES (?, ?)').run(
+    recoveryBatchId, new Date().toISOString(),
+  );
+  const aItem = app.db.prepare("SELECT id FROM media WHERE relative_path = 'a.jpg'").get();
+  app.db.prepare(`INSERT INTO apply_operations
+    (batch_id, media_id, root_id, from_path, to_path, category, status, operation_type)
+    VALUES (?, ?, ?, ?, ?, 'delete', 'planned', 'move')`).run(
+    recoveryBatchId, aItem.id, rootId, path.join(root, 'a.jpg'), path.join(root, 'deleted', 'a.jpg'),
+  );
+
+  const bItem = app.db.prepare("SELECT id FROM media WHERE relative_path = 'b.jpg'").get();
+  const completedRecoveryBatchId = 'interrupted-after-unlink';
+  app.db.prepare('INSERT INTO apply_batches(id, created_at) VALUES (?, ?)').run(
+    completedRecoveryBatchId, new Date().toISOString(),
+  );
+  const pendingMove = app.db.prepare(`INSERT INTO apply_operations
+    (batch_id, media_id, root_id, from_path, to_path, category, status, operation_type)
+    VALUES (?, ?, ?, ?, ?, 'delete', 'planned', 'move')`).run(
+    completedRecoveryBatchId, bItem.id, rootId, path.join(root, 'b.jpg'), path.join(root, 'deleted', 'b.jpg'),
+  );
+  await fs.link(path.join(root, 'b.jpg'), path.join(root, 'deleted', 'b.jpg'));
+  await fs.unlink(path.join(root, 'b.jpg'));
+
+  await app.close();
+  app = await new PhotoSorter({ dataDirectory }).initialize();
+  const failedRecovery = app.db.prepare("SELECT status FROM apply_operations WHERE media_id = ? ORDER BY id").all(aItem.id);
+  const completedRecovery = app.db.prepare("SELECT status FROM apply_operations WHERE media_id = ? ORDER BY id").all(bItem.id);
+  assert.deepEqual(failedRecovery.map((row) => row.status), ['failed', 'failed']);
+  assert.deepEqual(completedRecovery.map((row) => row.status), ['completed']);
+  assert.equal(await fs.readFile(path.join(root, 'a.jpg'), 'utf8'), 'first-original');
+  assert.equal(await fs.readFile(path.join(root, 'deleted', 'a.jpg'), 'utf8'), 'first-original');
+  assert.equal(await fs.access(path.join(root, 'b.jpg')).then(() => true, () => false), false);
+  assert.equal(app.listAudit(20).some((event) => event.action === 'apply_recovered'), true);
+  assert.equal(app.db.prepare('SELECT status FROM apply_operations WHERE id = ?').get(pendingMove.lastInsertRowid).status, 'completed');
+  assert.equal(app.db.prepare('SELECT relative_path FROM media WHERE id = ?').get(bItem.id).relative_path, path.join('deleted', 'b.jpg'));
+  assert.equal(await fs.readFile(path.join(root, 'deleted', 'b.jpg'), 'utf8'), 'second-original');
+});
+
+test('restart recovery resolves a completed restore when its reverse-move reference is stale', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-restore-recovery-'));
+  const dataDirectory = path.join(temporary, 'data');
+  const rootDirectory = path.join(temporary, 'photos');
+  await fs.mkdir(rootDirectory);
+  const root = await fs.realpath(rootDirectory);
+  const original = path.join(root, 'photo.jpg');
+  const moved = path.join(root, 'deleted', 'photo.jpg');
+  await fs.writeFile(original, 'restore-original');
+  let app = await new PhotoSorter({ dataDirectory }).initialize();
+  t.after(async () => {
+    await app.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+
+  const collectionId = app.createCollection('Interrupted restore');
+  const rootId = await app.addRoot(collectionId, root);
+  app.closeRootWatcher(rootId);
+  const item = app.listMedia({ collectionId, category: 'unseen' }).items[0];
+  app.setDecision(item.id, 'delete');
+  const plan = await app.planApply(collectionId);
+  await app.confirmApply(plan.id, { confirm: true, reuseOutputFolders: true });
+  const appliedOperation = app.db.prepare("SELECT * FROM apply_operations WHERE operation_type = 'move'").get();
+
+  const restoreJournal = app.db.prepare(`INSERT INTO apply_operations
+    (batch_id, media_id, root_id, from_path, to_path, category, status, operation_type, reverses_operation_id)
+    VALUES (?, ?, ?, ?, ?, ?, 'planned', 'restore', ?)`).run(
+    appliedOperation.batch_id,
+    appliedOperation.media_id,
+    appliedOperation.root_id,
+    moved,
+    original,
+    appliedOperation.category,
+    appliedOperation.id,
+  );
+  assert.equal(
+    app.db.prepare('SELECT reverses_operation_id FROM apply_operations WHERE id = ?')
+      .get(restoreJournal.lastInsertRowid).reverses_operation_id,
+    appliedOperation.id,
+  );
+  app.db.prepare('UPDATE apply_operations SET reverses_operation_id = -1 WHERE id = ?')
+    .run(restoreJournal.lastInsertRowid);
+  await fs.link(moved, original);
+  await fs.unlink(moved);
+
+  await app.close();
+  app = await new PhotoSorter({ dataDirectory }).initialize();
+  assert.equal(await fs.readFile(original, 'utf8'), 'restore-original');
+  assert.equal(await fs.access(moved).then(() => true, () => false), false);
+  assert.equal(app.db.prepare('SELECT status FROM apply_operations WHERE id = ?').get(appliedOperation.id).status, 'restored');
+  assert.equal(app.db.prepare('SELECT status FROM apply_operations WHERE id = ?').get(restoreJournal.lastInsertRowid).status, 'completed');
+  assert.equal(app.db.prepare('SELECT relative_path FROM media WHERE id = ?').get(item.id).relative_path, 'photo.jpg');
+  assert.equal(app.listAudit(20).some((event) => event.action === 'restore_recovered'), true);
+});
+
+test('an unlink error reported after the source was removed never deletes the final destination link', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-post-unlink-'));
+  const dataDirectory = path.join(temporary, 'data');
+  const root = path.join(temporary, 'photos');
+  await fs.mkdir(root);
+  const source = path.join(root, 'photo.jpg');
+  const destination = path.join(root, 'deleted', 'photo.jpg');
+  await fs.writeFile(source, 'must-survive');
+  const app = await new PhotoSorter({ dataDirectory }).initialize();
+  t.after(async () => {
+    await app.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+
+  const collectionId = app.createCollection('Post-unlink error');
+  const rootId = await app.addRoot(collectionId, root);
+  app.closeRootWatcher(rootId);
+  const item = app.listMedia({ collectionId, category: 'unseen' }).items[0];
+  app.setDecision(item.id, 'delete');
+  const plan = await app.planApply(collectionId);
+  const originalUnlink = fs.unlink;
+  fs.unlink = async (filename) => {
+    await originalUnlink(filename);
+    if (filename === source) throw Object.assign(new Error('Injected post-unlink error.'), { code: 'EIO' });
+  };
+  let applied;
+  try {
+    applied = await app.confirmApply(plan.id, { confirm: true, reuseOutputFolders: true });
+  } finally {
+    fs.unlink = originalUnlink;
+  }
+
+  assert.equal(applied.stoppedOnFailure, false);
+  assert.equal(applied.results[0].status, 'moved');
+  assert.equal(await fs.access(source).then(() => true, () => false), false);
+  assert.equal(await fs.readFile(destination, 'utf8'), 'must-survive');
+  assert.equal(app.db.prepare('SELECT status FROM apply_operations').get().status, 'completed');
 });
 
 test('filesystem watcher retries after a transient setup failure', async (t) => {
