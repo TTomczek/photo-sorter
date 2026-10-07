@@ -1,0 +1,84 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #17202a;
+  background: #f3f5f7;
+  font-synthesis: none;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0 auto; max-width: 1280px; padding: 1rem; }
+header, .toolbar, .section-heading, .review-heading, .review-navigation,
+.decision-actions, .filters, .lan, .paging {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+}
+header, .section-heading, .review-heading { justify-content: space-between; }
+header { margin-bottom: 1rem; }
+h1, h2, p { margin-top: 0; }
+h1 { margin-bottom: .15rem; font-size: 1.55rem; }
+h2 { font-size: 1.2rem; }
+.subtitle { color: #5b6570; margin-bottom: 0; }
+main { display: grid; gap: 1rem; }
+.panel { padding: 1rem; border: 1px solid #d7dce1; border-radius: .8rem; background: #fff; }
+.warning { padding: .8rem 1rem; background: #fff1cb; color: #624900; border-radius: .7rem; }
+.toolbar { flex-wrap: wrap; }
+.toolbar label { font-weight: 650; }
+#new-collection-form { display: flex; gap: .4rem; }
+#settings-form { display: grid; grid-template-columns: minmax(12rem, 1fr) minmax(10rem, 2fr); gap: .6rem; align-items: center; margin-top: .8rem; }
+#settings-form > button, #autostart-setting { grid-column: 1 / -1; }
+select, input, button { font: inherit; }
+input, select { min-width: 0; padding: .65rem; border: 1px solid #aeb7c0; border-radius: .45rem; }
+button { padding: .65rem .85rem; border: 0; border-radius: .5rem; background: #205fbd; color: white; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+button.quiet { background: transparent; color: #205fbd; }
+button.delete, button.danger { background: #b52c2c; }
+button.unsure { background: #9a6700; }
+button.keep { background: #1d7542; }
+.hidden { display: none !important; }
+.lan { flex-wrap: wrap; background: #edf5ff; }
+#lan-addresses { display: flex; flex-wrap: wrap; gap: .75rem; }
+#lan-addresses a { overflow-wrap: anywhere; }
+.lan-address { display: grid; gap: .35rem; }
+.lan-address img { width: 120px; height: 120px; image-rendering: pixelated; }
+.filters { overflow-x: auto; }
+.filters button[aria-pressed="true"] { outline: 3px solid #8db7ef; }
+.review { text-align: center; }
+.review-heading { text-align: left; }
+.current-media { min-height: 230px; max-height: min(60vh, 620px); display: grid; place-items: center; overflow: hidden; background: #101418; color: white; border-radius: .55rem; }
+.current-media img, .current-media video { max-width: 100%; max-height: min(60vh, 620px); object-fit: contain; }
+.placeholder { padding: 2rem; }
+.decision-actions, .review-navigation { justify-content: center; margin-top: .8rem; }
+.media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .75rem; }
+.media-card { min-width: 0; overflow: hidden; border: 1px solid #d7dce1; border-radius: .6rem; }
+.media-card button { width: 100%; border-radius: 0; }
+.media-card img, .media-card video { display: block; width: 100%; height: 130px; object-fit: cover; background: #20252b; }
+.media-card .media-name { padding: .45rem; overflow-wrap: anywhere; font-size: .84rem; }
+.section-heading { flex-wrap: wrap; }
+.section-heading > div { display: flex; flex-wrap: wrap; gap: .4rem; }
+.paging { justify-content: center; margin-top: 1rem; }
+.error { color: #a51e1e; min-height: 1.2em; }
+dialog { width: min(92vw, 620px); border: 0; border-radius: .8rem; padding: 1.2rem; box-shadow: 0 1rem 5rem #0005; }
+dialog::backdrop { background: #0008; }
+dialog menu { display: flex; justify-content: flex-end; gap: .5rem; padding: 0; }
+code { overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  body { padding: .6rem; }
+  .panel { padding: .75rem; }
+  .toolbar > * { flex: 1 1 auto; }
+  #new-collection-form { width: 100%; }
+  #new-collection-form input { flex: 1; }
+  #settings-form { grid-template-columns: 1fr; }
+  #settings-form > button, #autostart-setting { grid-column: auto; }
+  .decision-actions button { flex: 1; padding-inline: .4rem; }
+  .media-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (prefers-color-scheme: dark) {
+  :root { color: #edf0f3; background: #15191d; }
+  .panel, dialog { background: #20262c; color: #edf0f3; border-color: #414a53; }
+  input, select { background: #15191d; color: inherit; border-color: #65717d; }
+  .subtitle { color: #b3bdc7; }
+  .warning { background: #4b3d19; color: #ffe6a1; }
+  .lan { background: #1c3047; }
+  .media-card { border-color: #414a53; }
+}

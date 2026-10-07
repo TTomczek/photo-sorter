@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>Photo Sorter</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>Photo Sorter</h1>
+        <p class="subtitle">Your library stays on this computer.</p>
+      </div>
+      <button id="logout" class="quiet hidden" type="button">Log out</button>
+    </header>
+    <main>
+      <aside id="network-warning" class="warning">
+        Local-network HTTP is not encrypted. Use only on a trusted LAN; never expose this service directly to the internet.
+      </aside>
+      <section id="auth-panel" class="panel hidden">
+        <h2 id="auth-title"></h2>
+        <p id="auth-description"></p>
+        <form id="auth-form">
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" minlength="12" autocomplete="current-password" required>
+          <p id="auth-error" class="error" role="alert"></p>
+          <button id="auth-submit" type="submit">Continue</button>
+        </form>
+      </section>
+      <section id="app-panel" class="hidden">
+        <div class="toolbar panel">
+          <label for="collection">Collection</label>
+          <select id="collection"></select>
+          <form id="new-collection-form">
+            <input id="collection-name" aria-label="New collection name" placeholder="New collection" maxlength="80" required>
+            <button type="submit">Create</button>
+          </form>
+          <label for="sort-order">Sort</label>
+          <select id="sort-order">
+            <option value="capture-asc">Capture date ↑</option>
+            <option value="capture-desc">Capture date ↓</option>
+            <option value="filename">Filename</option>
+          </select>
+          <button id="add-root" type="button" class="hidden">Choose folder</button>
+          <button id="archive-collection" type="button">Archive collection</button>
+        </div>
+        <details id="settings-panel" class="panel">
+          <summary>Settings</summary>
+          <form id="settings-form">
+            <label for="default-sort">Default sort order</label>
+            <select id="default-sort">
+              <option value="capture-asc">Capture date ↑</option>
+              <option value="capture-desc">Capture date ↓</option>
+              <option value="filename">Filename</option>
+            </select>
+            <label for="preview-cache-limit">Preview cache limit (MB; 0 disables caching)</label>
+            <input id="preview-cache-limit" type="number" min="0" max="102400" step="1" required>
+            <label id="autostart-setting" class="hidden">
+              <input id="autostart" type="checkbox">
+              Start Photo Sorter when I sign in
+            </label>
+            <button type="submit">Save settings</button>
+          </form>
+        </details>
+        <details id="root-management" class="panel">
+          <summary>Manage collection folders</summary>
+          <ul id="root-list"></ul>
+        </details>
+        <details id="archived-collections" class="panel">
+          <summary>Archived collections</summary>
+          <ul id="archived-list"></ul>
+        </details>
+        <div class="lan panel">
+          <strong>Connect a phone on this local network</strong>
+          <span id="lan-addresses">Loading local addresses…</span>
+        </div>
+        <nav id="filters" class="filters" aria-label="Media category">
+          <button type="button" data-category="unseen" aria-pressed="true">Unseen</button>
+          <button type="button" data-category="keep" aria-pressed="false">Keep</button>
+          <button type="button" data-category="delete" aria-pressed="false">Delete</button>
+          <button type="button" data-category="unsure" aria-pressed="false">Unsure</button>
+        </nav>
+        <section class="review panel" aria-live="polite">
+          <div class="review-heading">
+            <h2 id="collection-title">Review</h2>
+            <span id="item-count"></span>
+          </div>
+          <div id="current-media" class="current-media"></div>
+          <div class="decision-actions">
+            <button type="button" data-decision="delete" class="delete">← Delete</button>
+            <button type="button" data-decision="unsure" class="unsure">↓ Unsure</button>
+            <button type="button" data-decision="keep" class="keep">Keep →</button>
+          </div>
+          <div class="review-navigation">
+            <button type="button" id="previous">Previous</button>
+            <button type="button" id="next">Next</button>
+            <button type="button" id="undo-decision">Undo decision</button>
+            <button type="button" id="redo-decision">Redo decision</button>
+          </div>
+        </section>
+        <section class="panel grid-section">
+          <div class="section-heading">
+            <h2>Collection grid</h2>
+            <div>
+              <button id="rescan" type="button">Rescan roots</button>
+              <button id="apply" type="button">Review and apply moves</button>
+              <button id="restore" type="button">Restore latest apply</button>
+              <button id="audit" type="button">Audit log</button>
+            </div>
+          </div>
+          <p id="status" role="status"></p>
+          <div id="media-grid" class="media-grid"></div>
+          <div class="paging">
+            <button id="previous-page" type="button" class="hidden">Previous page</button>
+            <button id="load-more" type="button" class="hidden">Next page</button>
+          </div>
+        </section>
+        <section id="audit-panel" class="panel hidden">
+          <h2>Audit log</h2>
+          <button id="export-audit" type="button">Export audit log</button>
+          <button id="clear-audit" type="button">Clear audit log</button>
+          <ol id="audit-list"></ol>
+        </section>
+        <details class="panel help">
+          <summary>Quick help and safety</summary>
+          <ul>
+            <li>Use ←/swipe left for Delete, →/swipe right for Keep, and ↓/swipe down for Unsure. These actions only save a decision; they never move or delete a file.</li>
+            <li>Apply shows a move summary first, then requires a separate confirmation. Delete-category files move into a <code>deleted</code> folder; nothing is permanently deleted.</li>
+            <li>Restore moves the latest apply batch back when the original paths are free. Conflicts are never overwritten.</li>
+            <li>Unsupported image/video previews can still be categorized. Video playback depends on codecs available in your operating system.</li>
+            <li>Only use trusted local networks, or put the service behind your own HTTPS/VPN proxy. Do not expose it publicly.</li>
+            <li>App data contains your password hash, decisions, apply history, and audit log. There are no automatic backups; uninstalling app data removes this history, not your original media.</li>
+          </ul>
+        </details>
+      </section>
+    </main>
+    <dialog id="confirm-dialog">
+      <form method="dialog">
+        <h2 id="dialog-title">Confirm</h2>
+        <div id="dialog-content"></div>
+        <menu>
+          <button value="cancel">Cancel</button>
+          <button id="dialog-confirm" value="confirm" class="danger">Confirm move</button>
+        </menu>
+      </form>
+    </dialog>
+  </body>
+</html>
