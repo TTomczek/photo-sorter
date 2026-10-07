@@ -50,7 +50,7 @@ The desktop folder picker registers a root and returns while its scan continues 
 
 Media is looked up by indexed ID and checked against the registered root before serving. The API handles browser range requests for videos. Preview rendering and playback use browser/OS codecs; there is no generated thumbnail/poster pipeline, managed preview cache, or guaranteed support for every allowlisted codec.
 
-The interface fetches category pages (60 items by default) and offers previous/next page controls. This is pagination, not a virtualized grid; it has not been performance-tested at the handoff's 200,000-item target. The configured default sort applies when a device/collection has no saved review state; subsequent sort choices remain device/collection-specific.
+The interface fetches category pages (60 items by default) and offers previous/next page controls, keeping the rendered grid bounded rather than growing with the collection. SQLite indexes support per-root category counts and filename, modified-time, and capture-time ordering. A synthetic single-root query check with 200,000 records returned a 60-item page near the end of the collection in about 350 ms in this environment; that does not establish real-world performance across devices, root counts, or the full browser UI. The configured default sort applies when a device/collection has no saved review state; subsequent sort choices remain device/collection-specific.
 
 ## Decisions and file operations
 

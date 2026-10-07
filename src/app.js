@@ -239,6 +239,15 @@ class PhotoSorter {
     if (!mediaColumns.includes('capture_at')) this.db.exec('ALTER TABLE media ADD COLUMN capture_at TEXT');
     if (!mediaColumns.includes('present')) this.db.exec('ALTER TABLE media ADD COLUMN present INTEGER NOT NULL DEFAULT 1');
     if (!mediaColumns.includes('last_seen_scan')) this.db.exec('ALTER TABLE media ADD COLUMN last_seen_scan TEXT');
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS media_capture_order
+      ON media(root_id, category, COALESCE(julianday(capture_at), modified_at / 86400000.0 + 2440587.5),
+        modified_at, relative_path COLLATE NOCASE) WHERE present = 1;
+      CREATE INDEX IF NOT EXISTS media_modified_order
+      ON media(root_id, category, modified_at, relative_path COLLATE NOCASE) WHERE present = 1;
+      CREATE INDEX IF NOT EXISTS media_filename_order
+      ON media(root_id, category, relative_path COLLATE NOCASE) WHERE present = 1;
+    `);
     this.db.prepare(`
       INSERT OR IGNORE INTO app_settings(setting_key, setting_value) VALUES ('default_sort', 'capture-asc')
     `).run();
@@ -611,6 +620,8 @@ class PhotoSorter {
     if (!thumbnail) return null;
     const buffer = Buffer.from(thumbnail);
     if (!buffer.length || buffer.length > 50 * 1024 * 1024) return null;
+    const limitMb = this.getSettings().previewCacheLimitMb;
+    if (limitMb === 0) return buffer;
     const directory = path.join(this.dataDirectory, 'previews');
     await fs.mkdir(directory, { recursive: true, mode: 0o700 });
     const filename = `${cacheKey}.jpg`;
@@ -620,18 +631,13 @@ class PhotoSorter {
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
     }
-    const limitMb = this.getSettings().previewCacheLimitMb;
-    if (limitMb > 0) {
-      this.db.prepare(`
-        INSERT OR REPLACE INTO preview_cache(cache_key, filename, size, last_accessed)
-        VALUES (?, ?, ?, ?)
-      `).run(cacheKey, filename, buffer.length, Date.now());
-      await this.enforcePreviewCacheLimit();
-      const current = this.db.prepare('SELECT 1 FROM preview_cache WHERE cache_key = ?').get(cacheKey);
-      if (!current) await fs.rm(filenamePath, { force: true });
-    } else {
-      await fs.rm(filenamePath, { force: true });
-    }
+    this.db.prepare(`
+      INSERT OR REPLACE INTO preview_cache(cache_key, filename, size, last_accessed)
+      VALUES (?, ?, ?, ?)
+    `).run(cacheKey, filename, buffer.length, Date.now());
+    await this.enforcePreviewCacheLimit();
+    const current = this.db.prepare('SELECT 1 FROM preview_cache WHERE cache_key = ?').get(cacheKey);
+    if (!current) await fs.rm(filenamePath, { force: true });
     return buffer;
   }
 
