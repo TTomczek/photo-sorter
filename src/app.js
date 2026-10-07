@@ -5,6 +5,8 @@ const path = require('node:path');
 const os = require('node:os');
 const { isIP } = require('node:net');
 const { DatabaseSync } = require('node:sqlite');
+const exifr = require('exifr');
+const QRCode = require('qrcode');
 
 const IMAGE_EXTENSIONS = new Set([
   '.avif', '.bmp', '.gif', '.heic', '.heif', '.jpeg', '.jpg', '.png',
@@ -16,6 +18,28 @@ const VIDEO_EXTENSIONS = new Set([
 ]);
 const CATEGORIES = new Set(['keep', 'delete', 'unsure', 'unseen']);
 const OUTPUT_MARKER = '.photo-sorter-output';
+const SORT_ORDERS = new Set(['capture-asc', 'capture-desc', 'filename', 'date-asc', 'date-desc']);
+
+function normalizeCaptureDate(metadata) {
+  const value = metadata?.DateTimeOriginal || metadata?.CreateDate || metadata?.DateCreated;
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
+function isOutputRelativePath(relativePath) {
+  const normalized = relativePath.split(path.sep).join('/');
+  return normalized.startsWith('deleted/') || normalized.startsWith('unsure/');
+}
+
+async function readCaptureDate(filename) {
+  try {
+    const metadata = await exifr.parse(filename, ['DateTimeOriginal', 'CreateDate', 'DateCreated']);
+    return normalizeCaptureDate(metadata);
+  } catch {
+    return null;
+  }
+}
 
 function defaultDataDirectory() {
   if (process.env.PHOTO_SORTER_DATA_DIR) return path.resolve(process.env.PHOTO_SORTER_DATA_DIR);
@@ -82,6 +106,17 @@ class PhotoSorter {
     this.sessions = new Map();
     this.loginAttempts = new Map();
     this.applyPlans = new Map();
+    this.activeScans = new Map();
+    this.scanQueue = [];
+    this.queuedScans = new Set();
+    this.pendingScans = new Set();
+    this.scanWaiters = new Map();
+    this.maxConcurrentScans = 2;
+    this.rootWatchers = new Map();
+    this.watchRetryTimers = new Map();
+    this.watchRetryAttempts = new Map();
+    this.scanDebounceTimers = new Map();
+    this.closed = false;
     this.db = null;
     this.server = null;
     this.servers = [];
@@ -111,7 +146,17 @@ class PhotoSorter {
         path TEXT NOT NULL,
         online INTEGER NOT NULL DEFAULT 1,
         read_only INTEGER NOT NULL DEFAULT 0,
+        active INTEGER NOT NULL DEFAULT 1,
         UNIQUE(collection_id, path)
+      );
+      CREATE TABLE IF NOT EXISTS scan_jobs (
+        root_id TEXT PRIMARY KEY REFERENCES roots(id),
+        status TEXT NOT NULL,
+        visited INTEGER NOT NULL DEFAULT 0,
+        indexed INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        started_at TEXT,
+        completed_at TEXT
       );
       CREATE TABLE IF NOT EXISTS media (
         id TEXT PRIMARY KEY,
@@ -120,9 +165,53 @@ class PhotoSorter {
         size INTEGER NOT NULL,
         modified_at INTEGER NOT NULL,
         category TEXT,
+        capture_at TEXT,
+        present INTEGER NOT NULL DEFAULT 1,
+        last_seen_scan TEXT,
         UNIQUE(root_id, relative_path)
       );
       CREATE INDEX IF NOT EXISTS media_root_category ON media(root_id, category);
+      CREATE TABLE IF NOT EXISTS device_state (
+        device_id TEXT NOT NULL,
+        collection_id TEXT NOT NULL REFERENCES collections(id),
+        category TEXT NOT NULL DEFAULT 'unseen',
+        sort_order TEXT NOT NULL DEFAULT 'capture-asc',
+        media_id TEXT,
+        page_offset INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(device_id, collection_id)
+      );
+      CREATE TABLE IF NOT EXISTS media_locks (
+        media_id TEXT PRIMARY KEY REFERENCES media(id),
+        device_id TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS decision_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        media_id TEXT NOT NULL REFERENCES media(id),
+        device_id TEXT NOT NULL,
+        previous_category TEXT,
+        next_category TEXT,
+        undone INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS decision_history_device ON decision_history(device_id, id DESC);
+      CREATE TABLE IF NOT EXISTS device_preferences (
+        device_id TEXT NOT NULL,
+        preference_key TEXT NOT NULL,
+        preference_value TEXT NOT NULL,
+        PRIMARY KEY(device_id, preference_key)
+      );
+      CREATE TABLE IF NOT EXISTS app_settings (
+        setting_key TEXT PRIMARY KEY,
+        setting_value TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS preview_cache (
+        cache_key TEXT PRIMARY KEY,
+        filename TEXT NOT NULL UNIQUE,
+        size INTEGER NOT NULL,
+        last_accessed INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS audit (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         action TEXT NOT NULL,
@@ -144,7 +233,37 @@ class PhotoSorter {
         status TEXT NOT NULL
       );
     `);
+    const rootColumns = this.db.prepare('PRAGMA table_info(roots)').all().map((column) => column.name);
+    if (!rootColumns.includes('active')) this.db.exec('ALTER TABLE roots ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
+    const mediaColumns = this.db.prepare('PRAGMA table_info(media)').all().map((column) => column.name);
+    if (!mediaColumns.includes('capture_at')) this.db.exec('ALTER TABLE media ADD COLUMN capture_at TEXT');
+    if (!mediaColumns.includes('present')) this.db.exec('ALTER TABLE media ADD COLUMN present INTEGER NOT NULL DEFAULT 1');
+    if (!mediaColumns.includes('last_seen_scan')) this.db.exec('ALTER TABLE media ADD COLUMN last_seen_scan TEXT');
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS media_capture_order
+      ON media(root_id, category, COALESCE(julianday(capture_at), modified_at / 86400000.0 + 2440587.5),
+        modified_at, relative_path COLLATE NOCASE) WHERE present = 1;
+      CREATE INDEX IF NOT EXISTS media_modified_order
+      ON media(root_id, category, modified_at, relative_path COLLATE NOCASE) WHERE present = 1;
+      CREATE INDEX IF NOT EXISTS media_filename_order
+      ON media(root_id, category, relative_path COLLATE NOCASE) WHERE present = 1;
+    `);
+    this.db.prepare(`
+      INSERT OR IGNORE INTO app_settings(setting_key, setting_value) VALUES ('default_sort', 'capture-asc')
+    `).run();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO app_settings(setting_key, setting_value) VALUES ('preview_cache_limit_mb', '2048')
+    `).run();
     await this.recoverApplyOperations();
+    setImmediate(() => {
+      if (this.closed || !this.db) return;
+      const roots = this.db.prepare(`
+        SELECT r.id FROM roots r JOIN collections c ON c.id = r.collection_id
+        WHERE r.active = 1 AND c.active = 1
+      `).all();
+      for (const root of roots) this.startScan(root.id);
+      for (const root of roots) this.watchRoot(root.id);
+    });
     return this;
   }
 
@@ -162,7 +281,7 @@ class PhotoSorter {
         try { await fs.access(operation.to_path); } catch (error) { if (error.code === 'ENOENT') destinationExists = false; else throw error; }
         if (!sourceExists && destinationExists) {
           this.db.prepare("UPDATE apply_operations SET status = 'completed' WHERE id = ?").run(operation.id);
-          this.db.prepare('UPDATE media SET relative_path = ? WHERE id = ?')
+          this.db.prepare('UPDATE media SET relative_path = ?, present = 1 WHERE id = ?')
             .run(path.relative(root, operation.to_path), operation.media_id);
           this.log('apply_recovered', { batchId: operation.batch_id, mediaId: operation.media_id, status: 'completed' });
         } else {
@@ -182,8 +301,43 @@ class PhotoSorter {
   }
 
   close() {
-    for (const server of this.servers) server.close();
-    if (this.db) this.db.close();
+    this.closed = true;
+    for (const watcher of this.rootWatchers.values()) watcher.close();
+    this.rootWatchers.clear();
+    for (const timer of this.watchRetryTimers.values()) clearTimeout(timer);
+    this.watchRetryTimers.clear();
+    this.watchRetryAttempts.clear();
+    for (const timer of this.scanDebounceTimers.values()) clearTimeout(timer);
+    this.scanDebounceTimers.clear();
+    const closingServers = this.servers.map((server) => new Promise((resolve) => {
+      if (!server.listening) return resolve();
+      server.close(resolve);
+    }));
+    const now = new Date().toISOString();
+    if (this.db) {
+      this.db.prepare(`
+        UPDATE scan_jobs SET status = 'cancelled', completed_at = ?
+        WHERE status IN ('queued', 'running')
+      `).run(now);
+    }
+    for (const rootId of this.queuedScans) {
+      this.scanWaiters.get(rootId)?.resolve(0);
+      this.scanWaiters.delete(rootId);
+    }
+    this.queuedScans.clear();
+    this.scanQueue = [];
+    this.pendingScans.clear();
+    const closeDatabase = () => {
+      if (this.db) {
+        this.db.close();
+        this.db = null;
+      }
+    };
+    if (this.activeScans.size || closingServers.length) {
+      return Promise.allSettled([...this.activeScans.values(), ...closingServers]).then(closeDatabase);
+    }
+    closeDatabase();
+    return Promise.resolve();
   }
 
   log(action, details) {
@@ -235,13 +389,259 @@ class PhotoSorter {
   listCollections() {
     return this.db.prepare(`
       SELECT c.id, c.name, c.active,
-        (SELECT COUNT(*) FROM media m JOIN roots r ON r.id = m.root_id WHERE r.collection_id = c.id) AS item_count,
-        (SELECT COUNT(*) FROM roots r WHERE r.collection_id = c.id AND r.online = 0) AS offline_roots
+        (SELECT COUNT(*) FROM media m JOIN roots r ON r.id = m.root_id WHERE r.collection_id = c.id AND r.active = 1 AND m.present = 1) AS item_count,
+        (SELECT COUNT(*) FROM roots r WHERE r.collection_id = c.id AND r.active = 1 AND r.online = 0) AS offline_roots
       FROM collections c WHERE c.active = 1 ORDER BY c.created_at
     `).all();
   }
 
-  async addRoot(collectionId, selectedPath) {
+  listRoots(collectionId) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    return this.db.prepare(`
+      SELECT id, path, online, read_only FROM roots
+      WHERE collection_id = ? AND active = 1 ORDER BY path COLLATE NOCASE
+    `).all(collectionId);
+  }
+
+  watchRoot(rootId) {
+    if (this.closed || this.rootWatchers.has(rootId)) return;
+    const root = this.db.prepare(`
+      SELECT r.path FROM roots r JOIN collections c ON c.id = r.collection_id
+      WHERE r.id = ? AND r.active = 1 AND c.active = 1
+    `).get(rootId);
+    if (!root) return;
+    try {
+      const watcher = fsSync.watch(root.path, { recursive: true }, () => this.scheduleScan(rootId));
+      watcher.on('error', (error) => {
+        watcher.close();
+        if (this.rootWatchers.get(rootId) === watcher) this.rootWatchers.delete(rootId);
+        this.scheduleWatchRetry(rootId, root.path, error);
+      });
+      this.rootWatchers.set(rootId, watcher);
+      clearTimeout(this.watchRetryTimers.get(rootId));
+      this.watchRetryTimers.delete(rootId);
+      this.watchRetryAttempts.delete(rootId);
+    } catch (error) {
+      this.scheduleWatchRetry(rootId, root.path, error);
+    }
+  }
+
+  scheduleWatchRetry(rootId, rootPath, error) {
+    if (this.closed || this.watchRetryTimers.has(rootId)) return;
+    const active = this.db?.prepare(`
+      SELECT r.id FROM roots r JOIN collections c ON c.id = r.collection_id
+      WHERE r.id = ? AND r.active = 1 AND c.active = 1
+    `).get(rootId);
+    if (!active) return;
+    const attempt = (this.watchRetryAttempts.get(rootId) || 0) + 1;
+    this.watchRetryAttempts.set(rootId, attempt);
+    const delay = Math.min(60_000, 1_000 * (2 ** Math.min(attempt - 1, 6)));
+    this.log('watch_error', { rootId, path: rootPath, message: error.message, retryInMs: delay });
+    const timer = setTimeout(() => {
+      this.watchRetryTimers.delete(rootId);
+      this.watchRoot(rootId);
+    }, delay);
+    timer.unref?.();
+    this.watchRetryTimers.set(rootId, timer);
+  }
+
+  scheduleScan(rootId) {
+    if (this.closed) return;
+    const root = this.db.prepare(`
+      SELECT r.id FROM roots r JOIN collections c ON c.id = r.collection_id
+      WHERE r.id = ? AND r.active = 1 AND c.active = 1
+    `).get(rootId);
+    if (!root) return;
+    clearTimeout(this.scanDebounceTimers.get(rootId));
+    const timer = setTimeout(() => {
+      this.scanDebounceTimers.delete(rootId);
+      if (!this.closed) this.startScan(rootId);
+    }, 500);
+    this.scanDebounceTimers.set(rootId, timer);
+  }
+
+  closeRootWatcher(rootId) {
+    this.rootWatchers.get(rootId)?.close();
+    this.rootWatchers.delete(rootId);
+    clearTimeout(this.watchRetryTimers.get(rootId));
+    this.watchRetryTimers.delete(rootId);
+    this.watchRetryAttempts.delete(rootId);
+    clearTimeout(this.scanDebounceTimers.get(rootId));
+    this.scanDebounceTimers.delete(rootId);
+  }
+
+  async removeRoot(collectionId, rootId) {
+    const root = this.db.prepare(`
+      SELECT r.id, r.path FROM roots r JOIN collections c ON c.id = r.collection_id
+      WHERE r.id = ? AND r.collection_id = ? AND r.active = 1 AND c.active = 1
+    `).get(rootId, collectionId);
+    if (!root) throw new Error('Root not found.');
+    this.db.prepare('UPDATE roots SET active = 0 WHERE id = ?').run(rootId);
+    this.closeRootWatcher(rootId);
+    this.db.prepare('DELETE FROM media_locks WHERE media_id IN (SELECT id FROM media WHERE root_id = ?)').run(rootId);
+    this.log('root_removed', { collectionId, rootId, path: root.path });
+    return { removed: true };
+  }
+
+  archiveCollection(collectionId) {
+    const collection = this.db.prepare('SELECT id, name FROM collections WHERE id = ? AND active = 1').get(collectionId);
+    if (!collection) throw new Error('Collection not found.');
+    this.db.prepare('UPDATE collections SET active = 0 WHERE id = ?').run(collectionId);
+    for (const root of this.db.prepare('SELECT id FROM roots WHERE collection_id = ?').all(collectionId)) {
+      this.closeRootWatcher(root.id);
+    }
+    this.log('collection_archived', { collectionId, name: collection.name });
+    return { archived: true };
+  }
+
+  restoreCollection(collectionId) {
+    const collection = this.db.prepare('SELECT id, name FROM collections WHERE id = ? AND active = 0').get(collectionId);
+    if (!collection) throw new Error('Archived collection not found.');
+    const roots = this.db.prepare('SELECT id, path FROM roots WHERE collection_id = ? AND active = 1').all(collectionId);
+    const activeRoots = this.db.prepare(`
+      SELECT r.id, r.path FROM roots r JOIN collections c ON c.id = r.collection_id
+      WHERE r.active = 1 AND c.active = 1
+    `).all();
+    for (const candidate of roots) {
+      for (const activeRoot of activeRoots) {
+        if (pathsOverlap(candidate.path, activeRoot.path)) {
+          throw new Error(`Cannot restore collection because root ${candidate.path} overlaps an active collection.`);
+        }
+      }
+    }
+    this.db.prepare('UPDATE collections SET active = 1 WHERE id = ?').run(collectionId);
+    for (const root of roots) {
+      this.watchRoot(root.id);
+      this.startScan(root.id);
+    }
+    this.log('collection_restored', { collectionId, name: collection.name });
+    return { restored: true };
+  }
+
+  listArchivedCollections() {
+    return this.db.prepare(`
+      SELECT id, name, created_at FROM collections WHERE active = 0 ORDER BY created_at
+    `).all();
+  }
+
+  getLastCollection(deviceId) {
+    const value = this.db.prepare(`
+      SELECT preference_value FROM device_preferences
+      WHERE device_id = ? AND preference_key = 'last_collection_id'
+    `).get(deviceId)?.preference_value;
+    return value || null;
+  }
+
+  setLastCollection(deviceId, collectionId) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    this.db.prepare(`
+      INSERT INTO device_preferences(device_id, preference_key, preference_value)
+      VALUES (?, 'last_collection_id', ?)
+      ON CONFLICT(device_id, preference_key) DO UPDATE SET preference_value = excluded.preference_value
+    `).run(deviceId, collectionId);
+    return { collectionId };
+  }
+
+  getSettings() {
+    const settings = Object.fromEntries(this.db.prepare('SELECT setting_key, setting_value FROM app_settings')
+      .all().map((row) => [row.setting_key, row.setting_value]));
+    return {
+      defaultSort: settings.default_sort || 'capture-asc',
+      previewCacheLimitMb: Number(settings.preview_cache_limit_mb || 2048),
+    };
+  }
+
+  async saveSettings(values) {
+    const { defaultSort, previewCacheLimitMb } = values;
+    if (!['capture-asc', 'capture-desc', 'filename'].includes(defaultSort)
+      || !Number.isSafeInteger(previewCacheLimitMb) || previewCacheLimitMb < 0 || previewCacheLimitMb > 102_400) {
+      throw new Error('Invalid settings.');
+    }
+    this.db.prepare('UPDATE app_settings SET setting_value = ? WHERE setting_key = ?')
+      .run(defaultSort, 'default_sort');
+    this.db.prepare('UPDATE app_settings SET setting_value = ? WHERE setting_key = ?')
+      .run(String(previewCacheLimitMb), 'preview_cache_limit_mb');
+    await this.enforcePreviewCacheLimit();
+    this.log('settings_changed', { defaultSort, previewCacheLimitMb });
+    return this.getSettings();
+  }
+
+  async enforcePreviewCacheLimit() {
+    const limitMb = this.getSettings().previewCacheLimitMb;
+    let size = this.db.prepare('SELECT COALESCE(SUM(size), 0) AS size FROM preview_cache').get().size;
+    const candidates = this.db.prepare(`
+      SELECT cache_key, filename, size FROM preview_cache ORDER BY last_accessed ASC
+    `).all();
+    for (const entry of candidates) {
+      if (size <= limitMb * 1024 * 1024) break;
+      this.db.prepare('DELETE FROM preview_cache WHERE cache_key = ?').run(entry.cache_key);
+      if (/^[0-9a-f]{64}\.jpg$/.test(entry.filename)) {
+        await fs.rm(path.join(this.dataDirectory, 'previews', entry.filename), { force: true });
+      }
+      size -= entry.size;
+    }
+  }
+
+  async getPreview(mediaId) {
+    const item = this.mediaPath(mediaId);
+    if (!item) return null;
+    let resolved;
+    try {
+      const root = await fs.realpath(item.path);
+      if (!comparePaths(root, item.path) || !isWithin(root, item.fullPath)) return null;
+      resolved = await fs.realpath(item.fullPath);
+      if (!isWithin(root, resolved)) return null;
+    } catch {
+      return null;
+    }
+    const stat = await fs.stat(resolved);
+    const extension = path.extname(resolved).toLowerCase();
+    if (!IMAGE_EXTENSIONS.has(extension)) return null;
+    const cacheKey = crypto.createHash('sha256')
+      .update(`${item.id}\0${stat.size}\0${stat.mtimeMs}`).digest('hex');
+    const cached = this.db.prepare('SELECT filename, size FROM preview_cache WHERE cache_key = ?').get(cacheKey);
+    if (cached && /^[0-9a-f]{64}\.jpg$/.test(cached.filename)) {
+      try {
+        const cachedPath = path.join(this.dataDirectory, 'previews', cached.filename);
+        const cachedStat = await fs.lstat(cachedPath);
+        if (!cachedStat.isFile() || cachedStat.size !== cached.size) throw new Error('Cached preview is invalid.');
+        const buffer = await fs.readFile(cachedPath);
+        this.db.prepare('UPDATE preview_cache SET last_accessed = ? WHERE cache_key = ?').run(Date.now(), cacheKey);
+        return buffer;
+      } catch {
+        this.db.prepare('DELETE FROM preview_cache WHERE cache_key = ?').run(cacheKey);
+      }
+    }
+    const thumbnail = await exifr.thumbnail(resolved).catch(() => null);
+    if (!thumbnail) return null;
+    const buffer = Buffer.from(thumbnail);
+    if (!buffer.length || buffer.length > 50 * 1024 * 1024) return null;
+    const limitMb = this.getSettings().previewCacheLimitMb;
+    if (limitMb === 0) return buffer;
+    const directory = path.join(this.dataDirectory, 'previews');
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    const filename = `${cacheKey}.jpg`;
+    const filenamePath = path.join(directory, filename);
+    try {
+      await fs.writeFile(filenamePath, buffer, { flag: 'wx', mode: 0o600 });
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+    this.db.prepare(`
+      INSERT OR REPLACE INTO preview_cache(cache_key, filename, size, last_accessed)
+      VALUES (?, ?, ?, ?)
+    `).run(cacheKey, filename, buffer.length, Date.now());
+    await this.enforcePreviewCacheLimit();
+    const current = this.db.prepare('SELECT 1 FROM preview_cache WHERE cache_key = ?').get(cacheKey);
+    if (!current) await fs.rm(filenamePath, { force: true });
+    return buffer;
+  }
+
+  async addRoot(collectionId, selectedPath, { waitForScan = true } = {}) {
     const collection = this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId);
     if (!collection) throw new Error('Collection not found.');
     if (typeof selectedPath !== 'string' || !path.isAbsolute(selectedPath)) throw new Error('Invalid selected folder.');
@@ -250,40 +650,161 @@ class PhotoSorter {
     if (!rootStat.isDirectory()) throw new Error('Selected path is not a directory.');
     const activeRoots = this.db.prepare(`
       SELECT r.id, r.path, r.collection_id FROM roots r
-      JOIN collections c ON c.id = r.collection_id WHERE c.active = 1
+      JOIN collections c ON c.id = r.collection_id WHERE c.active = 1 AND r.active = 1
     `).all();
     for (const root of activeRoots) {
       if (!pathsOverlap(root.path, canonicalPath)) continue;
       if (root.collection_id === collectionId && comparePaths(root.path, canonicalPath)) return root.id;
       throw new Error('This folder overlaps a root in an active collection.');
     }
+    const retainedRoot = this.db.prepare(`
+      SELECT id FROM roots WHERE collection_id = ? AND path = ? AND active = 0
+    `).get(collectionId, canonicalPath);
+    if (retainedRoot) {
+      this.db.prepare('UPDATE roots SET active = 1, online = 1, read_only = ? WHERE id = ?')
+        .run((rootStat.mode & 0o222) === 0 ? 1 : 0, retainedRoot.id);
+      this.log('root_readded', { collectionId, rootId: retainedRoot.id, path: canonicalPath });
+      this.watchRoot(retainedRoot.id);
+      if (waitForScan) await this.scanRoot(retainedRoot.id);
+      else this.startScan(retainedRoot.id);
+      return retainedRoot.id;
+    }
     const id = crypto.randomUUID();
     const readOnly = (rootStat.mode & 0o222) === 0;
     this.db.prepare('INSERT INTO roots(id, collection_id, path, read_only) VALUES (?, ?, ?, ?)')
       .run(id, collectionId, canonicalPath, readOnly ? 1 : 0);
     this.log('root_added', { collectionId, rootId: id, path: canonicalPath, readOnly });
-    await this.scanRoot(id);
+    this.watchRoot(id);
+    if (waitForScan) await this.scanRoot(id);
+    else this.startScan(id);
     return id;
   }
 
-  async scanRoot(rootId) {
-    const root = this.db.prepare('SELECT * FROM roots WHERE id = ?').get(rootId);
+  startScan(rootId) {
+    if (this.activeScans.has(rootId) || this.queuedScans.has(rootId)) {
+      this.pendingScans.add(rootId);
+      return { started: false, rootId };
+    }
+    const root = this.db.prepare('SELECT id FROM roots WHERE id = ? AND active = 1').get(rootId);
     if (!root) throw new Error('Root not found.');
+    this.db.prepare(`
+      INSERT INTO scan_jobs(root_id, status, visited, indexed, error, started_at, completed_at)
+      VALUES (?, 'queued', 0, 0, NULL, NULL, NULL)
+      ON CONFLICT(root_id) DO UPDATE SET status = 'queued', visited = 0, indexed = 0,
+        error = NULL, started_at = NULL, completed_at = NULL
+    `).run(rootId);
+    let resolveTask;
+    let rejectTask;
+    const task = new Promise((resolve, reject) => {
+      resolveTask = resolve;
+      rejectTask = reject;
+    });
+    task.catch(() => {});
+    this.scanWaiters.set(rootId, { task, resolve: resolveTask, reject: rejectTask });
+    this.queuedScans.add(rootId);
+    this.scanQueue.push(rootId);
+    this.pumpScanQueue();
+    return { started: true, rootId };
+  }
+
+  scanRoot(rootId) {
+    if (this.scanWaiters.has(rootId)) return this.scanWaiters.get(rootId).task;
+    if (this.activeScans.has(rootId)) return this.activeScans.get(rootId);
+    if (!this.queuedScans.has(rootId)) this.startScan(rootId);
+    return this.scanWaiters.get(rootId)?.task || Promise.resolve(0);
+  }
+
+  pumpScanQueue() {
+    while (!this.closed && this.activeScans.size < this.maxConcurrentScans && this.scanQueue.length) {
+      const rootId = this.scanQueue.shift();
+      this.queuedScans.delete(rootId);
+      const waiter = this.scanWaiters.get(rootId);
+      if (!waiter) continue;
+      const task = new Promise((resolve) => setImmediate(resolve))
+        .then(() => this.performScanRoot(rootId))
+        .then((result) => {
+          waiter.resolve(result);
+          return result;
+        }, (error) => {
+          waiter.reject(error);
+          waiter.resolve(0);
+          return 0;
+        })
+        .finally(() => {
+          this.activeScans.delete(rootId);
+          this.scanWaiters.delete(rootId);
+          this.pumpScanQueue();
+          if (!this.closed && this.pendingScans.delete(rootId)) this.startScan(rootId);
+        });
+      this.activeScans.set(rootId, task);
+    }
+  }
+
+  startCollectionScan(collectionId) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    const roots = this.db.prepare('SELECT id FROM roots WHERE collection_id = ? AND active = 1').all(collectionId);
+    return roots.map((root) => this.startScan(root.id));
+  }
+
+  listScanStatus(collectionId) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    return this.db.prepare(`
+      SELECT r.id AS rootId, r.path, r.online, s.status, s.visited, s.indexed, s.error,
+        s.started_at AS startedAt, s.completed_at AS completedAt
+      FROM roots r LEFT JOIN scan_jobs s ON s.root_id = r.id
+      WHERE r.collection_id = ? AND r.active = 1 ORDER BY r.path COLLATE NOCASE
+    `).all(collectionId).map((scan) => ({
+      ...scan,
+      status: scan.status || 'idle',
+      visited: scan.visited || 0,
+      indexed: scan.indexed || 0,
+    }));
+  }
+
+  async performScanRoot(rootId) {
+    const root = this.db.prepare('SELECT * FROM roots WHERE id = ? AND active = 1').get(rootId);
+    if (!root) throw new Error('Root not found.');
+    this.db.prepare(`
+      INSERT INTO scan_jobs(root_id, status, visited, indexed, started_at)
+      VALUES (?, 'running', 0, 0, ?)
+      ON CONFLICT(root_id) DO UPDATE SET status = 'running', visited = 0, indexed = 0,
+        error = NULL, started_at = excluded.started_at, completed_at = NULL
+    `).run(rootId, new Date().toISOString());
     let base;
     try {
       base = await fs.realpath(root.path);
       if (!comparePaths(base, root.path)) throw new Error('Registered root no longer resolves to its original directory.');
       const directories = [base];
       const upsert = this.db.prepare(`
-        INSERT INTO media(id, root_id, relative_path, size, modified_at, category)
-        VALUES (?, ?, ?, ?, ?, NULL)
+        INSERT INTO media(id, root_id, relative_path, size, modified_at, category, capture_at, present, last_seen_scan)
+        VALUES (?, ?, ?, ?, ?, NULL, ?, 1, ?)
         ON CONFLICT(root_id, relative_path) DO UPDATE SET
           category = CASE WHEN media.size != excluded.size OR media.modified_at != excluded.modified_at
             THEN NULL ELSE media.category END,
-          size = excluded.size, modified_at = excluded.modified_at
+          size = excluded.size, modified_at = excluded.modified_at, capture_at = excluded.capture_at,
+          present = 1, last_seen_scan = excluded.last_seen_scan
       `);
       let entriesVisited = 0;
+      let scanErrors = 0;
+      const scanId = crypto.randomUUID();
+      let entriesExamined = 0;
+      const updateProgress = (status, error = null) => {
+        this.db.prepare(`
+          UPDATE scan_jobs SET status = ?, visited = ?, indexed = ?, error = ?,
+            completed_at = CASE WHEN ? IN ('completed', 'failed', 'cancelled') THEN ? ELSE NULL END
+          WHERE root_id = ?
+        `).run(status, entriesExamined, entriesVisited, error,
+          status, status === 'running' ? null : new Date().toISOString(), rootId);
+      };
       while (directories.length) {
+        if (this.closed || !this.db.prepare('SELECT 1 FROM roots WHERE id = ? AND active = 1').get(rootId)) {
+          if (!this.closed) updateProgress('cancelled');
+          return entriesVisited;
+        }
         const directory = directories.pop();
         let entries;
         try {
@@ -292,10 +813,17 @@ class PhotoSorter {
             || !isWithin(base, await fs.realpath(directory))) continue;
           entries = await fs.readdir(directory, { withFileTypes: true });
         } catch (error) {
+          scanErrors += 1;
           this.log('scan_error', { rootId, path: directory, message: error.message });
           continue;
         }
         for (const entry of entries) {
+          entriesExamined += 1;
+          if (entriesExamined % 128 === 0) {
+            updateProgress('running');
+            await new Promise((resolve) => setImmediate(resolve));
+            if (this.closed) return entriesVisited;
+          }
           if (entry.isSymbolicLink()) continue;
           const fullPath = path.join(directory, entry.name);
           if (directory === base && (entry.name === 'deleted' || entry.name === 'unsure')) continue;
@@ -309,28 +837,55 @@ class PhotoSorter {
           if (!kind) continue;
           try {
             const stat = await fs.lstat(fullPath);
-            if (!stat.isFile() || stat.isSymbolicLink() || !isWithin(base, await fs.realpath(fullPath))) continue;
+            const resolvedPath = await fs.realpath(fullPath);
+            if (!stat.isFile() || stat.isSymbolicLink() || !isWithin(base, resolvedPath)) continue;
             const relativePath = path.relative(base, fullPath);
+            const captureDate = IMAGE_EXTENSIONS.has(extension) ? await readCaptureDate(resolvedPath) : null;
             upsert.run(crypto.createHash('sha256').update(`${rootId}\0${relativePath}`).digest('hex'),
-              rootId, relativePath, stat.size, stat.mtimeMs);
+              rootId, relativePath, stat.size, stat.mtimeMs, captureDate, scanId);
             entriesVisited += 1;
           } catch (error) {
+            scanErrors += 1;
             this.log('scan_error', { rootId, path: fullPath, message: error.message });
           }
         }
       }
+      if (this.closed) return entriesVisited;
+      if (!this.db.prepare('SELECT 1 FROM roots WHERE id = ? AND active = 1').get(rootId)) {
+        updateProgress('cancelled');
+        return entriesVisited;
+      }
       this.db.prepare('UPDATE roots SET online = 1 WHERE id = ?').run(rootId);
+      if (scanErrors === 0) {
+        this.db.prepare(`
+          UPDATE media SET present = CASE
+            WHEN last_seen_scan = ?
+              OR relative_path GLOB 'deleted/*' OR relative_path GLOB 'deleted\\*'
+              OR relative_path GLOB 'unsure/*' OR relative_path GLOB 'unsure\\*'
+            THEN 1 ELSE 0 END
+          WHERE root_id = ?
+        `).run(scanId, rootId);
+      }
+      updateProgress('completed');
       this.log('scan_completed', { rootId, path: base, indexed: entriesVisited });
       return entriesVisited;
     } catch (error) {
-      this.db.prepare('UPDATE roots SET online = 0 WHERE id = ?').run(rootId);
-      this.log('scan_error', { rootId, path: root.path, message: error.message });
+      if (!this.closed) {
+        this.db.prepare('UPDATE roots SET online = 0 WHERE id = ?').run(rootId);
+        this.db.prepare(`
+          INSERT INTO scan_jobs(root_id, status, error, started_at, completed_at)
+          VALUES (?, 'failed', ?, ?, ?)
+          ON CONFLICT(root_id) DO UPDATE SET status = 'failed', error = excluded.error,
+            completed_at = excluded.completed_at
+        `).run(rootId, error.message, new Date().toISOString(), new Date().toISOString());
+        this.log('scan_error', { rootId, path: root.path, message: error.message });
+      }
       throw error;
     }
   }
 
   async rescanCollection(collectionId) {
-    const roots = this.db.prepare('SELECT id FROM roots WHERE collection_id = ?').all(collectionId);
+    const roots = this.db.prepare('SELECT id FROM roots WHERE collection_id = ? AND active = 1').all(collectionId);
     let indexed = 0;
     for (const root of roots) {
       try { indexed += await this.scanRoot(root.id); } catch {}
@@ -338,8 +893,8 @@ class PhotoSorter {
     return indexed;
   }
 
-  listMedia({ collectionId, category, sort = 'date-asc', offset = 0, limit = 60 }) {
-    const filters = ['r.collection_id = ?'];
+  listMedia({ collectionId, category, sort = 'capture-asc', offset = 0, limit = 60 }) {
+    const filters = ['r.collection_id = ?', 'r.active = 1', 'c.active = 1', 'm.present = 1'];
     const values = [collectionId];
     if (category === 'unseen') filters.push('m.category IS NULL');
     else if (CATEGORIES.has(category)) {
@@ -347,6 +902,8 @@ class PhotoSorter {
       values.push(category === 'unseen' ? null : category);
     }
     const orderBy = {
+      'capture-asc': 'COALESCE(julianday(m.capture_at), m.modified_at / 86400000.0 + 2440587.5) ASC, m.modified_at ASC, m.relative_path COLLATE NOCASE ASC',
+      'capture-desc': 'COALESCE(julianday(m.capture_at), m.modified_at / 86400000.0 + 2440587.5) DESC, m.modified_at DESC, m.relative_path COLLATE NOCASE ASC',
       'date-asc': 'm.modified_at ASC, m.relative_path COLLATE NOCASE ASC',
       'date-desc': 'm.modified_at DESC, m.relative_path COLLATE NOCASE ASC',
       filename: 'm.relative_path COLLATE NOCASE ASC',
@@ -361,13 +918,13 @@ class PhotoSorter {
           OR lower(m.relative_path) GLOB '*.3gp' OR lower(m.relative_path) GLOB '*.wmv'
           OR lower(m.relative_path) GLOB '*.mts' THEN 'video' ELSE 'image' END AS kind,
         r.online, r.read_only
-      FROM media m JOIN roots r ON r.id = m.root_id
+      FROM media m JOIN roots r ON r.id = m.root_id JOIN collections c ON c.id = r.collection_id
       WHERE ${filters.join(' AND ')}
       ORDER BY ${orderBy}
       LIMIT ? OFFSET ?
     `).all(...values, limit, offset);
     const total = this.db.prepare(`
-      SELECT COUNT(*) AS count FROM media m JOIN roots r ON r.id = m.root_id
+      SELECT COUNT(*) AS count FROM media m JOIN roots r ON r.id = m.root_id JOIN collections c ON c.id = r.collection_id
       WHERE ${filters.join(' AND ')}
     `).get(...values).count;
     return { items, total, offset, limit };
@@ -376,7 +933,9 @@ class PhotoSorter {
   setDecision(mediaId, category) {
     if (!CATEGORIES.has(category)) throw new Error('Invalid category.');
     const item = this.db.prepare(`
-      SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id WHERE m.id = ?
+      SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id
+      JOIN collections c ON c.id = r.collection_id
+      WHERE m.id = ? AND r.active = 1 AND c.active = 1 AND m.present = 1
     `).get(mediaId);
     if (!item) throw new Error('Media item not found.');
     const next = category === 'unseen' ? null : category;
@@ -384,15 +943,143 @@ class PhotoSorter {
     this.log('decision_changed', { mediaId, previous: item.category, category: next, collectionId: item.collection_id });
   }
 
+  getDeviceState(deviceId, collectionId) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    return this.db.prepare(`
+      SELECT category,
+        CASE sort_order WHEN 'date-asc' THEN 'capture-asc' WHEN 'date-desc' THEN 'capture-desc' ELSE sort_order END AS sort,
+        media_id AS mediaId, page_offset AS offset
+      FROM device_state WHERE device_id = ? AND collection_id = ?
+    `).get(deviceId, collectionId) || null;
+  }
+
+  saveDeviceState(deviceId, collectionId, state) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    const category = state.category;
+    const sort = state.sort === 'date-asc' ? 'capture-asc'
+      : state.sort === 'date-desc' ? 'capture-desc' : state.sort;
+    const offset = state.offset;
+    if (!CATEGORIES.has(category)
+      || !SORT_ORDERS.has(sort)
+      || !Number.isSafeInteger(offset) || offset < 0 || offset > 2_000_000) {
+      throw new Error('Invalid review position.');
+    }
+    const mediaId = state.mediaId === null || state.mediaId === '' ? null : state.mediaId;
+    if (mediaId !== null && (typeof mediaId !== 'string'
+      || !this.db.prepare(`SELECT m.id FROM media m JOIN roots r ON r.id = m.root_id
+        WHERE m.id = ? AND r.collection_id = ? AND r.active = 1 AND m.present = 1`)
+        .get(mediaId, collectionId))) {
+      throw new Error('Media item not found in this collection.');
+    }
+    this.db.prepare(`
+      INSERT INTO device_state(device_id, collection_id, category, sort_order, media_id, page_offset, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(device_id, collection_id) DO UPDATE SET
+        category = excluded.category, sort_order = excluded.sort_order, media_id = excluded.media_id,
+        page_offset = excluded.page_offset, updated_at = excluded.updated_at
+    `).run(deviceId, collectionId, category, sort, mediaId, offset, new Date().toISOString());
+    return this.getDeviceState(deviceId, collectionId);
+  }
+
+  claimMediaLock(mediaId, deviceId) {
+    if (!this.db.prepare(`
+      SELECT m.id FROM media m JOIN roots r ON r.id = m.root_id JOIN collections c ON c.id = r.collection_id
+      WHERE m.id = ? AND m.present = 1 AND r.active = 1 AND c.active = 1
+    `).get(mediaId)) {
+      throw new Error('Media item not found.');
+    }
+    const now = Date.now();
+    this.db.prepare('DELETE FROM media_locks WHERE expires_at <= ?').run(now);
+    this.db.prepare(`
+      INSERT INTO media_locks(media_id, device_id, expires_at) VALUES (?, ?, ?)
+      ON CONFLICT(media_id) DO UPDATE SET device_id = excluded.device_id, expires_at = excluded.expires_at
+      WHERE media_locks.device_id = excluded.device_id OR media_locks.expires_at <= ?
+    `).run(mediaId, deviceId, now + 60_000, now);
+    const lock = this.db.prepare('SELECT device_id FROM media_locks WHERE media_id = ?').get(mediaId);
+    if (lock?.device_id !== deviceId) {
+      throw Object.assign(new Error('This item is being reviewed on another device.'), { status: 409 });
+    }
+    return { locked: true, expiresIn: 60 };
+  }
+
+  releaseMediaLock(mediaId, deviceId) {
+    this.db.prepare('DELETE FROM media_locks WHERE media_id = ? AND device_id = ?').run(mediaId, deviceId);
+    return { released: true };
+  }
+
+  setDeviceDecision(mediaId, category, deviceId) {
+    const lock = this.db.prepare('SELECT device_id, expires_at FROM media_locks WHERE media_id = ?').get(mediaId);
+    if (!lock || lock.device_id !== deviceId || lock.expires_at <= Date.now()) {
+      throw Object.assign(new Error('The review lock expired or belongs to another device. Reopen this item to continue.'), { status: 409 });
+    }
+    if (!CATEGORIES.has(category)) throw new Error('Invalid category.');
+    const item = this.db.prepare(`
+      SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id
+      JOIN collections c ON c.id = r.collection_id
+      WHERE m.id = ? AND r.active = 1 AND c.active = 1 AND m.present = 1
+    `).get(mediaId);
+    if (!item) throw new Error('Media item not found.');
+    const next = category === 'unseen' ? null : category;
+    if (item.category === next) return;
+    this.db.prepare(`
+      INSERT INTO decision_history(media_id, device_id, previous_category, next_category, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(mediaId, deviceId, item.category, next, new Date().toISOString());
+    this.db.prepare('DELETE FROM decision_history WHERE device_id = ? AND undone = 1').run(deviceId);
+    this.db.prepare('UPDATE media SET category = ? WHERE id = ?').run(next, mediaId);
+    this.log('decision_changed', { mediaId, previous: item.category, category: next, collectionId: item.collection_id });
+  }
+
+  async changeDecisionHistory(deviceId, direction) {
+    const undone = direction === 'redo' ? 1 : 0;
+    const entry = this.db.prepare(`
+      SELECT h.* FROM decision_history h
+      WHERE h.device_id = ? AND h.undone = ?
+      ORDER BY h.id DESC LIMIT 1
+    `).get(deviceId, undone);
+    if (!entry) return { changed: false, message: `There is no decision to ${direction}.` };
+    this.claimMediaLock(entry.media_id, deviceId);
+    const item = this.db.prepare('SELECT category FROM media WHERE id = ?').get(entry.media_id);
+    const expected = direction === 'undo' ? entry.next_category : entry.previous_category;
+    if (!item || item.category !== expected) {
+      throw Object.assign(new Error('This decision changed on another device; history was not altered.'), { status: 409 });
+    }
+    const category = direction === 'undo' ? entry.previous_category : entry.next_category;
+    this.db.prepare('UPDATE media SET category = ? WHERE id = ?').run(category, entry.media_id);
+    this.db.prepare('UPDATE decision_history SET undone = ? WHERE id = ?').run(direction === 'undo' ? 1 : 0, entry.id);
+    this.log(direction === 'undo' ? 'decision_undone' : 'decision_redone', {
+      mediaId: entry.media_id, category,
+    });
+    return { changed: true, mediaId: entry.media_id, category: category || 'unseen' };
+  }
+
   listAudit(limit = 200) {
     return this.db.prepare('SELECT id, action, details, created_at FROM audit ORDER BY id DESC LIMIT ?')
       .all(limit).map((row) => ({ ...row, details: JSON.parse(row.details) }));
   }
 
+  exportAudit() {
+    const events = this.db.prepare('SELECT id, action, details, created_at FROM audit ORDER BY id')
+      .all().map((row) => ({ ...row, details: JSON.parse(row.details) }));
+    return { exportedAt: new Date().toISOString(), events };
+  }
+
+  clearAudit() {
+    const clearedCount = this.db.prepare('SELECT COUNT(*) AS count FROM audit').get().count;
+    this.db.prepare('DELETE FROM audit').run();
+    this.log('audit_cleared', { clearedCount });
+    return { clearedCount };
+  }
+
   mediaPath(mediaId) {
     const item = this.db.prepare(`
       SELECT m.id, m.root_id, m.relative_path, r.path FROM media m
-      JOIN roots r ON r.id = m.root_id WHERE m.id = ?
+      JOIN roots r ON r.id = m.root_id JOIN collections c ON c.id = r.collection_id
+      WHERE m.id = ? AND r.active = 1 AND c.active = 1 AND m.present = 1
     `).get(mediaId);
     if (!item) return null;
     const fullPath = path.resolve(item.path, item.relative_path);
@@ -405,38 +1092,95 @@ class PhotoSorter {
       throw new Error('Collection not found.');
     }
     const media = this.db.prepare(`
-      SELECT m.id, m.root_id, m.relative_path, m.category, r.path, r.read_only
+      SELECT m.id, m.root_id, m.relative_path, m.category, r.path, r.read_only,
+        (SELECT o.from_path FROM apply_operations o
+          WHERE o.media_id = m.id AND o.status = 'completed' ORDER BY o.id DESC LIMIT 1) AS latest_from,
+        (SELECT o.to_path FROM apply_operations o
+          WHERE o.media_id = m.id AND o.status = 'completed' ORDER BY o.id DESC LIMIT 1) AS latest_to,
+        (SELECT o.category FROM apply_operations o
+          WHERE o.media_id = m.id AND o.status = 'completed' ORDER BY o.id DESC LIMIT 1) AS latest_category
       FROM media m JOIN roots r ON r.id = m.root_id
-      WHERE r.collection_id = ? AND m.category IN ('delete', 'unsure')
-        AND m.relative_path NOT LIKE 'deleted/%' AND m.relative_path NOT LIKE 'unsure/%'
+      WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1
+        AND (m.category IN ('delete', 'unsure')
+          OR m.relative_path GLOB 'deleted/*' OR m.relative_path GLOB 'deleted\\*'
+          OR m.relative_path GLOB 'unsure/*' OR m.relative_path GLOB 'unsure\\*')
       ORDER BY m.relative_path
     `).all(collectionId);
     const operations = [];
+    let readOnlySkipped = 0;
     for (const item of media) {
-      const categoryDirectory = path.join(item.path, item.category === 'delete' ? 'deleted' : 'unsure');
       const source = path.resolve(item.path, item.relative_path);
-      if (!isWithin(item.path, source) || item.read_only) continue;
+      if (!isWithin(item.path, source)) continue;
+      if (item.read_only) {
+        readOnlySkipped += 1;
+        continue;
+      }
+      const isInOutput = isOutputRelativePath(item.relative_path);
+      const wasApplied = isInOutput && item.latest_to && comparePaths(source, item.latest_to);
+      let type;
+      let targetCategory;
+      let relativePath;
+      let destination;
+      if (wasApplied) {
+        if (item.category === item.latest_category) continue;
+        if (item.category === 'delete' || item.category === 'unsure') {
+          type = 'recategorize';
+          targetCategory = item.category;
+          const completedOperations = this.db.prepare(`
+            SELECT from_path FROM apply_operations
+            WHERE media_id = ? AND status IN ('completed', 'restored') ORDER BY id
+          `).all(item.id);
+          const original = completedOperations.find((entry) => isWithin(item.path, entry.from_path)
+            && !isWithin(path.join(item.path, 'deleted'), entry.from_path)
+            && !isWithin(path.join(item.path, 'unsure'), entry.from_path));
+          relativePath = original ? path.relative(item.path, original.from_path)
+            : path.relative(path.join(item.path, item.latest_category), item.latest_from);
+          destination = path.join(item.path, targetCategory === 'delete' ? 'deleted' : 'unsure', relativePath);
+        } else {
+          type = 'restore';
+          targetCategory = item.category || 'unseen';
+          const completedOperations = this.db.prepare(`
+            SELECT from_path FROM apply_operations
+            WHERE media_id = ? AND status IN ('completed', 'restored') ORDER BY id
+          `).all(item.id);
+          const original = completedOperations.find((entry) => isWithin(item.path, entry.from_path)
+            && !isWithin(path.join(item.path, 'deleted'), entry.from_path)
+            && !isWithin(path.join(item.path, 'unsure'), entry.from_path));
+          destination = original?.from_path || path.resolve(item.path, item.latest_from);
+          relativePath = path.relative(item.path, destination);
+        }
+      } else {
+        if (isInOutput) continue;
+        if (item.category !== 'delete' && item.category !== 'unsure') continue;
+        type = 'move';
+        targetCategory = item.category;
+        relativePath = item.relative_path;
+        destination = path.join(item.path, targetCategory === 'delete' ? 'deleted' : 'unsure', relativePath);
+      }
+      if (!isWithin(item.path, destination) || comparePaths(source, destination)) continue;
+      const targetIsOutput = targetCategory === 'delete' || targetCategory === 'unsure';
+      const categoryDirectory = targetIsOutput
+        ? path.join(item.path, targetCategory === 'delete' ? 'deleted' : 'unsure') : null;
       let existingOutput = false;
-      try {
-        await fs.access(categoryDirectory);
-        existingOutput = true;
-      } catch {}
+      if (categoryDirectory) existingOutput = await pathExists(categoryDirectory);
       let owned = false;
-      if (existingOutput) {
+      if (existingOutput && categoryDirectory) {
         try {
           const marker = await fs.readFile(path.join(categoryDirectory, OUTPUT_MARKER), 'utf8');
           owned = marker === 'photo-sorter-output-v1\n';
         } catch {}
       }
       operations.push({
+        type,
         mediaId: item.id,
         rootId: item.root_id,
         root: item.path,
-        relativePath: item.relative_path,
-        category: item.category,
+        relativePath,
+        category: targetCategory,
         source,
-        destination: path.join(categoryDirectory, item.relative_path),
-        needsReuseConfirmation: existingOutput && !owned,
+        destination,
+        needsReuseConfirmation: Boolean(categoryDirectory && existingOutput && !owned),
+        restoreConflict: type === 'restore' && await pathExists(destination),
       });
     }
     const id = crypto.randomUUID();
@@ -444,7 +1188,10 @@ class PhotoSorter {
     return {
       id,
       moveCount: operations.length,
-      readOnlySkipped: media.filter((item) => item.read_only).length,
+      restoreCount: operations.filter((item) => item.type === 'restore').length,
+      recategorizeCount: operations.filter((item) => item.type === 'recategorize').length,
+      restoreConflictCount: operations.filter((item) => item.restoreConflict).length,
+      readOnlySkipped,
       requiresOutputFolderConsent: operations.some((item) => item.needsReuseConfirmation),
       examples: operations.slice(0, 5).map(({ source, destination }) => ({ source, destination })),
     };
@@ -464,6 +1211,11 @@ class PhotoSorter {
     for (const operation of plan.operations) {
       let operationId;
       try {
+        const rootIsActive = this.db.prepare(`
+          SELECT 1 FROM roots r JOIN collections c ON c.id = r.collection_id
+          WHERE r.id = ? AND r.active = 1 AND c.active = 1
+        `).get(operation.rootId);
+        if (!rootIsActive) throw new Error('The root or collection is no longer active.');
         const currentRoot = await fs.realpath(operation.root);
         const currentSource = await fs.realpath(operation.source);
         if (!comparePaths(currentRoot, operation.root) || !isWithin(currentRoot, currentSource)) {
@@ -471,27 +1223,41 @@ class PhotoSorter {
         }
         const stat = await fs.stat(currentSource);
         if (!stat.isFile()) throw new Error('Source is not a regular file.');
-        const output = path.join(operation.root, operation.category === 'delete' ? 'deleted' : 'unsure');
-        await fs.mkdir(output, { recursive: true });
-        const outputStat = await fs.lstat(output);
-        if (!outputStat.isDirectory() || outputStat.isSymbolicLink()) throw new Error('Output folder must be a real directory.');
-        if (!isWithin(currentRoot, await fs.realpath(output))) throw new Error('Output folder is outside its registered root.');
-        const markerPath = path.join(output, OUTPUT_MARKER);
-        try {
-          const marker = await fs.readFile(markerPath, 'utf8');
-          if (marker !== 'photo-sorter-output-v1\n') throw new Error('Output folder marker is invalid.');
-        } catch (error) {
-          if (error.code !== 'ENOENT') throw error;
-          if (operation.needsReuseConfirmation && reuseOutputFolders !== true) {
-            throw new Error('Existing output folder requires explicit reuse confirmation.');
+        const targetIsOutput = operation.category === 'delete' || operation.category === 'unsure';
+        if (targetIsOutput) {
+          const output = path.join(operation.root, operation.category === 'delete' ? 'deleted' : 'unsure');
+          const outputExisted = await pathExists(output);
+          await fs.mkdir(output, { recursive: true });
+          const outputStat = await fs.lstat(output);
+          if (!outputStat.isDirectory() || outputStat.isSymbolicLink()) throw new Error('Output folder must be a real directory.');
+          if (!isWithin(currentRoot, await fs.realpath(output))) throw new Error('Output folder is outside its registered root.');
+          const markerPath = path.join(output, OUTPUT_MARKER);
+          let outputOwned = false;
+          try {
+            const marker = await fs.readFile(markerPath, 'utf8');
+            if (marker !== 'photo-sorter-output-v1\n') throw new Error('Output folder marker is invalid.');
+            outputOwned = true;
+          } catch (error) {
+            if (error.code !== 'ENOENT') throw error;
           }
-          await fs.writeFile(markerPath, 'photo-sorter-output-v1\n', { flag: 'wx', mode: 0o600 });
+          if (outputExisted && !outputOwned && reuseOutputFolders !== true) {
+            throw new Error('Existing output folder requires explicit reuse confirmation; review a new apply summary.');
+          }
+          if (!outputOwned) {
+            await fs.writeFile(markerPath, 'photo-sorter-output-v1\n', { flag: 'wx', mode: 0o600 });
+          }
         }
         const parent = path.dirname(operation.destination);
         await fs.mkdir(parent, { recursive: true });
-        const destination = numberedDestination(operation.destination, (candidate) => {
-          try { fsSync.lstatSync(candidate); return true; } catch (error) { return error.code !== 'ENOENT'; }
-        });
+        const destination = operation.type === 'restore'
+          ? operation.destination
+          : numberedDestination(operation.destination, (candidate) => {
+            try { fsSync.lstatSync(candidate); return true; } catch (error) { return error.code !== 'ENOENT'; }
+          });
+        if (operation.type === 'restore' && await pathExists(destination)) {
+          throw new Error('Original path is occupied; refusing to overwrite.');
+        }
+        if (!isWithin(currentRoot, destination)) throw new Error('Destination is outside its registered root.');
         const destinationParent = await fs.realpath(path.dirname(destination));
         if (!isWithin(currentRoot, destinationParent)) throw new Error('Destination escaped its registered root.');
         const destinationDevice = (await fs.stat(destinationParent)).dev;
@@ -501,13 +1267,17 @@ class PhotoSorter {
         operationId = row.lastInsertRowid;
         await moveWithoutOverwrite(currentSource, destination);
         this.db.prepare('UPDATE apply_operations SET status = ? WHERE id = ?').run('completed', operationId);
-        this.db.prepare('UPDATE media SET relative_path = ? WHERE id = ?')
+        this.db.prepare('UPDATE media SET relative_path = ?, present = 1 WHERE id = ?')
           .run(path.relative(currentRoot, destination), operation.mediaId);
-        results.push({ source: currentSource, destination, status: 'moved' });
+        results.push({
+          source: currentSource,
+          destination,
+          status: operation.type === 'restore' ? 'restored' : operation.type === 'recategorize' ? 'recategorized' : 'moved',
+        });
       } catch (error) {
         if (operationId) this.db.prepare('UPDATE apply_operations SET status = ? WHERE id = ?').run('failed', operationId);
         results.push({ source: operation.source, destination: operation.destination, status: 'failed', error: error.message });
-        this.log('apply_failed', { batchId, moved: results.filter((result) => result.status === 'moved'), failed: results.at(-1) });
+        this.log('apply_failed', { batchId, completed: results.filter((result) => result.status !== 'failed'), failed: results.at(-1) });
         return { batchId, results, stoppedOnFailure: true };
       }
     }
@@ -546,7 +1316,7 @@ class PhotoSorter {
         if (movedStat.dev !== (await fs.stat(restoreParent)).dev) throw new Error('Cross-volume moves are not supported.');
         await moveWithoutOverwrite(operation.to_path, operation.from_path);
         this.db.prepare('UPDATE apply_operations SET status = ? WHERE id = ?').run('restored', operation.id);
-        this.db.prepare('UPDATE media SET relative_path = ? WHERE id = ?')
+        this.db.prepare('UPDATE media SET relative_path = ?, present = 1 WHERE id = ?')
           .run(path.relative(root, operation.from_path), operation.media_id);
         results.push({ source: operation.to_path, destination: operation.from_path, status: 'restored' });
       } catch (error) {
@@ -633,9 +1403,27 @@ class PhotoSorter {
     return match?.[1];
   }
 
+  deviceId(request) {
+    const cookie = request.headers.cookie || '';
+    return cookie.match(/(?:^|;\s*)photo_sorter_device=([A-Fa-f0-9]{32})/)?.[1];
+  }
+
+  issueSession(request) {
+    const deviceId = this.deviceId(request) || crypto.randomBytes(16).toString('hex');
+    const token = crypto.randomBytes(32).toString('hex');
+    this.sessions.set(token, { deviceId, createdAt: Date.now() });
+    const cookies = [`photo_sorter_session=${token}; HttpOnly; SameSite=Strict; Path=/`];
+    if (!this.deviceId(request)) {
+      cookies.push(`photo_sorter_device=${deviceId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=315360000`);
+    }
+    return { deviceId, headers: { 'Set-Cookie': cookies } };
+  }
+
   requireSession(request) {
     const token = this.sessionToken(request);
-    if (!token || !this.sessions.has(token)) throw Object.assign(new Error('Authentication required.'), { status: 401 });
+    const session = token && this.sessions.get(token);
+    if (!session) throw Object.assign(new Error('Authentication required.'), { status: 401 });
+    return session;
   }
 
   async handleRequest(request, response) {
@@ -652,11 +1440,8 @@ class PhotoSorter {
         }
         const { password } = await this.readJson(request);
         await this.createPassword(password);
-        const token = crypto.randomBytes(32).toString('hex');
-        this.sessions.set(token, Date.now());
-        return this.sendJson(response, 201, { authenticated: true }, {
-          'Set-Cookie': `photo_sorter_session=${token}; HttpOnly; SameSite=Strict; Path=/`,
-        });
+        const session = this.issueSession(request);
+        return this.sendJson(response, 201, { authenticated: true }, session.headers);
       }
       if (request.method === 'POST' && url.pathname === '/api/login') {
         const address = request.socket.remoteAddress || 'unknown';
@@ -670,11 +1455,8 @@ class PhotoSorter {
           return this.sendJson(response, 401, { error: 'Incorrect password.' });
         }
         this.loginAttempts.delete(address);
-        const token = crypto.randomBytes(32).toString('hex');
-        this.sessions.set(token, Date.now());
-        return this.sendJson(response, 200, { authenticated: true }, {
-          'Set-Cookie': `photo_sorter_session=${token}; HttpOnly; SameSite=Strict; Path=/`,
-        });
+        const session = this.issueSession(request);
+        return this.sendJson(response, 200, { authenticated: true }, session.headers);
       }
       if (request.method === 'POST' && url.pathname === '/api/logout') {
         const token = this.sessionToken(request);
@@ -684,9 +1466,17 @@ class PhotoSorter {
         });
       }
       if (request.method === 'GET' && url.pathname === '/api/network') {
-        return this.sendJson(response, 200, { addresses: this.localAddresses(this.port) });
+        const addresses = await Promise.all(this.localAddresses(this.port).map(async (address) => ({
+          ...address,
+          qrDataUrl: await QRCode.toDataURL(address.url, {
+            errorCorrectionLevel: 'M',
+            margin: 1,
+            width: 180,
+          }),
+        })));
+        return this.sendJson(response, 200, { addresses });
       }
-      this.requireSession(request);
+      const session = this.requireSession(request);
       if (request.method === 'GET' && url.pathname === '/api/collections') {
         return this.sendJson(response, 200, { collections: this.listCollections() });
       }
@@ -694,11 +1484,51 @@ class PhotoSorter {
         const { name } = await this.readJson(request);
         return this.sendJson(response, 201, { id: this.createCollection(name) });
       }
+      if (request.method === 'GET' && url.pathname === '/api/collections/archived') {
+        return this.sendJson(response, 200, { collections: this.listArchivedCollections() });
+      }
+      const collectionAction = url.pathname.match(/^\/api\/collections\/([0-9a-f-]+)\/(archive|restore)$/i);
+      if (request.method === 'POST' && collectionAction) {
+        const [, collectionId, action] = collectionAction;
+        const result = action === 'archive'
+          ? this.archiveCollection(collectionId) : this.restoreCollection(collectionId);
+        return this.sendJson(response, 200, result);
+      }
+      const collectionRoots = url.pathname.match(/^\/api\/collections\/([0-9a-f-]+)\/roots$/i);
+      if (request.method === 'GET' && collectionRoots) {
+        return this.sendJson(response, 200, { roots: this.listRoots(collectionRoots[1]) });
+      }
+      const rootAction = url.pathname.match(/^\/api\/collections\/([0-9a-f-]+)\/roots\/([0-9a-f-]+)$/i);
+      if (request.method === 'DELETE' && rootAction) {
+        return this.sendJson(response, 200, await this.removeRoot(rootAction[1], rootAction[2]));
+      }
+      if (request.method === 'GET' && url.pathname === '/api/preferences') {
+        return this.sendJson(response, 200, { lastCollectionId: this.getLastCollection(session.deviceId) });
+      }
+      if (request.method === 'PUT' && url.pathname === '/api/preferences') {
+        const { lastCollectionId } = await this.readJson(request);
+        return this.sendJson(response, 200, this.setLastCollection(session.deviceId, lastCollectionId));
+      }
+      if (request.method === 'GET' && url.pathname === '/api/device-state') {
+        return this.sendJson(response, 200, {
+          state: this.getDeviceState(session.deviceId, url.searchParams.get('collectionId')),
+        });
+      }
+      if (request.method === 'PUT' && url.pathname === '/api/device-state') {
+        const body = await this.readJson(request);
+        return this.sendJson(response, 200, {
+          state: this.saveDeviceState(session.deviceId, body.collectionId, body),
+        });
+      }
+      if (request.method === 'POST' && ['/api/decisions/undo', '/api/decisions/redo'].includes(url.pathname)) {
+        const direction = url.pathname.endsWith('/undo') ? 'undo' : 'redo';
+        return this.sendJson(response, 200, await this.changeDecisionHistory(session.deviceId, direction));
+      }
       if (request.method === 'GET' && url.pathname === '/api/media') {
         const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 60));
         const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
         const category = url.searchParams.get('category') || 'unseen';
-        const sort = url.searchParams.get('sort') || 'date-asc';
+        const sort = url.searchParams.get('sort') || 'capture-asc';
         if (!CATEGORIES.has(category)) throw new Error('Invalid category.');
         const result = this.listMedia({
           collectionId: url.searchParams.get('collectionId'),
@@ -709,12 +1539,42 @@ class PhotoSorter {
         });
         return this.sendJson(response, 200, result);
       }
+      if (request.method === 'GET' && url.pathname === '/api/scans') {
+        return this.sendJson(response, 200, {
+          scans: this.listScanStatus(url.searchParams.get('collectionId')),
+        });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/settings') {
+        return this.sendJson(response, 200, this.getSettings());
+      }
+      if (request.method === 'PUT' && url.pathname === '/api/settings') {
+        return this.sendJson(response, 200, await this.saveSettings(await this.readJson(request)));
+      }
+      const previewMatch = url.pathname.match(/^\/api\/media\/([0-9a-f-]+)\/preview$/i);
+      if (request.method === 'GET' && previewMatch) {
+        const preview = await this.getPreview(previewMatch[1]);
+        if (!preview) return this.sendJson(response, 404, { error: 'Preview is unavailable.' });
+        response.writeHead(200, {
+          'Content-Type': 'image/jpeg',
+          'Content-Length': preview.length,
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+        });
+        return response.end(preview);
+      }
       const mediaMatch = url.pathname.match(/^\/api\/media\/([0-9a-f-]+)\/content$/i);
       if (request.method === 'GET' && mediaMatch) return this.serveMedia(mediaMatch[1], request, response);
+      const lockMatch = url.pathname.match(/^\/api\/media\/([0-9a-f-]+)\/lock$/i);
+      if (request.method === 'POST' && lockMatch) {
+        return this.sendJson(response, 200, this.claimMediaLock(lockMatch[1], session.deviceId));
+      }
+      if (request.method === 'DELETE' && lockMatch) {
+        return this.sendJson(response, 200, this.releaseMediaLock(lockMatch[1], session.deviceId));
+      }
       const decisionMatch = url.pathname.match(/^\/api\/media\/([0-9a-f-]+)\/decision$/i);
       if (request.method === 'PUT' && decisionMatch) {
         const { category } = await this.readJson(request);
-        this.setDecision(decisionMatch[1], category);
+        this.setDeviceDecision(decisionMatch[1], category, session.deviceId);
         return this.sendJson(response, 200, { saved: true });
       }
       if (request.method === 'POST' && url.pathname === '/api/apply/plan') {
@@ -723,10 +1583,7 @@ class PhotoSorter {
       }
       if (request.method === 'POST' && url.pathname === '/api/rescan') {
         const { collectionId } = await this.readJson(request);
-        if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
-          throw new Error('Collection not found.');
-        }
-        return this.sendJson(response, 200, { indexed: await this.rescanCollection(collectionId) });
+        return this.sendJson(response, 202, { scans: this.startCollectionScan(collectionId) });
       }
       if (request.method === 'POST' && url.pathname === '/api/apply/confirm') {
         const body = await this.readJson(request);
@@ -737,6 +1594,12 @@ class PhotoSorter {
       }
       if (request.method === 'GET' && url.pathname === '/api/audit') {
         return this.sendJson(response, 200, { events: this.listAudit() });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/audit/export') {
+        return this.sendJson(response, 200, this.exportAudit());
+      }
+      if (request.method === 'DELETE' && url.pathname === '/api/audit') {
+        return this.sendJson(response, 200, this.clearAudit());
       }
       return this.sendJson(response, 404, { error: 'Not found.' });
     }
@@ -809,7 +1672,7 @@ class PhotoSorter {
         'Content-Length': stat.size,
         'Cache-Control': 'no-store',
         'X-Content-Type-Options': 'nosniff',
-        'Content-Security-Policy': "default-src 'self'; img-src 'self' blob:; media-src 'self'; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        'Content-Security-Policy': "default-src 'self'; img-src 'self' blob: data:; media-src 'self'; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
       });
       require('node:fs').createReadStream(filename).pipe(response);
     } catch {
@@ -826,6 +1689,7 @@ module.exports = {
   defaultDataDirectory,
   isLocalNetworkAddress,
   isWithin,
+  normalizeCaptureDate,
   numberedDestination,
   pathsOverlap,
 };

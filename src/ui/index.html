@@ -40,12 +40,39 @@
           </form>
           <label for="sort-order">Sort</label>
           <select id="sort-order">
-            <option value="date-asc">Modified time ↑</option>
-            <option value="date-desc">Modified time ↓</option>
+            <option value="capture-asc">Capture date ↑</option>
+            <option value="capture-desc">Capture date ↓</option>
             <option value="filename">Filename</option>
           </select>
           <button id="add-root" type="button" class="hidden">Choose folder</button>
+          <button id="archive-collection" type="button">Archive collection</button>
         </div>
+        <details id="settings-panel" class="panel">
+          <summary>Settings</summary>
+          <form id="settings-form">
+            <label for="default-sort">Default sort order</label>
+            <select id="default-sort">
+              <option value="capture-asc">Capture date ↑</option>
+              <option value="capture-desc">Capture date ↓</option>
+              <option value="filename">Filename</option>
+            </select>
+            <label for="preview-cache-limit">Preview cache limit (MB; 0 disables caching)</label>
+            <input id="preview-cache-limit" type="number" min="0" max="102400" step="1" required>
+            <label id="autostart-setting" class="hidden">
+              <input id="autostart" type="checkbox">
+              Start Photo Sorter when I sign in
+            </label>
+            <button type="submit">Save settings</button>
+          </form>
+        </details>
+        <details id="root-management" class="panel">
+          <summary>Manage collection folders</summary>
+          <ul id="root-list"></ul>
+        </details>
+        <details id="archived-collections" class="panel">
+          <summary>Archived collections</summary>
+          <ul id="archived-list"></ul>
+        </details>
         <div class="lan panel">
           <strong>Connect a phone on this local network</strong>
           <span id="lan-addresses">Loading local addresses…</span>
@@ -70,6 +97,8 @@
           <div class="review-navigation">
             <button type="button" id="previous">Previous</button>
             <button type="button" id="next">Next</button>
+            <button type="button" id="undo-decision">Undo decision</button>
+            <button type="button" id="redo-decision">Redo decision</button>
           </div>
         </section>
         <section class="panel grid-section">
@@ -91,6 +120,8 @@
         </section>
         <section id="audit-panel" class="panel hidden">
           <h2>Audit log</h2>
+          <button id="export-audit" type="button">Export audit log</button>
+          <button id="clear-audit" type="button">Clear audit log</button>
           <ol id="audit-list"></ol>
         </section>
         <details class="panel help">

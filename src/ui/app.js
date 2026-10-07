@@ -1,6 +1,7 @@
 const state = {
   category: 'unseen',
-  sort: 'date-asc',
+  sort: 'capture-asc',
+  defaultSort: 'capture-asc',
   collectionId: '',
   items: [],
   index: 0,
@@ -8,9 +9,121 @@ const state = {
   total: 0,
   limit: 60,
   busy: false,
+  lockedItemId: '',
+  lockReady: false,
+  lockTransition: Promise.resolve(),
+  restoreMediaId: '',
 };
 const byId = (id) => document.getElementById(id);
 const mediaGrid = byId('media-grid');
+const videoPosterObserver = typeof IntersectionObserver === 'undefined' ? null : new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    videoPosterObserver.unobserve(entry.target);
+    loadVideoPoster(entry.target);
+  }
+}, { rootMargin: '160px' });
+let stateSaveTimer;
+let scanPollTimer;
+let scanPollBusy = false;
+let queuePollTimer;
+let queuePollBusy = false;
+
+function loadVideoPoster(video) {
+  if (!video.isConnected) return;
+  video.addEventListener('loadeddata', () => {
+    if (!video.videoWidth || !video.videoHeight) return;
+    try {
+      const scale = Math.min(1, 640 / video.videoWidth, 640 / video.videoHeight);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+      video.poster = canvas.toDataURL('image/jpeg', 0.72);
+      video.removeAttribute('src');
+      video.load();
+    } catch {}
+  }, { once: true });
+  video.preload = 'metadata';
+  video.src = video.dataset.posterSource;
+  delete video.dataset.posterSource;
+  video.load();
+}
+
+function setDecisionButtons(enabled) {
+  for (const button of document.querySelectorAll('[data-decision]')) {
+    button.disabled = !enabled;
+  }
+}
+
+async function refreshScans() {
+  if (!state.collectionId || scanPollBusy || byId('app-panel').classList.contains('hidden')) return;
+  scanPollBusy = true;
+  try {
+    const { scans } = await request(`/api/scans?collectionId=${encodeURIComponent(state.collectionId)}`);
+    const active = scans.filter((scan) => ['queued', 'running'].includes(scan.status));
+    if (active.length) {
+      const indexed = active.reduce((sum, scan) => sum + scan.indexed, 0);
+      setStatus(`Scanning ${active.length} folder(s); ${indexed} media item(s) indexed so far.`);
+      const current = state.items[state.index];
+      state.restoreMediaId = current?.id || '';
+      await loadMedia();
+    } else if (scans.some((scan) => scan.status === 'failed')) {
+      const failed = scans.filter((scan) => scan.status === 'failed');
+      setStatus(`${failed.length} folder scan(s) failed: ${failed[0].error}`, true);
+    } else if (scans.some((scan) => scan.status === 'completed')) {
+      const indexed = scans.reduce((sum, scan) => sum + scan.indexed, 0);
+      setStatus(`Scanning complete: ${indexed} media item(s) indexed.`);
+    }
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    scanPollBusy = false;
+  }
+}
+
+function saveDeviceState() {
+  if (!state.collectionId) return;
+  clearTimeout(stateSaveTimer);
+  stateSaveTimer = setTimeout(() => {
+    const item = state.items[state.index];
+    request('/api/device-state', {
+      method: 'PUT',
+      body: JSON.stringify({
+        collectionId: state.collectionId,
+        category: state.category,
+        sort: state.sort,
+        mediaId: item?.id || null,
+        offset: state.offset,
+      }),
+    }).catch((error) => setStatus(error.message, true));
+  }, 200);
+}
+
+function updateItemLock(item) {
+  if (item?.id === state.lockedItemId) return;
+  const previousId = state.lockedItemId;
+  state.lockedItemId = item?.id || '';
+  state.lockReady = false;
+  setDecisionButtons(false);
+  state.lockTransition = state.lockTransition.then(async () => {
+    if (previousId) {
+      await request(`/api/media/${encodeURIComponent(previousId)}/lock`, { method: 'DELETE' }).catch(() => {});
+    }
+    if (!item) return;
+    try {
+      await request(`/api/media/${encodeURIComponent(item.id)}/lock`, { method: 'POST' });
+      if (state.lockedItemId !== item.id) {
+        await request(`/api/media/${encodeURIComponent(item.id)}/lock`, { method: 'DELETE' }).catch(() => {});
+        return;
+      }
+      state.lockReady = true;
+      setDecisionButtons(true);
+    } catch (error) {
+      setStatus(error.message, true);
+    }
+  });
+}
 
 async function request(url, options = {}) {
   const response = await fetch(url, {
@@ -44,20 +157,31 @@ function mediaUrl(item) {
   return `/api/media/${encodeURIComponent(item.id)}/content`;
 }
 
-function createPreview(item, controls = false) {
+function createPreview(item, controls = false, cached = false) {
   if (item.kind === 'video') {
     const video = element('video');
-    video.src = mediaUrl(item);
     video.controls = controls;
-    video.preload = controls ? 'metadata' : 'none';
-    if (!controls) video.muted = true;
+    if (controls) {
+      video.src = mediaUrl(item);
+      video.preload = 'metadata';
+    } else {
+      video.muted = true;
+      video.dataset.posterSource = mediaUrl(item);
+      if (videoPosterObserver) videoPosterObserver.observe(video);
+      else loadVideoPoster(video);
+    }
     return video;
   }
   const image = element('img');
-  image.src = mediaUrl(item);
+  image.src = cached ? `/api/media/${encodeURIComponent(item.id)}/preview` : mediaUrl(item);
   image.alt = item.relative_path;
   image.loading = 'lazy';
   image.onerror = () => {
+    if (cached) {
+      cached = false;
+      image.src = mediaUrl(item);
+      return;
+    }
     const placeholder = element('div', 'Preview unavailable. This file can still be sorted.', 'placeholder');
     image.replaceWith(placeholder);
   };
@@ -71,13 +195,20 @@ function renderCurrent() {
   if (!item) {
     container.append(element('div', state.total ? 'Loading items…' : 'No items in this category.'));
     byId('item-count').textContent = state.total ? `${state.total} items` : '';
+    updateItemLock(null);
+    saveDeviceState();
     return;
   }
   container.append(createPreview(item, item.kind === 'video'));
   byId('item-count').textContent = `${state.index + 1} of ${state.total}`;
+  updateItemLock(item);
+  saveDeviceState();
 }
 
 function renderGrid() {
+  for (const video of mediaGrid.querySelectorAll('video[data-poster-source]')) {
+    videoPosterObserver?.unobserve(video);
+  }
   mediaGrid.replaceChildren();
   for (const item of state.items) {
     const card = element('article', undefined, 'media-card');
@@ -88,7 +219,7 @@ function renderGrid() {
       state.index = state.items.indexOf(item);
       renderCurrent();
     });
-    card.append(createPreview(item), select, element('small', `${item.kind} · ${formatBytes(item.size)}${item.category ? ` · ${item.category}` : ''}`, 'media-name'));
+    card.append(createPreview(item, false, item.kind === 'image'), select, element('small', `${item.kind} · ${formatBytes(item.size)}${item.category ? ` · ${item.category}` : ''}`, 'media-name'));
     mediaGrid.append(card);
   }
   byId('load-more').classList.toggle('hidden', state.offset + state.items.length >= state.total);
@@ -110,13 +241,57 @@ async function loadMedia() {
     state.offset = Math.max(0, Math.floor(Math.max(0, state.total - 1) / state.limit) * state.limit);
     return loadMedia();
   }
-  state.index = Math.min(state.index, Math.max(0, state.items.length - 1));
+  const restoredIndex = state.restoreMediaId
+    ? state.items.findIndex((item) => item.id === state.restoreMediaId) : -1;
+  state.index = restoredIndex >= 0 ? restoredIndex : Math.min(state.index, Math.max(0, state.items.length - 1));
+  state.restoreMediaId = '';
   byId('collection-title').textContent = `${state.category[0].toUpperCase()}${state.category.slice(1)} items`;
   renderGrid();
 }
 
+async function refreshQueue() {
+  if (!state.collectionId || queuePollBusy || state.busy
+    || byId('app-panel').classList.contains('hidden')) return;
+  queuePollBusy = true;
+  const snapshot = {
+    collectionId: state.collectionId,
+    category: state.category,
+    sort: state.sort,
+    offset: state.offset,
+  };
+  try {
+    const result = await request(`/api/media?collectionId=${encodeURIComponent(snapshot.collectionId)}&category=${snapshot.category}&sort=${snapshot.sort}&offset=${snapshot.offset}&limit=${state.limit}`);
+    if (snapshot.collectionId !== state.collectionId || snapshot.category !== state.category
+      || snapshot.sort !== state.sort || snapshot.offset !== state.offset) return;
+    const unchanged = result.total === state.total
+      && result.items.length === state.items.length
+      && result.items.every((item, index) => item.id === state.items[index].id
+        && item.category === state.items[index].category
+        && item.size === state.items[index].size
+        && item.modified_at === state.items[index].modified_at);
+    if (unchanged) return;
+    const currentId = state.items[state.index]?.id;
+    state.items = result.items;
+    state.total = result.total;
+    const currentIndex = currentId ? state.items.findIndex((item) => item.id === currentId) : -1;
+    state.index = currentIndex >= 0 ? currentIndex : Math.min(state.index, Math.max(0, state.items.length - 1));
+    if (!state.items.length && state.offset > 0) {
+      state.offset = Math.max(0, Math.floor(Math.max(0, state.total - 1) / state.limit) * state.limit);
+      await loadMedia();
+    } else {
+      renderGrid();
+    }
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    queuePollBusy = false;
+  }
+}
+
 async function loadCollections(preferredId) {
   const result = await request('/api/collections');
+  const preferences = await request('/api/preferences');
+  const lastUsed = preferredId || preferences.lastCollectionId;
   const select = byId('collection');
   select.replaceChildren();
   for (const collection of result.collections) {
@@ -126,16 +301,44 @@ async function loadCollections(preferredId) {
   }
   if (!result.collections.length) {
     state.collectionId = '';
+    byId('archive-collection').disabled = true;
+    byId('root-list').replaceChildren();
     setStatus('Create a collection, then choose a folder from the host desktop app.');
     await loadMedia();
+    await loadArchivedCollections();
     return;
   }
-  state.collectionId = preferredId && result.collections.some((item) => item.id === preferredId)
-    ? preferredId : (select.value || result.collections[0].id);
+  state.collectionId = lastUsed && result.collections.some((item) => item.id === lastUsed)
+    ? lastUsed : result.collections[0].id;
   state.offset = 0;
+  state.index = 0;
   select.value = state.collectionId;
+  byId('archive-collection').disabled = false;
+  await request('/api/preferences', {
+    method: 'PUT', body: JSON.stringify({ lastCollectionId: state.collectionId }),
+  });
+  const saved = await request(`/api/device-state?collectionId=${encodeURIComponent(state.collectionId)}`);
+  if (saved.state) {
+    state.category = saved.state.category;
+    state.sort = saved.state.sort;
+    state.offset = saved.state.offset;
+    state.restoreMediaId = saved.state.mediaId || '';
+    byId('sort-order').value = state.sort;
+    for (const button of byId('filters').querySelectorAll('button')) {
+      button.setAttribute('aria-pressed', String(button.dataset.category === state.category));
+    }
+  } else {
+    state.category = 'unseen';
+    state.sort = state.defaultSort;
+    state.restoreMediaId = '';
+    byId('sort-order').value = state.sort;
+    for (const button of byId('filters').querySelectorAll('button')) {
+      button.setAttribute('aria-pressed', String(button.dataset.category === state.category));
+    }
+  }
   const collection = result.collections.find((item) => item.id === state.collectionId);
   setStatus(collection.offline_roots ? `${collection.offline_roots} root(s) are currently offline.` : '');
+  await Promise.all([loadRootManagement(), loadArchivedCollections()]);
   await loadMedia();
 }
 
@@ -145,7 +348,21 @@ function showApp() {
   byId('logout').classList.remove('hidden');
   byId('add-root').classList.toggle('hidden', !window.photoSorter?.isDesktop);
   refreshNetwork();
-  loadCollections().catch((error) => setStatus(error.message, true));
+  loadSettings().then(() => loadCollections()).catch((error) => setStatus(error.message, true));
+  refreshScans();
+  if (!scanPollTimer) scanPollTimer = setInterval(refreshScans, 1500);
+  if (!queuePollTimer) queuePollTimer = setInterval(refreshQueue, 5000);
+}
+
+async function loadSettings() {
+  const settings = await request('/api/settings');
+  state.defaultSort = settings.defaultSort;
+  byId('default-sort').value = settings.defaultSort;
+  byId('preview-cache-limit').value = settings.previewCacheLimitMb;
+  if (window.photoSorter?.isDesktop) {
+    byId('autostart-setting').classList.remove('hidden');
+    byId('autostart').checked = await window.photoSorter.getAutostart();
+  }
 }
 
 async function refreshNetwork() {
@@ -158,11 +375,69 @@ async function refreshNetwork() {
       return;
     }
     for (const address of addresses) {
+      const entry = element('div', undefined, 'lan-address');
       const link = element('a', `${address.name}: ${address.url}`);
       link.href = address.url;
-      container.append(link);
+      const qr = element('img');
+      qr.src = address.qrDataUrl;
+      qr.alt = `QR code for ${address.url}`;
+      qr.width = 120;
+      qr.height = 120;
+      entry.append(link, qr);
+      container.append(entry);
     }
   } catch {}
+}
+
+async function loadRootManagement() {
+  const list = byId('root-list');
+  list.replaceChildren();
+  if (!state.collectionId) return;
+  const { roots } = await request(`/api/collections/${encodeURIComponent(state.collectionId)}/roots`);
+  for (const root of roots) {
+    const item = element('li', `${root.path}${root.online ? '' : ' · offline'}${root.read_only ? ' · read-only' : ''}`);
+    const remove = element('button', 'Remove');
+    remove.type = 'button';
+    remove.addEventListener('click', async () => {
+      const choice = await showDialog('Remove folder from collection', [
+        `Stop including ${root.path} in this collection? Its indexed decisions and history will be retained.`,
+      ]);
+      if (!choice.confirmed) return;
+      try {
+        await request(`/api/collections/${encodeURIComponent(state.collectionId)}/roots/${encodeURIComponent(root.id)}`, {
+          method: 'DELETE',
+        });
+        await loadCollections(state.collectionId);
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    });
+    item.append(remove);
+    list.append(item);
+  }
+  if (!roots.length) list.append(element('li', 'No folders are registered.'));
+}
+
+async function loadArchivedCollections() {
+  const list = byId('archived-list');
+  list.replaceChildren();
+  const { collections } = await request('/api/collections/archived');
+  for (const collection of collections) {
+    const item = element('li', collection.name);
+    const restore = element('button', 'Restore');
+    restore.type = 'button';
+    restore.addEventListener('click', async () => {
+      try {
+        await request(`/api/collections/${encodeURIComponent(collection.id)}/restore`, { method: 'POST', body: '{}' });
+        await loadCollections(collection.id);
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    });
+    item.append(restore);
+    list.append(item);
+  }
+  if (!collections.length) list.append(element('li', 'No archived collections.'));
 }
 
 async function showAuthentication() {
@@ -200,7 +475,7 @@ async function showAuthentication() {
 }
 
 async function decide(category, item = state.items[state.index]) {
-  if (!item || state.busy) return;
+  if (!item || state.busy || !state.lockReady || state.lockedItemId !== item.id) return;
   state.busy = true;
   try {
     await request(`/api/media/${encodeURIComponent(item.id)}/decision`, {
@@ -263,7 +538,8 @@ async function applyDecisions() {
     }
     const examples = plan.examples.map((item) => `${item.source} → ${item.destination}`);
     const lines = [
-      `This will move ${plan.moveCount} file(s). ${plan.readOnlySkipped} item(s) on read-only roots will be skipped.`,
+      `This will perform ${plan.moveCount} file operation(s): ${plan.moveCount - plan.restoreCount - plan.recategorizeCount} new move(s), ${plan.recategorizeCount} recategorization(s), and ${plan.restoreCount} restore(s). ${plan.readOnlySkipped} item(s) on read-only roots will be skipped.`,
+      ...(plan.restoreConflictCount ? [`${plan.restoreConflictCount} restore destination(s) are already occupied and will not be overwritten.`] : []),
       ...examples,
       ...(plan.moveCount > examples.length ? [`And ${plan.moveCount - examples.length} more…`] : []),
       'No file will be permanently deleted. A failure stops the batch.',
@@ -279,14 +555,48 @@ async function applyDecisions() {
       body: JSON.stringify({ planId: plan.id, confirm: true, reuseOutputFolders: choice.reuseOutputFolders }),
     });
     const moved = result.results.filter((item) => item.status === 'moved').length;
+    const recategorized = result.results.filter((item) => item.status === 'recategorized').length;
+    const restored = result.results.filter((item) => item.status === 'restored').length;
     setStatus(result.stoppedOnFailure
-      ? `Stopped after moving ${moved} file(s). Failure: ${result.results.at(-1)?.error}`
-      : `Moved ${moved} file(s). Batch ${result.batchId} can be restored.`);
+      ? `Stopped after ${moved} move(s), ${recategorized} recategorization(s), and ${restored} restore(s). Failure: ${result.results.at(-1)?.error}`
+      : `Applied ${moved} move(s), ${recategorized} recategorization(s), and ${restored} restore(s). Batch ${result.batchId} can be restored.`);
     await loadMedia();
   } catch (error) {
     setStatus(error.message, true);
   }
 }
+
+byId('settings-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  try {
+    const previousDefault = state.defaultSort;
+    const settings = await request('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        defaultSort: byId('default-sort').value,
+        previewCacheLimitMb: Number(byId('preview-cache-limit').value),
+      }),
+    });
+    state.defaultSort = settings.defaultSort;
+    if (state.sort === previousDefault) {
+      state.sort = settings.defaultSort;
+      byId('sort-order').value = state.sort;
+      state.offset = 0;
+      await loadMedia();
+    }
+    setStatus('Settings saved.');
+  } catch (error) { setStatus(error.message, true); }
+});
+
+byId('autostart').addEventListener('change', async (event) => {
+  try {
+    event.target.checked = await window.photoSorter.setAutostart(event.target.checked);
+    setStatus('Sign-in startup setting updated.');
+  } catch (error) {
+    event.target.checked = !event.target.checked;
+    setStatus(error.message, true);
+  }
+});
 
 byId('new-collection-form').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -299,9 +609,20 @@ byId('new-collection-form').addEventListener('submit', async (event) => {
 });
 
 byId('collection').addEventListener('change', async (event) => {
-  state.collectionId = event.target.value;
-  state.offset = 0;
-  await loadMedia();
+  await loadCollections(event.target.value);
+});
+byId('archive-collection').addEventListener('click', async () => {
+  if (!state.collectionId) return;
+  const choice = await showDialog('Archive collection', [
+    'Archive this collection? Its decisions and indexed history will be kept. Its folders can then be registered by another active collection.',
+  ], { confirmLabel: 'Archive collection' });
+  if (!choice.confirmed) return;
+  try {
+    await request(`/api/collections/${encodeURIComponent(state.collectionId)}/archive`, { method: 'POST', body: '{}' });
+    await loadCollections();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
 });
 byId('sort-order').addEventListener('change', async (event) => {
   state.sort = event.target.value;
@@ -312,8 +633,9 @@ byId('add-root').addEventListener('click', async () => {
   try {
     const result = await window.photoSorter.chooseRoot(state.collectionId);
     if (!result.canceled) {
-      setStatus('Folder scanned. New media is available.');
+      setStatus('Folder registered; scanning has started.');
       await loadCollections(state.collectionId);
+      refreshScans();
     }
   } catch (error) { setStatus(error.message, true); }
 });
@@ -360,10 +682,27 @@ byId('restore').addEventListener('click', async () => {
 byId('rescan').addEventListener('click', async () => {
   try {
     const result = await request('/api/rescan', { method: 'POST', body: JSON.stringify({ collectionId: state.collectionId }) });
-    setStatus(`Rescan complete: ${result.indexed} media item(s) indexed.`);
-    await loadCollections(state.collectionId);
+    setStatus(`Started scanning ${result.scans.length} folder(s).`);
+    refreshScans();
   } catch (error) { setStatus(error.message, true); }
 });
+async function changeDecisionHistory(direction) {
+  try {
+    const result = await request(`/api/decisions/${direction}`, { method: 'POST', body: '{}' });
+    if (!result.changed) {
+      setStatus(result.message);
+      return;
+    }
+    state.restoreMediaId = result.mediaId;
+    state.offset = Math.floor(state.offset / state.limit) * state.limit;
+    setStatus(`${direction === 'undo' ? 'Undid' : 'Redid'} decision: ${result.category}.`);
+    await loadMedia();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+byId('undo-decision').addEventListener('click', () => changeDecisionHistory('undo'));
+byId('redo-decision').addEventListener('click', () => changeDecisionHistory('redo'));
 byId('audit').addEventListener('click', async () => {
   try {
     const { events } = await request('/api/audit');
@@ -378,12 +717,61 @@ byId('audit').addEventListener('click', async () => {
     byId('audit-panel').classList.toggle('hidden');
   } catch (error) { setStatus(error.message, true); }
 });
+byId('export-audit').addEventListener('click', async () => {
+  try {
+    const data = await request('/api/audit/export');
+    const file = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const link = element('a');
+    link.href = URL.createObjectURL(file);
+    link.download = `photo-sorter-audit-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+byId('clear-audit').addEventListener('click', async () => {
+  const choice = await showDialog('Clear audit log', [
+    'Permanently remove the current audit entries? A single audit_cleared event will be retained.',
+  ], { confirmLabel: 'Clear audit log' });
+  if (!choice.confirmed) return;
+  try {
+    const result = await request('/api/audit', { method: 'DELETE', body: '{}' });
+    setStatus(`Cleared ${result.clearedCount} audit event(s).`);
+    const { events } = await request('/api/audit');
+    const list = byId('audit-list');
+    list.replaceChildren();
+    for (const event of events) {
+      const entry = element('li', `${event.created_at} · ${event.action}`);
+      entry.append(element('pre', JSON.stringify(event.details)));
+      list.append(entry);
+    }
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
 byId('logout').addEventListener('click', async () => {
+  updateItemLock(null);
+  await state.lockTransition;
   await request('/api/logout', { method: 'POST', body: '{}' });
   byId('app-panel').classList.add('hidden');
+  clearInterval(scanPollTimer);
+  scanPollTimer = null;
+  clearInterval(queuePollTimer);
+  queuePollTimer = null;
   byId('logout').classList.add('hidden');
   await showAuthentication();
 });
+setInterval(async () => {
+  if (!state.lockedItemId || document.hidden) return;
+  try {
+    await request(`/api/media/${encodeURIComponent(state.lockedItemId)}/lock`, { method: 'POST' });
+  } catch (error) {
+    state.lockReady = false;
+    setDecisionButtons(false);
+    setStatus(error.message, true);
+  }
+}, 20_000);
 document.addEventListener('keydown', (event) => {
   if (event.target.matches('input, textarea, select') || byId('app-panel').classList.contains('hidden')) return;
   if (event.key === 'ArrowLeft') decide('delete');
