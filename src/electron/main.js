@@ -1,10 +1,12 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu, Tray } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } = require('electron');
+const fs = require('node:fs/promises');
 const path = require('node:path');
 const { PhotoSorter, defaultDataDirectory } = require('../app');
 
 app.setName('photo-sorter');
 app.setPath('userData', defaultDataDirectory());
 
+let appIcon;
 let service;
 let window;
 let tray;
@@ -12,12 +14,49 @@ let serverPort;
 let quitting = false;
 let shutdownComplete = false;
 
+async function loadAppIcon() {
+  const svgPath = path.join(__dirname, '..', 'ui', 'icon.svg');
+  if (process.platform !== 'win32') {
+    const svgIcon = nativeImage.createFromPath(svgPath);
+    if (!svgIcon.isEmpty()) return svgIcon;
+  }
+
+  const svg = await fs.readFile(svgPath);
+  const svgDataUrl = `data:image/svg+xml;base64,${svg.toString('base64')}`;
+  const renderer = new BrowserWindow({
+    width: 512,
+    height: 512,
+    show: false,
+    webPreferences: { sandbox: true },
+  });
+
+  try {
+    await renderer.loadURL('data:text/html,<html><body></body></html>');
+    const pngDataUrl = await renderer.webContents.executeJavaScript(`(async () => {
+      const image = new Image();
+      image.src = ${JSON.stringify(svgDataUrl)};
+      await image.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = 512;
+      canvas.height = 512;
+      canvas.getContext('2d').drawImage(image, 0, 0, 512, 512);
+      return canvas.toDataURL('image/png');
+    })()`);
+    const icon = nativeImage.createFromDataURL(pngDataUrl);
+    if (icon.isEmpty()) throw new Error('The application SVG icon could not be rendered.');
+    return icon;
+  } finally {
+    renderer.destroy();
+  }
+}
+
 async function createWindow() {
   window = new BrowserWindow({
     width: 1180,
     height: 780,
     minWidth: 340,
     minHeight: 560,
+    icon: appIcon,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -47,6 +86,8 @@ function showWindow() {
 }
 
 app.whenReady().then(async () => {
+  appIcon = await loadAppIcon();
+  if (process.platform === 'darwin') app.dock.setIcon(appIcon);
   service = await new PhotoSorter().initialize();
   serverPort = await service.listen();
   ipcMain.handle('photo-sorter:choose-root', async (_event, collectionId) => {
@@ -80,7 +121,7 @@ app.whenReady().then(async () => {
     return app.getLoginItemSettings().openAtLogin;
   });
   await createWindow();
-  tray = new Tray(require('electron').nativeImage.createEmpty());
+  tray = new Tray(appIcon.resize({ width: 16, height: 16 }));
   tray.setToolTip('Photo Sorter is serving your local network');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open Photo Sorter', click: showWindow },

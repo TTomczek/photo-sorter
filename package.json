@@ -16,6 +16,7 @@
     "test:e2e": "node --test test/e2e/*.test.js",
     "test:browser": "playwright test",
     "build": "electron-builder --dir",
+    "generate-icons": "node scripts/generate-icons.js",
     "reset-password": "node scripts/reset-password.js",
     "dist:win": "electron-builder --win --publish never",
     "dist:mac": "electron-builder --mac --publish never",
@@ -34,15 +35,18 @@
       "output": "release"
     },
     "win": {
+      "icon": "src/ui/icon.ico",
       "target": "nsis"
     },
     "nsis": {
       "deleteAppDataOnUninstall": false
     },
     "mac": {
+      "icon": "src/ui/icon.icns",
       "target": "dmg"
     },
     "linux": {
+      "icon": "src/ui/icon.png",
       "target": "AppImage"
     }
   },
