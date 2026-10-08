@@ -97,8 +97,11 @@ test('device state, category decisions, history and expiring locks stay scoped a
   const allItems = app.listMedia({ collectionId, category: 'all' });
   assert.equal(allItems.total, 3);
   assert.equal(allItems.items.find((candidate) => candidate.id === item.id).category, 'keep');
+  app.setDeviceDecision(item.id, 'delete', 'device-a');
+  assert.equal(app.listMedia({ collectionId, category: 'delete' }).total, 1);
   assert.equal((await app.changeDecisionHistory('device-a', 'undo')).category, 'unseen');
-  assert.equal((await app.changeDecisionHistory('device-a', 'redo')).category, 'keep');
+  assert.equal(app.db.prepare('SELECT category FROM media WHERE id = ?').get(item.id).category, null);
+  assert.equal((await app.changeDecisionHistory('device-a', 'undo')).changed, false);
 
   app.db.prepare('UPDATE media_locks SET expires_at = ? WHERE media_id = ?').run(Date.now() - 1, item.id);
   assert.throws(() => app.setDeviceDecision(item.id, 'delete', 'device-a'), { status: 409 });

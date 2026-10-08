@@ -56,8 +56,6 @@
       'Erstelle eine Sammlung und wähle anschließend einen Ordner in der Desktop-App des Hosts aus.',
     'Previous': 'Zurück',
     'Next': 'Weiter',
-    'Undo decision': 'Entscheidung rückgängig',
-    'Redo decision': 'Entscheidung wiederholen',
     'Rescan roots': 'Ordner erneut scannen',
     'Review and apply moves': 'Verschiebungen prüfen und anwenden',
     'Restore latest apply': 'Letzte Anwendung wiederherstellen',

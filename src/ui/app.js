@@ -1165,23 +1165,7 @@ byId('rescan').addEventListener('click', async () => {
     refreshScans();
   } catch (error) { setStatus(error.message, true); }
 });
-async function changeDecisionHistory(direction) {
-  try {
-    const result = await request(`/api/decisions/${direction}`, { method: 'POST', body: '{}' });
-    if (!result.changed) {
-      setStatus(result.message);
-      return;
-    }
-    state.restoreMediaId = result.mediaId;
-    state.offset = Math.floor(state.offset / state.limit) * state.limit;
-    setStatus(`${direction === 'undo' ? 'Undid' : 'Redid'} decision: ${result.category}.`);
-    await loadMedia();
-  } catch (error) {
-    setStatus(error.message, true);
-  }
-}
-byId('undo-decision').addEventListener('click', () => changeDecisionHistory('undo'));
-byId('redo-decision').addEventListener('click', () => changeDecisionHistory('redo'));
+byId('mark-unseen').addEventListener('click', () => decide('unseen'));
 byId('audit').addEventListener('click', async () => {
   try {
     const { events } = await request('/api/audit');

@@ -1189,13 +1189,18 @@ class PhotoSorter {
     const item = this.db.prepare(`
       SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id WHERE m.id = ?
     `).get(entry.media_id);
-    const expected = direction === 'undo' ? entry.next_category : entry.previous_category;
+    const expected = direction === 'undo' ? entry.next_category : null;
     if (!item || item.category !== expected) {
       throw Object.assign(new Error('This decision changed on another device; history was not altered.'), { status: 409 });
     }
-    const category = direction === 'undo' ? entry.previous_category : entry.next_category;
+    const category = direction === 'undo' ? null : entry.next_category;
     this.db.prepare('UPDATE media SET category = ? WHERE id = ?').run(category, entry.media_id);
-    this.db.prepare('UPDATE decision_history SET undone = ? WHERE id = ?').run(direction === 'undo' ? 1 : 0, entry.id);
+    if (direction === 'undo') {
+      this.db.prepare('UPDATE decision_history SET undone = 1 WHERE media_id = ? AND device_id = ?')
+        .run(entry.media_id, deviceId);
+    } else {
+      this.db.prepare('UPDATE decision_history SET undone = 0 WHERE id = ?').run(entry.id);
+    }
     this.log(direction === 'undo' ? 'decision_undone' : 'decision_redone', {
       mediaId: entry.media_id, category,
     });

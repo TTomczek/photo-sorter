@@ -154,7 +154,7 @@ test.afterEach(async () => {
   delete process.env.PHOTO_SORTER_WEBAUTHN_RP_ID;
 });
 
-test('first-run setup, generated image previews, review decisions, keyboard, undo/redo and safe apply/restore', async () => {
+test('first-run setup, generated previews, clear-to-unseen, keyboard and safe apply/restore', async () => {
   const context = await browser.newContext();
   const page = await context.newPage();
   const pageErrors = [];
@@ -175,6 +175,7 @@ test('first-run setup, generated image previews, review decisions, keyboard, und
     await expect(page.locator('#filters [data-category="unseen"]')).toHaveCSS('box-shadow', /inset/);
     await expect(page.locator('#current-media img')).toHaveAttribute('alt', '01-red.png');
     await expect(page.locator('#current-media img')).toHaveJSProperty('naturalWidth', 96);
+    await expect(page.locator('#redo-decision')).toHaveCount(0);
     await expect.poll(() => fixture.app.db.prepare('SELECT COUNT(*) AS count FROM preview_cache').get().count)
       .toBeGreaterThan(0);
 
@@ -215,40 +216,34 @@ test('first-run setup, generated image previews, review decisions, keyboard, und
     await expect(page.locator('#filters [data-category="unseen"]')).toHaveAttribute('aria-pressed', 'false');
     await expect(page.locator('#media-grid')).toContainText('01-red.png');
 
-    await page.locator('#undo-decision').click();
+    await expect(page.locator('#mark-unseen')).toHaveText('Unseen');
+    await page.locator('#mark-unseen').click();
     await expect.poll(() => fixture.app.db.prepare('SELECT category FROM media WHERE id = ?')
       .get(item.id)?.category).toBe(null);
+    await expect(page.locator('#status')).toContainText('Saved unseen decision');
     await page.locator('#filters [data-category="unseen"]').click();
-    await expect(page.locator('#media-grid')).toContainText('01-red.png');
-    await page.locator('#redo-decision').click();
-    await expect.poll(() => fixture.app.db.prepare('SELECT category FROM media WHERE id = ?')
-      .get(item.id)?.category).toBe('keep');
-    await page.locator('#filters [data-category="keep"]').click();
     await expect(page.locator('#media-grid')).toContainText('01-red.png');
 
-    await page.locator('#filters [data-category="unseen"]').click();
-    await page.keyboard.press('ArrowDown');
-    await expect(page.locator('#status')).toContainText('Saved unsure decision');
-    await expect.poll(() => fixture.app.db.prepare("SELECT COUNT(*) AS count FROM media WHERE category = 'unsure'").get().count)
-      .toBe(1);
-    const unsureItem = fixture.app.listMedia({
-      collectionId: fixture.collectionId, category: 'unsure', sort: 'filename',
+    await expect.poll(() => fixture.app.listMedia({
+      collectionId: fixture.collectionId, category: 'unseen', sort: 'filename',
+    }).items.some((candidate) => candidate.id === item.id)).toBe(true);
+    const unseenItem = fixture.app.listMedia({
+      collectionId: fixture.collectionId, category: 'unseen', sort: 'filename',
     }).items[0];
-    await page.locator('#filters [data-category="unsure"]').click();
-    await expect(page.locator('#collection-title')).toHaveText('Unsure items');
+    await page.locator('#filters [data-category="unseen"]').click();
+    await expect(page.locator('#collection-title')).toHaveText('Unseen items');
     await page.locator('#filters [data-category="all"]').click();
     await expect(page.locator('#collection-title')).toHaveText('All items');
     await expect(page.locator('#item-count')).toHaveText('1 of 4');
     await expect(page.locator('#media-grid .media-card')).toHaveCount(4);
     await expect(page.locator('#filters [data-category="all"]')).toHaveAttribute('aria-pressed', 'true');
-    await expect(page.locator('#media-grid')).toContainText('unsure');
-    await page.locator('#filters [data-category="unsure"]').click();
-    expect((await api(page, `/api/media/${unsureItem.id}/lock`, { method: 'POST' })).status).toBe(200);
-    expect((await api(page, `/api/media/${unsureItem.id}/decision`, {
+    await page.locator('#filters [data-category="unseen"]').click();
+    expect((await api(page, `/api/media/${unseenItem.id}/lock`, { method: 'POST' })).status).toBe(200);
+    expect((await api(page, `/api/media/${unseenItem.id}/decision`, {
       method: 'PUT', body: JSON.stringify({ category: 'unseen' }),
     })).status).toBe(200);
     await expect.poll(() => fixture.app.db.prepare('SELECT category FROM media WHERE id = ?')
-      .get(unsureItem.id)?.category).toBe(null);
+      .get(unseenItem.id)?.category).toBe(null);
 
     await page.locator('#filters [data-category="unseen"]').click();
     await page.locator('.decision-actions [data-decision="delete"]').click();
