@@ -558,6 +558,7 @@ async function refreshQueue() {
 }
 
 async function loadCollections(preferredId) {
+  byId('add-root').disabled = true;
   const result = await request('/api/collections');
   const preferences = await request('/api/preferences');
   const lastUsed = preferredId || preferences.lastCollectionId;
@@ -583,6 +584,7 @@ async function loadCollections(preferredId) {
   state.offset = 0;
   state.index = 0;
   select.value = state.collectionId;
+  byId('add-root').disabled = !result.collections.some((item) => item.id === state.collectionId);
   byId('archive-collection').disabled = false;
   await request('/api/preferences', {
     method: 'PUT', body: JSON.stringify({ lastCollectionId: state.collectionId }),

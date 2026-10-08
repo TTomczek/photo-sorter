@@ -1,4 +1,4 @@
-const CACHE_NAME = 'photo-sorter-shell-v1';
+const CACHE_NAME = 'photo-sorter-shell-v2';
 const SHELL_ASSETS = [
   '/',
   '/style.css',

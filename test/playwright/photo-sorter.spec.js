@@ -102,6 +102,7 @@ async function setupAccount(page) {
   await page.goto(fixture.origin);
   await expect(page.locator('#auth-title')).toHaveText('Waiting for host setup');
   await expect(page.locator('#auth-form')).toBeHidden();
+  await expect(page.locator('#add-root')).toBeDisabled();
   await fixture.app.createPassword(PASSWORD);
   await page.reload();
   await expect(page.locator('#auth-title')).toHaveText('Log in');
@@ -169,6 +170,7 @@ test('first-run setup, generated image previews, review decisions, keyboard, und
     await page.locator('#auth-submit').click();
 
     await expect(page.locator('#app-panel')).toBeVisible();
+    await expect(page.locator('#add-root')).toBeEnabled();
     await expect(page.locator('#current-media img')).toHaveAttribute('alt', '01-red.png');
     await expect(page.locator('#current-media img')).toHaveJSProperty('naturalWidth', 96);
     await expect.poll(() => fixture.app.db.prepare('SELECT COUNT(*) AS count FROM preview_cache').get().count)
