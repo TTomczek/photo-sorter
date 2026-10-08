@@ -276,6 +276,41 @@ test('first-run setup, generated previews, clear-to-unseen, keyboard and safe ap
   }
 });
 
+test('finishing unseen review advances to unsure and offers category application', async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await setupAccount(page);
+    await expect.poll(() => fixture.app.db.prepare(
+      "SELECT COUNT(*) AS count FROM scan_jobs WHERE status IN ('queued', 'running')",
+    ).get().count).toBe(0);
+    await expect(page.locator('#item-count')).toHaveText('1 of 4');
+
+    await page.locator('.decision-actions [data-decision="keep"]').click();
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '02-green.png');
+    await page.locator('.decision-actions [data-decision="keep"]').click();
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '03-blue.png');
+    await page.locator('.decision-actions [data-decision="keep"]').click();
+    await expect(page.locator('#current-media video')).toBeVisible();
+    await page.locator('.decision-actions [data-decision="unsure"]').click();
+
+    await expect(page.locator('#collection-title')).toHaveText('Unsure items');
+    await expect(page.locator('#current-media video')).toBeVisible();
+    await page.locator('.decision-actions [data-decision="keep"]').click();
+    await expect(page.locator('#confirm-dialog')).toBeVisible();
+    await expect(page.locator('#dialog-title')).toHaveText('Classification complete');
+    await expect(page.locator('#dialog-content')).toContainText('All unseen and unsure items have been processed');
+    await expect(page.locator('#dialog-confirm')).toHaveText('Review and apply moves');
+
+    await page.locator('#confirm-dialog [value="cancel"]').click();
+    await expect(fs.readFile(path.join(fixture.root, '99-unplayable.mp4'))).resolves.toBeTruthy();
+    await expect(fs.stat(path.join(fixture.root, 'unsure', '99-unplayable.mp4')))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+  } finally {
+    await context.close();
+  }
+});
+
 test('development reload keeps an authenticated session', async () => {
   const context = await browser.newContext();
   const page = await context.newPage();

@@ -23,6 +23,8 @@ const state = {
   gridTargetIndex: null,
   restoreGridScroll: false,
   mediaRequestId: 0,
+  classificationPending: false,
+  classificationTransitioning: false,
 };
 const byId = (id) => document.getElementById(id);
 const mediaGrid = byId('media-grid');
@@ -189,6 +191,7 @@ async function refreshScans() {
       const indexed = scans.reduce((sum, scan) => sum + scan.indexed, 0);
       setStatus(`Scanning complete: ${indexed} media item(s) indexed.`);
     }
+    if (!active.length && state.classificationPending) await continueClassification();
   } catch (error) {
     setStatus(error.message, true);
   } finally {
@@ -645,6 +648,9 @@ async function refreshQueue() {
         && item.modified_at === state.items[index].modified_at);
     if (unchanged) return;
     const currentId = state.items[state.index]?.id;
+    if (!result.total && state.total > 0 && ['unseen', 'unsure'].includes(snapshot.category)) {
+      state.classificationPending = true;
+    }
     state.items = result.items;
     state.total = result.total;
     const currentIndex = currentId ? state.items.findIndex((item) => item.id === currentId) : -1;
@@ -655,6 +661,7 @@ async function refreshQueue() {
     } else {
       renderGrid();
     }
+    if (state.classificationPending) await continueClassification();
   } catch (error) {
     setStatus(error.message, true);
   } finally {
@@ -667,6 +674,7 @@ async function loadCollections(preferredId) {
   const result = await request('/api/collections');
   const preferences = await request('/api/preferences');
   const lastUsed = preferredId || preferences.lastCollectionId;
+  const previousCollectionId = state.collectionId;
   const select = byId('collection');
   select.replaceChildren();
   for (const collection of result.collections) {
@@ -676,6 +684,7 @@ async function loadCollections(preferredId) {
     select.append(option);
   }
   if (!result.collections.length) {
+    state.classificationPending = false;
     state.collectionId = '';
     byId('archive-collection').disabled = true;
     byId('root-list').replaceChildren();
@@ -686,6 +695,7 @@ async function loadCollections(preferredId) {
   }
   state.collectionId = lastUsed && result.collections.some((item) => item.id === lastUsed)
     ? lastUsed : result.collections[0].id;
+  if (state.collectionId !== previousCollectionId) state.classificationPending = false;
   state.offset = 0;
   state.index = 0;
   select.value = state.collectionId;
@@ -720,6 +730,10 @@ async function loadCollections(preferredId) {
   setStatus(collection.offline_roots ? `${collection.offline_roots} root(s) are currently offline.` : '');
   await Promise.all([loadRootManagement(), loadArchivedCollections()]);
   await loadMedia();
+  if (state.total === 0 && ['unseen', 'unsure'].includes(state.category)) {
+    state.classificationPending = true;
+    await continueClassification();
+  }
 }
 
 function showApp() {
@@ -961,6 +975,10 @@ async function decide(category, item = state.items[state.index]) {
     await request(`/api/media/${encodeURIComponent(item.id)}/decision`, {
       method: 'PUT', body: JSON.stringify({ category }),
     });
+    if (state.category !== 'all' && state.category !== category
+      && ['unseen', 'unsure'].includes(state.category)) {
+      state.classificationPending = true;
+    }
     await animation;
     setStatus(`Saved ${category === 'unseen' ? 'unseen' : category} decision.`);
     const staysInQueue = state.category === 'all' || state.category === category;
@@ -985,6 +1003,7 @@ async function decide(category, item = state.items[state.index]) {
     state.busy = false;
     setDecisionButtons(state.lockReady && state.lockedItemId === state.items[state.index]?.id);
   }
+  if (state.classificationPending) await continueClassification();
 }
 
 function showDialog(title, lines, { allowReuse = false, confirmLabel = 'Confirm' } = {}) {
@@ -1012,6 +1031,71 @@ function showDialog(title, lines, { allowReuse = false, confirmLabel = 'Confirm'
       reuseOutputFolders: Boolean(reuseCheckbox?.checked),
     }), { once: true });
   });
+}
+
+function activateCategory(category) {
+  state.category = category;
+  state.offset = 0;
+  state.index = 0;
+  state.gridTargetIndex = null;
+  state.restoreGridScroll = true;
+  for (const button of byId('filters').querySelectorAll('button')) {
+    button.setAttribute('aria-pressed', String(button.dataset.category === category));
+  }
+}
+
+async function continueClassification() {
+  if (!state.classificationPending || state.classificationTransitioning || state.busy
+    || !state.collectionId || !['unseen', 'unsure'].includes(state.category)) return;
+  state.classificationTransitioning = true;
+  const collectionId = state.collectionId;
+  const startingCategory = state.category;
+  try {
+    const encodedCollectionId = encodeURIComponent(collectionId);
+    const { scans } = await request(`/api/scans?collectionId=${encodedCollectionId}`);
+    if (scans.some((scan) => ['queued', 'running'].includes(scan.status))) return;
+
+    const categories = ['unseen', 'unsure', 'all'];
+    const counts = await Promise.all(categories.map((category) => request(
+      `/api/media?collectionId=${encodedCollectionId}&category=${category}&sort=${state.sort}&offset=0&limit=1`,
+    )));
+    if (!state.classificationPending || state.collectionId !== collectionId
+      || state.category !== startingCategory) return;
+    const [unseen, unsure, all] = counts;
+    if (state.category === 'unseen' && unseen.total > 0) {
+      state.classificationPending = false;
+      return;
+    }
+    if (state.category === 'unsure' && unsure.total > 0) {
+      state.classificationPending = false;
+      return;
+    }
+    if (state.category === 'unseen') {
+      activateCategory('unsure');
+      await loadMedia();
+      if (!state.classificationPending || state.collectionId !== collectionId
+        || state.category !== 'unsure') return;
+    } else if (unseen.total > 0) {
+      activateCategory('unseen');
+      await loadMedia();
+      state.classificationPending = false;
+      return;
+    }
+
+    if (unseen.total === 0 && unsure.total === 0 && all.total > 0) {
+      state.classificationPending = false;
+      const choice = await showDialog('Classification complete', [
+        'All unseen and unsure items have been processed. Review and apply your categories now?',
+      ], { confirmLabel: 'Review and apply moves' });
+      if (choice.confirmed) await applyDecisions();
+      return;
+    }
+    state.classificationPending = false;
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    state.classificationTransitioning = false;
+  }
 }
 
 async function applyDecisions() {
@@ -1171,15 +1255,13 @@ byId('add-root').addEventListener('click', async () => {
 byId('filters').addEventListener('click', async (event) => {
   const button = event.target.closest('[data-category]');
   if (!button) return;
-  state.category = button.dataset.category;
-  state.offset = 0;
-  state.index = 0;
-  state.gridTargetIndex = null;
-  state.restoreGridScroll = true;
-  for (const candidate of byId('filters').querySelectorAll('button')) {
-    candidate.setAttribute('aria-pressed', String(candidate === button));
-  }
+  state.classificationPending = false;
+  activateCategory(button.dataset.category);
   await loadMedia();
+  if (state.total === 0 && ['unseen', 'unsure'].includes(state.category)) {
+    state.classificationPending = true;
+    await continueClassification();
+  }
 });
 byId('previous').addEventListener('click', () => moveSelection(-1));
 byId('next').addEventListener('click', () => moveSelection(1));

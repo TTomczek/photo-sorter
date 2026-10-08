@@ -58,6 +58,9 @@
     'Next': 'Weiter',
     'Rescan roots': 'Ordner erneut scannen',
     'Review and apply moves': 'Verschiebungen prüfen und anwenden',
+    'Classification complete': 'Kategorisierung abgeschlossen',
+    'All unseen and unsure items have been processed. Review and apply your categories now?':
+      'Alle ungesehenen und unsicheren Elemente wurden bearbeitet. Möchtest du deine Kategorien jetzt prüfen und anwenden?',
     'Restore latest apply': 'Letzte Anwendung wiederherstellen',
     'Audit log': 'Audit-Protokoll',
     'Previous page': 'Vorherige Seite',
