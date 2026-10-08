@@ -45,7 +45,7 @@ button.keep { background: #1d7542; }
 .lan-address { display: grid; gap: .35rem; }
 .lan-address img { width: 120px; height: 120px; image-rendering: pixelated; }
 .filters { overflow-x: auto; }
-.filters button[aria-pressed="true"] { outline: 3px solid #8db7ef; }
+.filters button[aria-pressed="true"] { box-shadow: inset 0 0 0 3px #8db7ef; }
 .review { text-align: center; }
 .review-heading { text-align: left; }
 .current-media { min-height: 230px; max-height: min(60vh, 620px); display: grid; place-items: center; overflow: hidden; background: #101418; color: white; border-radius: .55rem; }

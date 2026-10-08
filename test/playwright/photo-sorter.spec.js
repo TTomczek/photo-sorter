@@ -171,6 +171,8 @@ test('first-run setup, generated image previews, review decisions, keyboard, und
 
     await expect(page.locator('#app-panel')).toBeVisible();
     await expect(page.locator('#add-root')).toBeEnabled();
+    await expect(page.locator('#filters [data-category="unseen"]')).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.locator('#filters [data-category="unseen"]')).toHaveCSS('box-shadow', /inset/);
     await expect(page.locator('#current-media img')).toHaveAttribute('alt', '01-red.png');
     await expect(page.locator('#current-media img')).toHaveJSProperty('naturalWidth', 96);
     await expect.poll(() => fixture.app.db.prepare('SELECT COUNT(*) AS count FROM preview_cache').get().count)
@@ -208,6 +210,9 @@ test('first-run setup, generated image previews, review decisions, keyboard, und
     await expect(page.locator('#current-media img')).toHaveAttribute('alt', '02-green.png');
     await page.locator('#filters [data-category="keep"]').click();
     await expect(page.locator('#collection-title')).toHaveText('Keep items');
+    await expect(page.locator('#filters [data-category="keep"]')).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.locator('#filters [data-category="keep"]')).toHaveCSS('box-shadow', /inset/);
+    await expect(page.locator('#filters [data-category="unseen"]')).toHaveAttribute('aria-pressed', 'false');
     await expect(page.locator('#media-grid')).toContainText('01-red.png');
 
     await page.locator('#undo-decision').click();
