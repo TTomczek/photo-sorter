@@ -231,11 +231,18 @@ test('first-run setup, generated image previews, review decisions, keyboard, und
     await expect(page.locator('#status')).toContainText('Saved unsure decision');
     await expect.poll(() => fixture.app.db.prepare("SELECT COUNT(*) AS count FROM media WHERE category = 'unsure'").get().count)
       .toBe(1);
-    await page.locator('#filters [data-category="unsure"]').click();
-    await expect(page.locator('#collection-title')).toHaveText('Unsure items');
     const unsureItem = fixture.app.listMedia({
       collectionId: fixture.collectionId, category: 'unsure', sort: 'filename',
     }).items[0];
+    await page.locator('#filters [data-category="unsure"]').click();
+    await expect(page.locator('#collection-title')).toHaveText('Unsure items');
+    await page.locator('#filters [data-category="all"]').click();
+    await expect(page.locator('#collection-title')).toHaveText('All items');
+    await expect(page.locator('#item-count')).toHaveText('1 of 4');
+    await expect(page.locator('#media-grid .media-card')).toHaveCount(4);
+    await expect(page.locator('#filters [data-category="all"]')).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.locator('#media-grid')).toContainText('unsure');
+    await page.locator('#filters [data-category="unsure"]').click();
     expect((await api(page, `/api/media/${unsureItem.id}/lock`, { method: 'POST' })).status).toBe(200);
     expect((await api(page, `/api/media/${unsureItem.id}/decision`, {
       method: 'PUT', body: JSON.stringify({ category: 'unseen' }),

@@ -18,6 +18,7 @@ const VIDEO_EXTENSIONS = new Set([
   '.mts', '.webm', '.wmv',
 ]);
 const CATEGORIES = new Set(['keep', 'delete', 'unsure', 'unseen']);
+const REVIEW_CATEGORIES = new Set([...CATEGORIES, 'all']);
 const OUTPUT_MARKER = '.photo-sorter-output';
 const SORT_ORDERS = new Set(['capture-asc', 'capture-desc', 'filename', 'date-asc', 'date-desc']);
 
@@ -1104,7 +1105,7 @@ class PhotoSorter {
     const sort = state.sort === 'date-asc' ? 'capture-asc'
       : state.sort === 'date-desc' ? 'capture-desc' : state.sort;
     const offset = state.offset;
-    if (!CATEGORIES.has(category)
+    if (!REVIEW_CATEGORIES.has(category)
       || !SORT_ORDERS.has(sort)
       || !Number.isSafeInteger(offset) || offset < 0 || offset > 2_000_000) {
       throw new Error('Invalid review position.');
@@ -1826,7 +1827,7 @@ class PhotoSorter {
         const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
         const category = url.searchParams.get('category') || 'unseen';
         const sort = url.searchParams.get('sort') || 'capture-asc';
-        if (!CATEGORIES.has(category)) throw new Error('Invalid category.');
+        if (!REVIEW_CATEGORIES.has(category)) throw new Error('Invalid category.');
         const result = this.listMedia({
           collectionId: url.searchParams.get('collectionId'),
           category,

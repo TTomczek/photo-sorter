@@ -78,10 +78,10 @@ test('device state, category decisions, history and expiring locks stay scoped a
   assert.equal(app.getLastCollection('device-b'), null);
 
   const state = app.saveDeviceState('device-a', collectionId, {
-    category: 'unseen', sort: 'date-desc', mediaId: item.id, offset: 60,
+    category: 'all', sort: 'date-desc', mediaId: item.id, offset: 60,
   });
   assert.deepEqual({ ...state }, {
-    category: 'unseen', sort: 'capture-desc', mediaId: item.id, offset: 60,
+    category: 'all', sort: 'capture-desc', mediaId: item.id, offset: 60,
   });
   assert.throws(() => app.saveDeviceState('device-a', collectionId, {
     category: 'purge', sort: 'filename', mediaId: item.id, offset: 0,
@@ -94,6 +94,9 @@ test('device state, category decisions, history and expiring locks stay scoped a
   assert.throws(() => app.claimMediaLock(item.id, 'device-b'), { status: 409 });
   app.setDeviceDecision(item.id, 'keep', 'device-a');
   assert.equal(app.listMedia({ collectionId, category: 'keep' }).total, 1);
+  const allItems = app.listMedia({ collectionId, category: 'all' });
+  assert.equal(allItems.total, 3);
+  assert.equal(allItems.items.find((candidate) => candidate.id === item.id).category, 'keep');
   assert.equal((await app.changeDecisionHistory('device-a', 'undo')).category, 'unseen');
   assert.equal((await app.changeDecisionHistory('device-a', 'redo')).category, 'keep');
 

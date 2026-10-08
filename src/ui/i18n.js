@@ -37,6 +37,7 @@
     'Connect a phone on this local network': 'Telefon mit diesem lokalen Netzwerk verbinden',
     'Loading local addresses…': 'Lokale Adressen werden geladen…',
     'Media category': 'Medienkategorie',
+    'All': 'Alle',
     'Unseen': 'Nicht gesichtet',
     'Keep': 'Behalten',
     'Delete': 'Löschen',
@@ -144,6 +145,7 @@
     'passkey_removed': 'Passkey entfernt',
     'audit_cleared': 'Audit-Protokoll geleert',
     'No items in this category.': 'Keine Elemente in dieser Kategorie.',
+    'No items in this collection.': 'Keine Elemente in dieser Sammlung.',
     'Loading items…': 'Elemente werden geladen…',
     'Preview unavailable. This file can still be sorted.': 'Vorschau nicht verfügbar. Diese Datei kann trotzdem sortiert werden.',
     'Video preview unavailable. This file can still be sorted.':

@@ -464,7 +464,8 @@ function renderCurrent() {
   byId('zoom-controls').classList.add('hidden');
   const item = state.items[state.index];
   if (!item) {
-    container.append(element('div', state.total ? 'Loading items…' : 'No items in this category.'));
+    container.append(element('div', state.total ? 'Loading items…'
+      : state.category === 'all' ? 'No items in this collection.' : 'No items in this category.'));
     byId('item-count').textContent = state.total ? `${state.total} items` : '';
     updateItemLock(null);
     saveDeviceState();
@@ -532,7 +533,8 @@ async function loadMedia() {
   state.index = restoredIndex >= 0 ? restoredIndex : Math.min(state.index, Math.max(0, state.items.length - 1));
   state.gridTargetIndex = null;
   state.restoreMediaId = '';
-  byId('collection-title').textContent = `${state.category[0].toUpperCase()}${state.category.slice(1)} items`;
+  byId('collection-title').textContent = state.category === 'all'
+    ? 'All items' : `${state.category[0].toUpperCase()}${state.category.slice(1)} items`;
   renderGrid();
 }
 
@@ -921,14 +923,18 @@ async function decide(category, item = state.items[state.index]) {
       method: 'PUT', body: JSON.stringify({ category }),
     });
     setStatus(`Saved ${category === 'unseen' ? 'unseen' : category} decision.`);
-    state.items = state.items.filter((candidate) => candidate.id !== item.id || state.category === category);
-    if (state.category !== category) {
+    const staysInQueue = state.category === 'all' || state.category === category;
+    state.items = state.items.filter((candidate) => candidate.id !== item.id || staysInQueue);
+    if (!staysInQueue) {
       state.total = Math.max(0, state.total - 1);
       state.index = Math.min(state.index, Math.max(0, state.items.length - 1));
       await loadMedia();
     } else {
       const index = state.items.findIndex((candidate) => candidate.id === item.id);
-      if (index >= 0) state.index = index;
+      if (index >= 0) {
+        state.index = index;
+        state.items[index].category = category === 'unseen' ? null : category;
+      }
       renderGrid();
     }
   } catch (error) {
