@@ -9,7 +9,7 @@ The application includes password and optional passkey sign-in, local collection
 - Requires Node.js 22.13 or newer and npm.
 - `npm install` installs Electron, packaging tools, and the Playwright test runner.
 - `npx playwright install chromium` installs the browser used by UI tests.
-- `npm run dev` starts the desktop host.
+- `npm run dev` starts the desktop host with dependency-free hot reload for files under `src/ui`. Renderer changes refresh the window while keeping the authenticated host session; changes to Electron or server code still require a manual restart.
 - `npm test` runs unit tests, HTTP/API workflow tests, and real-browser Playwright tests.
 - `npm run test:unit`, `npm run test:e2e`, and `npm run test:browser` run those suites individually.
 - `npm run build` builds the unpacked desktop application for the current OS.

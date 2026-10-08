@@ -27,6 +27,8 @@ const state = {
 const byId = (id) => document.getElementById(id);
 const mediaGrid = byId('media-grid');
 const mediaViewport = byId('media-viewport');
+const developmentMode = Boolean(window.photoSorter?.isDesktop
+  && new URLSearchParams(window.location.search).get('dev') === '1');
 const videoPosterObserver = typeof IntersectionObserver === 'undefined' ? null : new IntersectionObserver((entries) => {
   for (const entry of entries) {
     if (!entry.isIntersecting) continue;
@@ -1245,14 +1247,25 @@ for (const eventName of ['pointerup', 'pointercancel', 'lostpointercapture']) {
   });
 }
 
-request('/api/setup-status').then(showAuthentication).catch((error) => {
+async function initializeApp() {
+  if (developmentMode) {
+    const { authenticated } = await request('/api/session');
+    if (authenticated) {
+      showApp();
+      return;
+    }
+  }
+  await showAuthentication();
+}
+
+initializeApp().catch((error) => {
   byId('auth-panel').classList.remove('hidden');
   byId('auth-title').textContent = 'Cannot reach the local host';
   byId('auth-description').textContent = error.message;
 });
 
 applyVisualPreferences();
-if (window.isSecureContext && 'serviceWorker' in navigator) {
+if (!developmentMode && window.isSecureContext && 'serviceWorker' in navigator) {
   navigator.serviceWorker.register('/service-worker.js')
     .catch((error) => setStatus(`Offline install support unavailable: ${error.message}`, true));
 }

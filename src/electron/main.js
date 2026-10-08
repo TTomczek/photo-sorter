@@ -1,4 +1,5 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } = require('electron');
+const { watch } = require('node:fs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { PhotoSorter, defaultDataDirectory } = require('../app');
@@ -6,10 +7,13 @@ const { PhotoSorter, defaultDataDirectory } = require('../app');
 app.setName('photo-sorter');
 app.setPath('userData', defaultDataDirectory());
 
+const development = !app.isPackaged && process.argv.includes('--hot-reload');
 let appIcon;
 let service;
 let window;
 let tray;
+let uiWatcher;
+let reloadTimer;
 let serverPort;
 let quitting = false;
 let shutdownComplete = false;
@@ -75,8 +79,20 @@ async function createWindow() {
       window.hide();
     }
   });
-  await window.loadURL(`http://127.0.0.1:${serverPort}`);
-  if (process.env.NODE_ENV === 'development') window.webContents.openDevTools();
+  if (development) {
+    await window.webContents.session.clearStorageData({ storages: ['serviceworkers', 'cachestorage'] });
+  }
+  await window.loadURL(`http://127.0.0.1:${serverPort}${development ? '/?dev=1' : ''}`);
+  if (development) {
+    window.webContents.openDevTools();
+    uiWatcher = watch(path.join(__dirname, '..', 'ui'), { recursive: true }, () => {
+      clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => {
+        if (window && !window.isDestroyed()) window.webContents.reloadIgnoringCache();
+      }, 100);
+    });
+    uiWatcher.on('error', (error) => console.error('Development UI watcher failed:', error));
+  }
 }
 
 function showWindow() {
@@ -145,6 +161,8 @@ app.on('before-quit', (event) => {
   quitting = true;
   if (shutdownComplete) return;
   event.preventDefault();
+  uiWatcher?.close();
+  clearTimeout(reloadTimer);
   tray?.destroy();
   Promise.resolve(service?.close()).finally(() => {
     shutdownComplete = true;

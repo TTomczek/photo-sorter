@@ -22,6 +22,7 @@ h1 { margin-bottom: .15rem; font-size: 1.55rem; }
 h2 { font-size: 1.2rem; }
 .subtitle { color: #5b6570; margin-bottom: 0; }
 main { display: grid; gap: 1rem; }
+#app-panel:not(.hidden) { display: grid; gap: 1rem; }
 .panel { padding: 1rem; border: 1px solid #d7dce1; border-radius: .8rem; background: #fff; }
 .warning { padding: .8rem 1rem; background: #fff1cb; color: #624900; border-radius: .7rem; }
 .toolbar { flex-wrap: wrap; }

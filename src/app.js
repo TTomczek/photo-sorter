@@ -1661,6 +1661,10 @@ class PhotoSorter {
       if (request.method === 'GET' && url.pathname === '/api/setup-status') {
         return this.sendJson(response, 200, { setupComplete: this.isSetupComplete() });
       }
+      if (request.method === 'GET' && url.pathname === '/api/session') {
+        const token = this.sessionToken(request);
+        return this.sendJson(response, 200, { authenticated: Boolean(token && this.sessions.has(token)) });
+      }
       if (request.method === 'GET' && url.pathname === '/api/passkeys/status') {
         return this.sendJson(response, 200, this.passkeys.status());
       }

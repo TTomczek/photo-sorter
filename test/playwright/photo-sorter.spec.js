@@ -269,6 +269,29 @@ test('first-run setup, generated image previews, review decisions, keyboard, und
   }
 });
 
+test('development reload keeps an authenticated session', async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await fixture.app.createPassword(PASSWORD);
+    await page.addInitScript(() => {
+      window.photoSorter = { isDesktop: true, getAutostart: async () => false };
+    });
+    await page.goto(`${fixture.origin}/?dev=1`);
+    await expect(page.locator('#auth-title')).toHaveText('Log in');
+    await page.locator('#password').fill(PASSWORD);
+    await page.locator('#auth-submit').click();
+    await expect(page.locator('#app-panel')).toBeVisible();
+
+    await page.reload();
+    await expect(page.locator('#app-panel')).toBeVisible();
+    await expect(page.locator('#auth-panel')).toBeHidden();
+    await expect(page.locator('#collection-title')).toHaveText('Unseen items');
+  } finally {
+    await context.close();
+  }
+});
+
 test('existing output folders need explicit approval and cancellation does not move originals', async () => {
   fixture = await closeFixtureAndRecreate({ existingOutput: true });
   const context = await browser.newContext();
@@ -349,6 +372,11 @@ test('settings, German localization, theme/grid preferences, device state, colle
     await expect(page.locator('html')).toHaveAttribute('lang', 'de');
     await expect(page.getByRole('button', { name: 'Abmelden' })).toBeVisible();
     await expect(page.locator('#network-warning')).toContainText('HTTP im lokalen Netzwerk');
+    await page.locator('#status').evaluate((element) => {
+      element.textContent = 'Create a collection, then choose a folder from the host desktop app.';
+    });
+    await expect(page.locator('#status'))
+      .toHaveText('Erstelle eine Sammlung und wähle anschließend einen Ordner in der Desktop-App des Hosts aus.');
 
     await page.locator('#default-sort').selectOption('capture-desc');
     await page.locator('#preview-cache-limit').fill('0');

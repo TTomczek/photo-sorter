@@ -51,6 +51,8 @@
     'Reset zoom': 'Zoom zurücksetzen',
     'Zoom in': 'Vergrößern',
     'Collection grid': 'Sammlungsraster',
+    'Create a collection, then choose a folder from the host desktop app.':
+      'Erstelle eine Sammlung und wähle anschließend einen Ordner in der Desktop-App des Hosts aus.',
     'Previous': 'Zurück',
     'Next': 'Weiter',
     'Undo decision': 'Entscheidung rückgängig',
