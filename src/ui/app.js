@@ -166,7 +166,7 @@ async function loadVideoPoster(video) {
 
 function setDecisionButtons(enabled) {
   for (const button of document.querySelectorAll('[data-decision]')) {
-    button.disabled = !enabled;
+    button.disabled = !enabled || state.busy;
   }
 }
 
@@ -471,11 +471,48 @@ function renderCurrent() {
     saveDeviceState();
     return;
   }
-  container.append(createPreview(item, item.kind === 'video'));
+  const photo = element('div', undefined, 'current-photo');
+  photo.append(createPreview(item, item.kind === 'video'));
+  container.append(photo);
   if (item.kind === 'image') byId('zoom-controls').classList.remove('hidden');
   byId('item-count').textContent = `${state.offset + state.index + 1} of ${state.total}`;
   updateItemLock(item);
   saveDeviceState();
+}
+
+function animateDecision(category) {
+  const photo = byId('current-media').querySelector('.current-photo');
+  if (!photo) return Promise.resolve();
+
+  const directions = {
+    delete: [-1, 0],
+    keep: [1, 0],
+    unsure: [0, 1],
+    unseen: [0, 0],
+  };
+  const labels = { delete: 'Delete', keep: 'Keep', unsure: 'Unsure', unseen: 'Unseen' };
+  const [x, y] = directions[category] || directions.unseen;
+  const flash = element('div', labels[category] || category, 'decision-flash');
+  flash.dataset.category = category;
+  photo.append(flash);
+  photo.dataset.decision = category;
+
+  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const duration = reducedMotion ? 120 : 260;
+  const movement = reducedMotion ? 0 : 1;
+  const photoAnimation = photo.animate([
+    { transform: 'translate3d(0, 0, 0) scale(1)', opacity: 1 },
+    { transform: `translate3d(${x * 24 * movement}px, ${y * 24 * movement}px, 0) scale(.96)`, opacity: .2 },
+  ], { duration, easing: 'cubic-bezier(.2, .7, .3, 1)', fill: 'forwards' });
+  const flashAnimation = flash.animate([
+    { opacity: 0 },
+    { opacity: .88, offset: .22 },
+    { opacity: 0 },
+  ], { duration, easing: 'ease-out' });
+  return Promise.all([
+    photoAnimation.finished.catch(() => {}),
+    flashAnimation.finished.catch(() => {}),
+  ]).then(() => flash.remove());
 }
 
 function renderGrid() {
@@ -918,10 +955,13 @@ async function showAuthentication() {
 async function decide(category, item = state.items[state.index]) {
   if (!item || state.busy || !state.lockReady || state.lockedItemId !== item.id) return;
   state.busy = true;
+  setDecisionButtons(false);
+  const animation = animateDecision(category);
   try {
     await request(`/api/media/${encodeURIComponent(item.id)}/decision`, {
       method: 'PUT', body: JSON.stringify({ category }),
     });
+    await animation;
     setStatus(`Saved ${category === 'unseen' ? 'unseen' : category} decision.`);
     const staysInQueue = state.category === 'all' || state.category === category;
     state.items = state.items.filter((candidate) => candidate.id !== item.id || staysInQueue);
@@ -938,9 +978,12 @@ async function decide(category, item = state.items[state.index]) {
       renderGrid();
     }
   } catch (error) {
+    await animation;
+    renderCurrent();
     setStatus(error.message, true);
   } finally {
     state.busy = false;
+    setDecisionButtons(state.lockReady && state.lockedItemId === state.items[state.index]?.id);
   }
 }
 

@@ -336,6 +336,12 @@ test('mobile layout preserves explicit actions and maps a right swipe to keep', 
     await expect(page.locator('.decision-actions [data-decision="keep"]')).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth))
       .toBeLessThanOrEqual(await page.evaluate(() => window.innerWidth));
+    await page.locator('.decision-actions [data-decision="delete"]').click();
+    await expect(page.locator('#current-media .decision-flash')).toHaveAttribute('data-category', 'delete');
+    await expect(page.locator('#current-media .decision-flash')).toHaveText('Delete');
+    await expect.poll(() => fixture.app.db.prepare("SELECT COUNT(*) AS count FROM media WHERE category = 'delete'").get().count)
+      .toBe(1);
+    await expect(page.locator('.decision-actions [data-decision="keep"]')).toBeEnabled();
     await page.evaluate(() => {
       const target = document.getElementById('current-media');
       const touch = (clientX) => new Touch({
@@ -348,9 +354,11 @@ test('mobile layout preserves explicit actions and maps a right swipe to keep', 
         bubbles: true, changedTouches: [touch(190)], touches: [],
       }));
     });
+    await expect(page.locator('#current-media .decision-flash')).toHaveAttribute('data-category', 'keep');
+    await expect(page.locator('#current-media .decision-flash')).toHaveText('Keep');
     await expect.poll(() => fixture.app.db.prepare("SELECT COUNT(*) AS count FROM media WHERE category = 'keep'").get().count)
       .toBe(1);
-    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '02-green.png');
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '03-blue.png');
   } finally {
     await context.close();
   }

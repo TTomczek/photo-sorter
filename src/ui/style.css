@@ -49,10 +49,16 @@ button.keep { background: #1d7542; }
 .review { text-align: center; }
 .review-heading { text-align: left; }
 .current-media { min-height: 230px; max-height: min(60vh, 620px); display: grid; place-items: center; overflow: hidden; background: #101418; color: white; border-radius: .55rem; }
+.current-photo { position: relative; display: grid; place-items: center; width: 100%; min-height: inherit; }
 .current-media img, .current-media video { max-width: 100%; max-height: min(60vh, 620px); object-fit: contain; }
 .current-media img { transform-origin: center; touch-action: none; user-select: none; }
 .current-media img.zoomable { cursor: grab; }
 .current-media img.zoomable:active { cursor: grabbing; }
+.decision-flash { position: absolute; inset: 0; display: grid; place-items: center; color: #fff; font-size: clamp(1.5rem, 5vw, 3rem); font-weight: 750; text-shadow: 0 2px 8px #0008; pointer-events: none; }
+.decision-flash[data-category="delete"] { background: #b52c2ccc; }
+.decision-flash[data-category="keep"] { background: #1d7542cc; }
+.decision-flash[data-category="unsure"] { background: #9a6700cc; }
+.decision-flash[data-category="unseen"] { background: #205fbdcc; }
 .zoom-controls { display: flex; justify-content: center; gap: .5rem; margin-top: .55rem; }
 .zoom-controls button { min-width: 2.8rem; }
 .placeholder { padding: 2rem; }
