@@ -332,6 +332,70 @@ function element(tag, text, className) {
   return node;
 }
 
+function auditFieldLabel(key) {
+  const labels = {
+    batchId: 'Batch ID',
+    collectionId: 'Collection ID',
+    credentialId: 'Credential ID',
+    mediaId: 'Media ID',
+    readOnly: 'Read only',
+    retryInMs: 'Retry in ms',
+    rootId: 'Root ID',
+  };
+  return labels[key] || key.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/^./, (character) => character.toUpperCase());
+}
+
+function appendLazyJson(disclosure, value) {
+  disclosure.addEventListener('toggle', () => {
+    if (!disclosure.open || disclosure.dataset.loaded) return;
+    disclosure.append(element('pre', JSON.stringify(value, null, 2)));
+    disclosure.dataset.loaded = 'true';
+  });
+}
+
+function renderAuditDetails(details) {
+  const content = element('div', undefined, 'audit-details');
+  if (!details || typeof details !== 'object' || Array.isArray(details)) {
+    content.append(element('p', String(details ?? '')));
+    return content;
+  }
+
+  const fields = element('dl', undefined, 'audit-fields');
+  for (const [key, value] of Object.entries(details)) {
+    const term = element('dt', auditFieldLabel(key));
+    const description = element('dd');
+    if (value && typeof value === 'object') {
+      const disclosure = element('details', undefined, 'audit-nested-details');
+      const count = Array.isArray(value) ? ` (${value.length})` : '';
+      disclosure.append(element('summary', `${auditFieldLabel(key)}${count}`));
+      appendLazyJson(disclosure, value);
+      description.append(disclosure);
+    } else {
+      description.textContent = value === null ? 'None' : String(value);
+    }
+    fields.append(term, description);
+  }
+  content.append(fields);
+
+  const raw = element('details', undefined, 'audit-raw-details');
+  raw.append(element('summary', 'Raw JSON'));
+  appendLazyJson(raw, details);
+  content.append(raw);
+  return content;
+}
+
+function renderAuditEvents(events) {
+  const list = byId('audit-list');
+  list.replaceChildren();
+  for (const event of events) {
+    const entry = element('li', undefined, 'audit-entry');
+    entry.append(element('p', `${event.created_at} · ${event.action}`, 'audit-heading'));
+    entry.append(renderAuditDetails(event.details));
+    list.append(entry);
+  }
+}
+
 function formatBytes(size) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
@@ -1115,14 +1179,7 @@ byId('redo-decision').addEventListener('click', () => changeDecisionHistory('red
 byId('audit').addEventListener('click', async () => {
   try {
     const { events } = await request('/api/audit');
-    const list = byId('audit-list');
-    list.replaceChildren();
-    for (const event of events) {
-      const details = element('pre', JSON.stringify(event.details));
-      const entry = element('li', `${event.created_at} · ${event.action}`);
-      entry.append(details);
-      list.append(entry);
-    }
+    renderAuditEvents(events);
     byId('audit-panel').classList.toggle('hidden');
   } catch (error) { setStatus(error.message, true); }
 });
@@ -1148,13 +1205,7 @@ byId('clear-audit').addEventListener('click', async () => {
     const result = await request('/api/audit', { method: 'DELETE', body: '{}' });
     setStatus(`Cleared ${result.clearedCount} audit event(s).`);
     const { events } = await request('/api/audit');
-    const list = byId('audit-list');
-    list.replaceChildren();
-    for (const event of events) {
-      const entry = element('li', `${event.created_at} · ${event.action}`);
-      entry.append(element('pre', JSON.stringify(event.details)));
-      list.append(entry);
-    }
+    renderAuditEvents(events);
   } catch (error) {
     setStatus(error.message, true);
   }

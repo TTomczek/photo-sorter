@@ -73,6 +73,17 @@ dialog { width: min(92vw, 620px); border: 0; border-radius: .8rem; padding: 1.2r
 dialog::backdrop { background: #0008; }
 dialog menu { display: flex; justify-content: flex-end; gap: .5rem; padding: 0; }
 code { overflow-wrap: anywhere; }
+#audit-panel { min-width: 0; }
+#audit-list { max-height: 55vh; overflow: auto; padding-inline-start: 2rem; }
+.audit-entry { padding: .55rem .65rem; border-bottom: 1px solid #d7dce1; }
+.audit-entry:last-child { border-bottom: 0; }
+.audit-heading { margin: 0 0 .4rem; font-weight: 650; }
+.audit-fields { display: grid; grid-template-columns: minmax(7rem, max-content) minmax(0, 1fr); gap: .25rem .75rem; margin: 0; }
+.audit-fields dt { font-weight: 600; color: #5b6570; }
+.audit-fields dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.audit-raw-details, .audit-nested-details { margin-top: .45rem; }
+.audit-raw-details summary, .audit-nested-details summary { color: #205fbd; cursor: pointer; }
+.audit-entry pre { max-height: 16rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 600px) {
   body { padding: .6rem; }
   .panel { padding: .75rem; }
@@ -83,6 +94,8 @@ code { overflow-wrap: anywhere; }
   #settings-form > button, #autostart-setting { grid-column: auto; }
   .decision-actions button { flex: 1; padding-inline: .4rem; }
   .media-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .audit-fields { grid-template-columns: 1fr; gap: .1rem; }
+  .audit-fields dd { margin-bottom: .35rem; }
 }
 :root[data-grid-columns="auto"] .media-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
 :root[data-grid-columns="2"] .media-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -100,6 +113,8 @@ code { overflow-wrap: anywhere; }
   :root[data-theme="system"] .warning { background: #4b3d19; color: #ffe6a1; }
   :root[data-theme="system"] .lan { background: #1c3047; }
   :root[data-theme="system"] .media-card { border-color: #414a53; }
+  :root[data-theme="system"] .audit-entry { border-color: #414a53; }
+  :root[data-theme="system"] .audit-fields dt { color: #b3bdc7; }
 }
 :root[data-theme="dark"] {
   color: #edf0f3;
@@ -114,3 +129,5 @@ code { overflow-wrap: anywhere; }
 :root[data-theme="dark"] .warning { background: #4b3d19; color: #ffe6a1; }
 :root[data-theme="dark"] .lan { background: #1c3047; }
 :root[data-theme="dark"] .media-card { border-color: #414a53; }
+:root[data-theme="dark"] .audit-entry { border-color: #414a53; }
+:root[data-theme="dark"] .audit-fields dt { color: #b3bdc7; }

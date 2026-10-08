@@ -434,6 +434,15 @@ test('settings, German localization, theme/grid preferences, device state, colle
     await page.locator('#audit').click();
     await expect(page.locator('#audit-panel')).toBeVisible();
     await expect(page.locator('#audit-list')).toContainText('Entscheidung geändert');
+    const decisionAuditEntry = page.locator('#audit-list .audit-entry')
+      .filter({ hasText: 'Entscheidung geändert' }).first();
+    await expect(decisionAuditEntry.locator('.audit-fields')).toContainText('Medien-ID');
+    await expect(page.locator('#audit-list')).toHaveCSS('overflow-y', 'auto');
+    const rawAuditDetails = decisionAuditEntry.locator('.audit-raw-details');
+    await expect(rawAuditDetails.locator('summary')).toHaveText('Rohdaten (JSON)');
+    await expect(rawAuditDetails).not.toHaveAttribute('open', '');
+    await rawAuditDetails.locator('summary').click();
+    await expect(rawAuditDetails.locator('pre')).toContainText('"mediaId"');
     const [download] = await Promise.all([
       page.waitForEvent('download'),
       page.locator('#export-audit').click(),
