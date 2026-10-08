@@ -98,7 +98,7 @@ async function closeFixture(current) {
   await fs.rm(current.temporary, { recursive: true, force: true });
 }
 
-async function setupAccount(page) {
+async function setupAccount(page, { keepFullscreen = false, expectedCategory = 'Unseen items' } = {}) {
   await page.goto(fixture.origin);
   await expect(page.locator('#auth-title')).toHaveText('Waiting for host setup');
   await expect(page.locator('#auth-form')).toBeHidden();
@@ -110,8 +110,14 @@ async function setupAccount(page) {
   await page.locator('#password').fill(PASSWORD);
   await page.locator('#auth-submit').click();
   await expect(page.locator('#app-panel')).toBeVisible();
-  await expect(page.locator('#collection-title')).toHaveText('Unseen items');
+  await expect(page.locator('#collection-title')).toHaveText(expectedCategory);
+  await expect.poll(() => fixture.app.db.prepare(
+    "SELECT COUNT(*) AS count FROM scan_jobs WHERE status IN ('queued', 'running')",
+  ).get().count).toBe(0);
   await expect(page.locator('#current-media img')).toHaveJSProperty('naturalWidth', 96);
+  if (!keepFullscreen && await page.locator('#fullscreen-toggle').getAttribute('aria-pressed') === 'true') {
+    await page.locator('#fullscreen-toggle').click();
+  }
 }
 
 async function api(page, route, options = {}) {
@@ -170,11 +176,15 @@ test('first-run setup, generated previews, clear-to-unseen, keyboard and safe ap
     await page.locator('#auth-submit').click();
 
     await expect(page.locator('#app-panel')).toBeVisible();
+    await expect.poll(() => fixture.app.db.prepare(
+      "SELECT COUNT(*) AS count FROM scan_jobs WHERE status IN ('queued', 'running')",
+    ).get().count).toBe(0);
     await expect(page.locator('#add-root')).toBeEnabled();
     await expect(page.locator('#filters [data-category="unseen"]')).toHaveAttribute('aria-pressed', 'true');
     await expect(page.locator('#filters [data-category="unseen"]')).toHaveCSS('box-shadow', /inset/);
     await expect(page.locator('#current-media img')).toHaveAttribute('alt', '01-red.png');
     await expect(page.locator('#current-media img')).toHaveJSProperty('naturalWidth', 96);
+    await page.locator('#fullscreen-toggle').click();
     await expect(page.locator('#redo-decision')).toHaveCount(0);
     await expect.poll(() => fixture.app.db.prepare('SELECT COUNT(*) AS count FROM preview_cache').get().count)
       .toBeGreaterThan(0);
@@ -276,11 +286,60 @@ test('first-run setup, generated previews, clear-to-unseen, keyboard and safe ap
   }
 });
 
+test('automatically opens fullscreen categorizing and supports manual entry and exit', async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await setupAccount(page, { keepFullscreen: true });
+    const review = page.locator('#review');
+    const toggle = page.locator('#fullscreen-toggle');
+    await expect(review).toHaveClass(/fullscreen-review/);
+    await expect(toggle).toHaveText('Exit fullscreen');
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    const reviewBox = await review.boundingBox();
+    const viewport = page.viewportSize();
+    expect(reviewBox).toMatchObject({ x: 0, y: 0, width: viewport.width, height: viewport.height });
+    await expect(page.locator('#current-media img')).toHaveCSS('width', `${viewport.width}px`);
+
+    await toggle.click();
+    await expect(review).not.toHaveClass(/fullscreen-review/);
+    await expect(toggle).toHaveText('Enter fullscreen');
+    await toggle.click();
+    await expect(review).toHaveClass(/fullscreen-review/);
+    await page.keyboard.press('Escape');
+    await expect(review).not.toHaveClass(/fullscreen-review/);
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  } finally {
+    await context.close();
+  }
+});
+
+test('automatically opens directly on unsure items when no unseen items remain', async () => {
+  await expect.poll(() => fixture.app.db.prepare(
+    "SELECT COUNT(*) AS count FROM scan_jobs WHERE status IN ('queued', 'running')",
+  ).get().count).toBe(0);
+  const items = fixture.app.listMedia({
+    collectionId: fixture.collectionId, category: 'unseen', sort: 'filename',
+  }).items;
+  for (const [index, item] of items.entries()) {
+    fixture.app.setDecision(item.id, index === 0 ? 'unsure' : 'keep');
+  }
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await setupAccount(page, { keepFullscreen: true, expectedCategory: 'Unsure items' });
+    await expect(page.locator('#review')).toHaveClass(/fullscreen-review/);
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '01-red.png');
+  } finally {
+    await context.close();
+  }
+});
+
 test('finishing unseen review advances to unsure and offers category application', async () => {
   const context = await browser.newContext();
   const page = await context.newPage();
   try {
-    await setupAccount(page);
+    await setupAccount(page, { keepFullscreen: true });
     await expect.poll(() => fixture.app.db.prepare(
       "SELECT COUNT(*) AS count FROM scan_jobs WHERE status IN ('queued', 'running')",
     ).get().count).toBe(0);
@@ -301,6 +360,7 @@ test('finishing unseen review advances to unsure and offers category application
     await expect(page.locator('#dialog-title')).toHaveText('Classification complete');
     await expect(page.locator('#dialog-content')).toContainText('All unseen and unsure items have been processed');
     await expect(page.locator('#dialog-confirm')).toHaveText('Review and apply moves');
+    await expect(page.locator('#review')).not.toHaveClass(/fullscreen-review/);
 
     await page.locator('#confirm-dialog [value="cancel"]').click();
     await expect(fs.readFile(path.join(fixture.root, '99-unplayable.mp4'))).resolves.toBeTruthy();
@@ -441,6 +501,9 @@ test('settings, German localization, theme/grid preferences, device state, colle
     await page.locator('#password').fill(PASSWORD);
     await page.locator('#auth-submit').click();
     await expect(page.locator('#app-panel')).toBeVisible();
+    if (await page.locator('#fullscreen-toggle').getAttribute('aria-pressed') === 'true') {
+      await page.locator('#fullscreen-toggle').click();
+    }
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
     await expect(page.locator('html')).toHaveAttribute('data-grid-columns', '4');
     await expect(page.locator('#language')).toHaveValue('de');
@@ -452,12 +515,16 @@ test('settings, German localization, theme/grid preferences, device state, colle
     await expect(page.locator('#confirm-dialog')).toBeVisible();
     await page.locator('#dialog-confirm').click();
     await expect(page.locator('#collection option')).toHaveCount(1);
+    await expect(page.locator('#review')).toHaveClass(/fullscreen-review/);
+    await page.locator('#fullscreen-toggle').click();
     await page.locator('#archived-collections summary').click();
     await expect(page.locator('#archived-list')).toContainText('Second collection');
     await page.locator('#archived-list button').click();
     await expect(page.locator('#collection option')).toHaveCount(2);
 
     await page.locator('#collection').selectOption(fixture.collectionId);
+    await expect(page.locator('#review')).toHaveClass(/fullscreen-review/);
+    await page.locator('#fullscreen-toggle').click();
     await expect(page.locator('.decision-actions [data-decision="keep"]')).toBeEnabled();
     await page.locator('.decision-actions [data-decision="keep"]').click();
     await expect.poll(() => fixture.app.db.prepare("SELECT COUNT(*) AS count FROM media WHERE category = 'keep'").get().count)
@@ -474,6 +541,8 @@ test('settings, German localization, theme/grid preferences, device state, colle
     await page.locator('#password').fill(PASSWORD);
     await page.locator('#auth-submit').click();
     await expect(page.locator('#app-panel')).toBeVisible();
+    await expect(page.locator('#review')).toHaveClass(/fullscreen-review/);
+    await page.locator('#fullscreen-toggle').click();
     await expect(page.locator('#root-list')).toContainText(fixture.root);
 
     await page.locator('#audit').click();

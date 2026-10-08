@@ -62,10 +62,11 @@
           <button type="button" data-category="delete" aria-pressed="false">Delete</button>
           <button type="button" data-category="unsure" aria-pressed="false">Unsure</button>
         </nav>
-        <section class="review panel" aria-live="polite">
+        <section id="review" class="review panel" aria-live="polite">
           <div class="review-heading">
             <h2 id="collection-title">Review</h2>
             <span id="item-count"></span>
+            <button id="fullscreen-toggle" type="button" aria-pressed="false">Enter fullscreen</button>
           </div>
           <div id="current-media" class="current-media"></div>
           <div id="zoom-controls" class="zoom-controls hidden" aria-label="Image zoom controls">
@@ -166,7 +167,7 @@
           <summary>Quick help and safety</summary>
           <ul>
             <li>Use ←/swipe left for Delete, →/swipe right for Keep, and ↓/swipe down for Unsure. These actions only save a decision; they never move or delete a file.</li>
-            <li>Use the zoom controls or pinch on an image to zoom; drag a zoomed image to pan. Scroll the collection grid to browse large libraries.</li>
+            <li>Use the zoom controls or pinch on an image to zoom; drag a zoomed image to pan. Scroll the collection grid to browse large libraries. Enter fullscreen to focus on categorizing; press Escape or use the close button to leave.</li>
             <li>Apply shows a move summary first, then requires a separate confirmation. Delete-category files move into a <code>deleted</code> folder; nothing is permanently deleted.</li>
             <li>Restore moves the latest apply batch back when the original paths are free. Conflicts are never overwritten.</li>
             <li>Unsupported image/video previews can still be categorized. Video playback depends on codecs available in your operating system.</li>

@@ -47,6 +47,8 @@
     'delete': 'löschen',
     'unsure': 'unsicher',
     'Review': 'Überprüfung',
+    'Enter fullscreen': 'Vollbild öffnen',
+    'Exit fullscreen': 'Vollbild schließen',
     'Image zoom controls': 'Bildzoom-Steuerung',
     'Zoom out': 'Verkleinern',
     'Reset zoom': 'Zoom zurücksetzen',
@@ -83,6 +85,8 @@
       '←/nach links wischen bedeutet Löschen, →/nach rechts wischen bedeutet Behalten und ↓/nach unten wischen bedeutet Unsicher. Diese Aktionen speichern nur eine Entscheidung und verschieben oder löschen keine Datei.',
     'Use the zoom controls or pinch on an image to zoom; drag a zoomed image to pan. Scroll the collection grid to browse large libraries.':
       'Verwende die Zoom-Steuerung oder ziehe zwei Finger auf einem Bild auseinander, um es zu vergrößern. Ziehe ein vergrößertes Bild zum Verschieben. Scrolle im Sammlungsraster, um große Bibliotheken zu durchsuchen.',
+    'Use the zoom controls or pinch on an image to zoom; drag a zoomed image to pan. Scroll the collection grid to browse large libraries. Enter fullscreen to focus on categorizing; press Escape or use the close button to leave.':
+      'Verwende die Zoom-Steuerung oder ziehe zwei Finger auf einem Bild auseinander, um es zu vergrößern. Ziehe ein vergrößertes Bild zum Verschieben. Scrolle im Sammlungsraster, um große Bibliotheken zu durchsuchen. Öffne den Vollbildmodus zum Kategorisieren; drücke Escape oder verwende die Schließen-Schaltfläche, um ihn zu verlassen.',
     'Apply shows a move summary first, then requires a separate confirmation. Delete-category files move into a':
       'Vor dem Anwenden wird eine Zusammenfassung angezeigt und eine separate Bestätigung verlangt. Dateien der Kategorie „Löschen“ werden in den Ordner',
     'folder; nothing is permanently deleted.': 'verschoben; nichts wird endgültig gelöscht.',

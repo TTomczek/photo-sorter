@@ -25,6 +25,8 @@ const state = {
   mediaRequestId: 0,
   classificationPending: false,
   classificationTransitioning: false,
+  fullscreen: false,
+  autoCategorizeCollectionId: '',
 };
 const byId = (id) => document.getElementById(id);
 const mediaGrid = byId('media-grid');
@@ -62,6 +64,16 @@ function applyVisualPreferences() {
   document.documentElement.dataset.gridColumns = validColumns;
   byId('theme').value = validTheme;
   byId('grid-columns').value = validColumns;
+}
+
+function setFullscreenMode(active, userInitiated = false) {
+  state.fullscreen = active;
+  if (userInitiated && !active) state.autoCategorizeCollectionId = '';
+  byId('review').classList.toggle('fullscreen-review', active);
+  document.body.classList.toggle('fullscreen-review-active', active);
+  const button = byId('fullscreen-toggle');
+  button.textContent = active ? 'Exit fullscreen' : 'Enter fullscreen';
+  button.setAttribute('aria-pressed', String(active));
 }
 
 function setZoom(scale) {
@@ -184,6 +196,7 @@ async function refreshScans() {
       const current = state.items[state.index];
       state.restoreMediaId = current?.id || '';
       await loadMedia();
+      await maybeStartAutomaticCategorizing();
     } else if (scans.some((scan) => scan.status === 'failed')) {
       const failed = scans.filter((scan) => scan.status === 'failed');
       setStatus(`${failed.length} folder scan(s) failed: ${failed[0].error}`, true);
@@ -466,6 +479,7 @@ function renderCurrent() {
   container.replaceChildren();
   byId('zoom-controls').classList.add('hidden');
   const item = state.items[state.index];
+  byId('fullscreen-toggle').disabled = !item;
   if (!item) {
     container.append(element('div', state.total ? 'Loading items…'
       : state.category === 'all' ? 'No items in this collection.' : 'No items in this category.'));
@@ -578,6 +592,24 @@ async function loadMedia() {
   renderGrid();
 }
 
+async function maybeStartAutomaticCategorizing() {
+  const collectionId = state.autoCategorizeCollectionId;
+  if (!collectionId || state.collectionId !== collectionId) return;
+  const encodedCollectionId = encodeURIComponent(collectionId);
+  const [unseen, unsure] = await Promise.all(['unseen', 'unsure'].map((category) => request(
+    `/api/media?collectionId=${encodedCollectionId}&category=${category}&sort=${state.sort}&offset=0&limit=1`,
+  )));
+  if (state.collectionId !== collectionId || state.autoCategorizeCollectionId !== collectionId) return;
+  if (unseen.total === 0 && unsure.total === 0) return;
+  state.classificationPending = false;
+  activateCategory(unseen.total > 0 ? 'unseen' : 'unsure');
+  state.restoreMediaId = '';
+  await loadMedia();
+  if (state.collectionId !== collectionId || state.autoCategorizeCollectionId !== collectionId) return;
+  state.autoCategorizeCollectionId = '';
+  setFullscreenMode(true);
+}
+
 function handleGridScroll() {
   if (!state.total || state.busy) return;
   const { columns, rowHeight } = gridMetrics();
@@ -686,6 +718,8 @@ async function loadCollections(preferredId) {
   if (!result.collections.length) {
     state.classificationPending = false;
     state.collectionId = '';
+    state.autoCategorizeCollectionId = '';
+    setFullscreenMode(false);
     byId('archive-collection').disabled = true;
     byId('root-list').replaceChildren();
     setStatus('Create a collection, then choose a folder from the host desktop app.');
@@ -695,7 +729,12 @@ async function loadCollections(preferredId) {
   }
   state.collectionId = lastUsed && result.collections.some((item) => item.id === lastUsed)
     ? lastUsed : result.collections[0].id;
-  if (state.collectionId !== previousCollectionId) state.classificationPending = false;
+  const collectionChanged = state.collectionId !== previousCollectionId;
+  if (collectionChanged) {
+    state.classificationPending = false;
+    state.autoCategorizeCollectionId = state.collectionId;
+    setFullscreenMode(false);
+  }
   state.offset = 0;
   state.index = 0;
   select.value = state.collectionId;
@@ -730,6 +769,7 @@ async function loadCollections(preferredId) {
   setStatus(collection.offline_roots ? `${collection.offline_roots} root(s) are currently offline.` : '');
   await Promise.all([loadRootManagement(), loadArchivedCollections()]);
   await loadMedia();
+  if (collectionChanged) await maybeStartAutomaticCategorizing();
   if (state.total === 0 && ['unseen', 'unsure'].includes(state.category)) {
     state.classificationPending = true;
     await continueClassification();
@@ -1084,6 +1124,7 @@ async function continueClassification() {
 
     if (unseen.total === 0 && unsure.total === 0 && all.total > 0) {
       state.classificationPending = false;
+      setFullscreenMode(false);
       const choice = await showDialog('Classification complete', [
         'All unseen and unsure items have been processed. Review and apply your categories now?',
       ], { confirmLabel: 'Review and apply moves' });
@@ -1265,6 +1306,9 @@ byId('filters').addEventListener('click', async (event) => {
 });
 byId('previous').addEventListener('click', () => moveSelection(-1));
 byId('next').addEventListener('click', () => moveSelection(1));
+byId('fullscreen-toggle').addEventListener('click', () => {
+  setFullscreenMode(!state.fullscreen, true);
+});
 document.querySelectorAll('[data-decision]').forEach((button) => {
   button.addEventListener('click', () => decide(button.dataset.decision));
 });
@@ -1352,7 +1396,12 @@ setInterval(async () => {
   }
 }, 20_000);
 document.addEventListener('keydown', (event) => {
-  if (event.target.matches('input, textarea, select') || byId('app-panel').classList.contains('hidden')) return;
+  if (byId('app-panel').classList.contains('hidden')) return;
+  if (event.key === 'Escape' && state.fullscreen) {
+    setFullscreenMode(false, true);
+    return;
+  }
+  if (event.target.matches('input, textarea, select')) return;
   if (event.key === 'ArrowLeft') decide('delete');
   if (event.key === 'ArrowRight') decide('keep');
   if (event.key === 'ArrowDown') decide('unsure');
