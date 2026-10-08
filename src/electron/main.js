@@ -84,7 +84,6 @@ async function createWindow() {
   }
   await window.loadURL(`http://127.0.0.1:${serverPort}${development ? '/?dev=1' : ''}`);
   if (development) {
-    window.webContents.openDevTools();
     uiWatcher = watch(path.join(__dirname, '..', 'ui'), { recursive: true }, () => {
       clearTimeout(reloadTimer);
       reloadTimer = setTimeout(() => {
