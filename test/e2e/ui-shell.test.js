@@ -22,6 +22,15 @@ test('serves PWA shell assets with installable manifest and safe worker scope', 
   assert.match(pageHtml, /\/i18n\.js/);
   assert.match(pageHtml, /id="media-viewport"/);
   assert.match(pageHtml, /id="zoom-controls"/);
+  const primaryPanelOrder = [
+    'class="toolbar panel"',
+    'class="review panel"',
+    'class="panel grid-section"',
+    'id="settings-panel"',
+  ].map((marker) => pageHtml.indexOf(marker));
+  assert.ok(primaryPanelOrder.every((position, index) => (
+    position >= 0 && (index === 0 || position > primaryPanelOrder[index - 1])
+  )));
 
   const manifestResponse = await fetch(`${origin}/manifest.webmanifest`);
   assert.equal(manifestResponse.headers.get('content-type'), 'application/manifest+json; charset=utf-8');

@@ -55,6 +55,55 @@
           <button id="add-root" type="button" class="hidden" disabled>Choose folder</button>
           <button id="archive-collection" type="button">Archive collection</button>
         </div>
+        <nav id="filters" class="filters" aria-label="Media category">
+          <button type="button" data-category="unseen" aria-pressed="true">Unseen</button>
+          <button type="button" data-category="keep" aria-pressed="false">Keep</button>
+          <button type="button" data-category="delete" aria-pressed="false">Delete</button>
+          <button type="button" data-category="unsure" aria-pressed="false">Unsure</button>
+        </nav>
+        <section class="review panel" aria-live="polite">
+          <div class="review-heading">
+            <h2 id="collection-title">Review</h2>
+            <span id="item-count"></span>
+          </div>
+          <div id="current-media" class="current-media"></div>
+          <div id="zoom-controls" class="zoom-controls hidden" aria-label="Image zoom controls">
+            <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+            <button id="zoom-reset" type="button">Reset zoom</button>
+            <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+          </div>
+          <div class="decision-actions">
+            <button type="button" data-decision="delete" class="delete">← Delete</button>
+            <button type="button" data-decision="unsure" class="unsure">↓ Unsure</button>
+            <button type="button" data-decision="keep" class="keep">Keep →</button>
+          </div>
+          <div class="review-navigation">
+            <button type="button" id="previous">Previous</button>
+            <button type="button" id="next">Next</button>
+            <button type="button" id="undo-decision">Undo decision</button>
+            <button type="button" id="redo-decision">Redo decision</button>
+          </div>
+        </section>
+        <section class="panel grid-section">
+          <div class="section-heading">
+            <h2>Collection grid</h2>
+            <div>
+              <button id="rescan" type="button">Rescan roots</button>
+              <button id="apply" type="button">Review and apply moves</button>
+              <button id="restore" type="button">Restore latest apply</button>
+              <button id="audit" type="button">Audit log</button>
+            </div>
+          </div>
+          <p id="status" role="status"></p>
+          <div id="media-viewport" class="media-viewport">
+            <div id="media-virtual-space" aria-hidden="true"></div>
+            <div id="media-grid" class="media-grid"></div>
+          </div>
+        </section>
+        <div class="lan panel">
+          <strong>Connect a phone on this local network</strong>
+          <span id="lan-addresses">Loading local addresses…</span>
+        </div>
         <details id="settings-panel" class="panel">
           <summary>Settings</summary>
           <form id="settings-form">
@@ -107,55 +156,6 @@
           <summary>Archived collections</summary>
           <ul id="archived-list"></ul>
         </details>
-        <div class="lan panel">
-          <strong>Connect a phone on this local network</strong>
-          <span id="lan-addresses">Loading local addresses…</span>
-        </div>
-        <nav id="filters" class="filters" aria-label="Media category">
-          <button type="button" data-category="unseen" aria-pressed="true">Unseen</button>
-          <button type="button" data-category="keep" aria-pressed="false">Keep</button>
-          <button type="button" data-category="delete" aria-pressed="false">Delete</button>
-          <button type="button" data-category="unsure" aria-pressed="false">Unsure</button>
-        </nav>
-        <section class="review panel" aria-live="polite">
-          <div class="review-heading">
-            <h2 id="collection-title">Review</h2>
-            <span id="item-count"></span>
-          </div>
-          <div id="current-media" class="current-media"></div>
-          <div id="zoom-controls" class="zoom-controls hidden" aria-label="Image zoom controls">
-            <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
-            <button id="zoom-reset" type="button">Reset zoom</button>
-            <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
-          </div>
-          <div class="decision-actions">
-            <button type="button" data-decision="delete" class="delete">← Delete</button>
-            <button type="button" data-decision="unsure" class="unsure">↓ Unsure</button>
-            <button type="button" data-decision="keep" class="keep">Keep →</button>
-          </div>
-          <div class="review-navigation">
-            <button type="button" id="previous">Previous</button>
-            <button type="button" id="next">Next</button>
-            <button type="button" id="undo-decision">Undo decision</button>
-            <button type="button" id="redo-decision">Redo decision</button>
-          </div>
-        </section>
-        <section class="panel grid-section">
-          <div class="section-heading">
-            <h2>Collection grid</h2>
-            <div>
-              <button id="rescan" type="button">Rescan roots</button>
-              <button id="apply" type="button">Review and apply moves</button>
-              <button id="restore" type="button">Restore latest apply</button>
-              <button id="audit" type="button">Audit log</button>
-            </div>
-          </div>
-          <p id="status" role="status"></p>
-          <div id="media-viewport" class="media-viewport">
-            <div id="media-virtual-space" aria-hidden="true"></div>
-            <div id="media-grid" class="media-grid"></div>
-          </div>
-        </section>
         <section id="audit-panel" class="panel hidden">
           <h2>Audit log</h2>
           <button id="export-audit" type="button">Export audit log</button>
