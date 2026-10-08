@@ -28,6 +28,7 @@ This guide applies to all coding agents working on Photo Sorter. Use `docs/HANDO
 - Use unit tests for domain and file-safety logic, end-to-end tests for complete workflows, and browser tests for user-visible interactions where applicable.
 - For performance-sensitive changes, include a measured large-library check; preserve coverage for the 200,000-item target, virtualization, and bounded pagination.
 - Run the relevant existing test suites and keep them passing in CI.
+- Add Regression tests for any bugs that are fixed, and include a description of the failure in the test name or comments.
 
 ## Product and data safety
 
