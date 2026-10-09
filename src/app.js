@@ -21,6 +21,16 @@ const CATEGORIES = new Set(['keep', 'delete', 'unsure', 'unseen']);
 const REVIEW_CATEGORIES = new Set([...CATEGORIES, 'all', 'review']);
 const OUTPUT_MARKER = '.photo-sorter-output';
 const SORT_ORDERS = new Set(['capture-asc', 'capture-desc', 'filename', 'date-asc', 'date-desc']);
+const MAX_STORED_SCAN_ERRORS = 500;
+const RECURSIVE_WATCH_UNSUPPORTED = new Set([
+  'ERR_FEATURE_UNAVAILABLE_ON_PLATFORM',
+  'ERR_FS_WATCH_RECURSIVE_NOT_SUPPORTED',
+]);
+
+function isRecursiveWatchUnsupported(error) {
+  return RECURSIVE_WATCH_UNSUPPORTED.has(error.code)
+    || /recursive.{0,30}(not supported|unsupported)|(?:not supported|unsupported).{0,30}recursive/i.test(error.message);
+}
 
 function normalizeCaptureDate(metadata) {
   const value = metadata?.DateTimeOriginal || metadata?.CreateDate || metadata?.DateCreated;
@@ -118,10 +128,212 @@ async function moveWithoutOverwrite(source, destination) {
   await fs.unlink(source);
 }
 
+function hasColumn(db, table, columnName) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().some((column) => column.name === columnName);
+}
+
+function ensureColumn(db, table, columnName, definition) {
+  if (!hasColumn(db, table, columnName)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${columnName} ${definition}`);
+  }
+}
+
+function migrateDatabase(db) {
+  db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
+  const currentVersion = db.prepare('PRAGMA user_version').get().user_version;
+  const migrations = [
+    {
+      version: 1,
+      apply: () => db.exec(`
+        CREATE TABLE IF NOT EXISTS account (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          salt TEXT NOT NULL,
+          password_hash TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS collections (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS roots (
+          id TEXT PRIMARY KEY,
+          collection_id TEXT NOT NULL REFERENCES collections(id),
+          path TEXT NOT NULL,
+          online INTEGER NOT NULL DEFAULT 1,
+          read_only INTEGER NOT NULL DEFAULT 0,
+          active INTEGER NOT NULL DEFAULT 1,
+          UNIQUE(collection_id, path)
+        );
+        CREATE TABLE IF NOT EXISTS scan_jobs (
+          root_id TEXT PRIMARY KEY REFERENCES roots(id),
+          status TEXT NOT NULL,
+          visited INTEGER NOT NULL DEFAULT 0,
+          indexed INTEGER NOT NULL DEFAULT 0,
+          error TEXT,
+          started_at TEXT,
+          completed_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS media (
+          id TEXT PRIMARY KEY,
+          root_id TEXT NOT NULL REFERENCES roots(id),
+          relative_path TEXT NOT NULL,
+          size INTEGER NOT NULL,
+          modified_at INTEGER NOT NULL,
+          category TEXT,
+          unsure_reviewed_at INTEGER NOT NULL DEFAULT 0,
+          capture_at TEXT,
+          present INTEGER NOT NULL DEFAULT 1,
+          last_seen_scan TEXT,
+          UNIQUE(root_id, relative_path)
+        );
+        CREATE INDEX IF NOT EXISTS media_root_category ON media(root_id, category);
+        CREATE TABLE IF NOT EXISTS device_state (
+          device_id TEXT NOT NULL,
+          collection_id TEXT NOT NULL REFERENCES collections(id),
+          category TEXT NOT NULL DEFAULT 'unseen',
+          sort_order TEXT NOT NULL DEFAULT 'capture-asc',
+          media_id TEXT,
+          page_offset INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(device_id, collection_id)
+        );
+        CREATE TABLE IF NOT EXISTS media_locks (
+          media_id TEXT PRIMARY KEY REFERENCES media(id),
+          device_id TEXT NOT NULL,
+          expires_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS decision_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          media_id TEXT NOT NULL REFERENCES media(id),
+          device_id TEXT NOT NULL,
+          previous_category TEXT,
+          next_category TEXT,
+          undone INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS decision_history_device ON decision_history(device_id, id DESC);
+        CREATE TABLE IF NOT EXISTS device_preferences (
+          device_id TEXT NOT NULL,
+          preference_key TEXT NOT NULL,
+          preference_value TEXT NOT NULL,
+          PRIMARY KEY(device_id, preference_key)
+        );
+        CREATE TABLE IF NOT EXISTS app_settings (
+          setting_key TEXT PRIMARY KEY,
+          setting_value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS preview_cache (
+          cache_key TEXT PRIMARY KEY,
+          filename TEXT NOT NULL UNIQUE,
+          size INTEGER NOT NULL,
+          last_accessed INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          action TEXT NOT NULL,
+          details TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS apply_batches (
+          id TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS apply_operations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          batch_id TEXT NOT NULL REFERENCES apply_batches(id),
+          media_id TEXT NOT NULL,
+          root_id TEXT NOT NULL,
+          from_path TEXT NOT NULL,
+          to_path TEXT NOT NULL,
+          category TEXT NOT NULL,
+          status TEXT NOT NULL,
+          operation_type TEXT NOT NULL DEFAULT 'move',
+          reverses_operation_id INTEGER
+        );
+      `),
+    },
+    {
+      version: 2,
+      apply: () => {
+        ensureColumn(db, 'roots', 'active', 'INTEGER NOT NULL DEFAULT 1');
+        ensureColumn(db, 'media', 'capture_at', 'TEXT');
+        ensureColumn(db, 'media', 'unsure_reviewed_at', 'INTEGER NOT NULL DEFAULT 0');
+        ensureColumn(db, 'media', 'present', 'INTEGER NOT NULL DEFAULT 1');
+        ensureColumn(db, 'media', 'last_seen_scan', 'TEXT');
+        ensureColumn(db, 'apply_operations', 'operation_type', "TEXT NOT NULL DEFAULT 'move'");
+        ensureColumn(db, 'apply_operations', 'reverses_operation_id', 'INTEGER');
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS media_capture_order
+          ON media(root_id, category, COALESCE(julianday(capture_at), modified_at / 86400000.0 + 2440587.5),
+            modified_at, relative_path COLLATE NOCASE) WHERE present = 1;
+          CREATE INDEX IF NOT EXISTS media_modified_order
+          ON media(root_id, category, modified_at, relative_path COLLATE NOCASE) WHERE present = 1;
+          CREATE INDEX IF NOT EXISTS media_filename_order
+          ON media(root_id, category, relative_path COLLATE NOCASE) WHERE present = 1;
+          CREATE INDEX IF NOT EXISTS media_review_order
+          ON media(root_id, category, unsure_reviewed_at) WHERE present = 1;
+          INSERT OR IGNORE INTO app_settings(setting_key, setting_value) VALUES ('default_sort', 'capture-asc');
+          INSERT OR IGNORE INTO app_settings(setting_key, setting_value) VALUES ('preview_cache_limit_mb', '2048');
+        `);
+      },
+    },
+    {
+      version: 3,
+      apply: () => {
+        ensureColumn(db, 'media', 'kind', "TEXT NOT NULL DEFAULT 'image'");
+        ensureColumn(db, 'scan_jobs', 'error_count', 'INTEGER NOT NULL DEFAULT 0');
+        db.exec(`
+          UPDATE media SET kind = CASE
+            WHEN lower(relative_path) GLOB '*.3gp' OR lower(relative_path) GLOB '*.avi'
+              OR lower(relative_path) GLOB '*.m4v' OR lower(relative_path) GLOB '*.mkv'
+              OR lower(relative_path) GLOB '*.mov' OR lower(relative_path) GLOB '*.mp4'
+              OR lower(relative_path) GLOB '*.mpeg' OR lower(relative_path) GLOB '*.mpg'
+              OR lower(relative_path) GLOB '*.mts' OR lower(relative_path) GLOB '*.webm'
+              OR lower(relative_path) GLOB '*.wmv' THEN 'video' ELSE 'image' END;
+          CREATE TABLE IF NOT EXISTS scan_errors (
+            root_id TEXT NOT NULL REFERENCES roots(id),
+            path TEXT NOT NULL,
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(root_id, path)
+          );
+          CREATE INDEX IF NOT EXISTS media_kind_filter ON media(root_id, kind, category) WHERE present = 1;
+          CREATE INDEX IF NOT EXISTS media_path_search ON media(relative_path COLLATE NOCASE) WHERE present = 1;
+        `);
+      },
+    },
+  ];
+  if (currentVersion > migrations.at(-1).version) {
+    throw new Error(`Database schema version ${currentVersion} is newer than this application supports.`);
+  }
+
+  for (const migration of migrations) {
+    if (migration.version <= currentVersion) continue;
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      migration.apply();
+      db.exec(`PRAGMA user_version = ${migration.version}; COMMIT`);
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+}
+
 class PhotoSorter {
-  constructor({ dataDirectory = defaultDataDirectory(), uiDirectory = path.join(__dirname, 'ui') } = {}) {
+  constructor({
+    dataDirectory = defaultDataDirectory(),
+    uiDirectory = path.join(__dirname, 'ui'),
+    watchFactory = (rootPath, options, listener) => fsSync.watch(rootPath, options, listener),
+    scanFs = fs,
+    watchFallbackIntervalMs = 300_000,
+  } = {}) {
     this.dataDirectory = dataDirectory;
     this.uiDirectory = uiDirectory;
+    this.watchFactory = watchFactory;
+    this.scanFs = scanFs;
+    this.watchFallbackIntervalMs = watchFallbackIntervalMs;
     this.sessions = new Map();
     this.loginAttempts = new Map();
     this.passkeys = null;
@@ -133,6 +345,8 @@ class PhotoSorter {
     this.scanWaiters = new Map();
     this.maxConcurrentScans = 2;
     this.rootWatchers = new Map();
+    this.watchModes = new Map();
+    this.watchFallbackTimers = new Map();
     this.watchRetryTimers = new Map();
     this.watchRetryAttempts = new Map();
     this.scanDebounceTimers = new Map();
@@ -147,149 +361,7 @@ class PhotoSorter {
   async initialize() {
     await fs.mkdir(this.dataDirectory, { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path.join(this.dataDirectory, 'photo-sorter.sqlite'));
-    this.db.exec(`
-      PRAGMA foreign_keys = ON;
-      PRAGMA journal_mode = WAL;
-      CREATE TABLE IF NOT EXISTS account (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        salt TEXT NOT NULL,
-        password_hash TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS collections (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        active INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS roots (
-        id TEXT PRIMARY KEY,
-        collection_id TEXT NOT NULL REFERENCES collections(id),
-        path TEXT NOT NULL,
-        online INTEGER NOT NULL DEFAULT 1,
-        read_only INTEGER NOT NULL DEFAULT 0,
-        active INTEGER NOT NULL DEFAULT 1,
-        UNIQUE(collection_id, path)
-      );
-      CREATE TABLE IF NOT EXISTS scan_jobs (
-        root_id TEXT PRIMARY KEY REFERENCES roots(id),
-        status TEXT NOT NULL,
-        visited INTEGER NOT NULL DEFAULT 0,
-        indexed INTEGER NOT NULL DEFAULT 0,
-        error TEXT,
-        started_at TEXT,
-        completed_at TEXT
-      );
-      CREATE TABLE IF NOT EXISTS media (
-        id TEXT PRIMARY KEY,
-        root_id TEXT NOT NULL REFERENCES roots(id),
-        relative_path TEXT NOT NULL,
-        size INTEGER NOT NULL,
-        modified_at INTEGER NOT NULL,
-        category TEXT,
-        unsure_reviewed_at INTEGER NOT NULL DEFAULT 0,
-        capture_at TEXT,
-        present INTEGER NOT NULL DEFAULT 1,
-        last_seen_scan TEXT,
-        UNIQUE(root_id, relative_path)
-      );
-      CREATE INDEX IF NOT EXISTS media_root_category ON media(root_id, category);
-      CREATE TABLE IF NOT EXISTS device_state (
-        device_id TEXT NOT NULL,
-        collection_id TEXT NOT NULL REFERENCES collections(id),
-        category TEXT NOT NULL DEFAULT 'unseen',
-        sort_order TEXT NOT NULL DEFAULT 'capture-asc',
-        media_id TEXT,
-        page_offset INTEGER NOT NULL DEFAULT 0,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY(device_id, collection_id)
-      );
-      CREATE TABLE IF NOT EXISTS media_locks (
-        media_id TEXT PRIMARY KEY REFERENCES media(id),
-        device_id TEXT NOT NULL,
-        expires_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS decision_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        media_id TEXT NOT NULL REFERENCES media(id),
-        device_id TEXT NOT NULL,
-        previous_category TEXT,
-        next_category TEXT,
-        undone INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS decision_history_device ON decision_history(device_id, id DESC);
-      CREATE TABLE IF NOT EXISTS device_preferences (
-        device_id TEXT NOT NULL,
-        preference_key TEXT NOT NULL,
-        preference_value TEXT NOT NULL,
-        PRIMARY KEY(device_id, preference_key)
-      );
-      CREATE TABLE IF NOT EXISTS app_settings (
-        setting_key TEXT PRIMARY KEY,
-        setting_value TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS preview_cache (
-        cache_key TEXT PRIMARY KEY,
-        filename TEXT NOT NULL UNIQUE,
-        size INTEGER NOT NULL,
-        last_accessed INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS audit (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        action TEXT NOT NULL,
-        details TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS apply_batches (
-        id TEXT PRIMARY KEY,
-        created_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS apply_operations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        batch_id TEXT NOT NULL REFERENCES apply_batches(id),
-        media_id TEXT NOT NULL,
-        root_id TEXT NOT NULL,
-        from_path TEXT NOT NULL,
-        to_path TEXT NOT NULL,
-        category TEXT NOT NULL,
-        status TEXT NOT NULL,
-        operation_type TEXT NOT NULL DEFAULT 'move',
-        reverses_operation_id INTEGER
-      );
-    `);
-    const rootColumns = this.db.prepare('PRAGMA table_info(roots)').all().map((column) => column.name);
-    if (!rootColumns.includes('active')) this.db.exec('ALTER TABLE roots ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
-    const mediaColumns = this.db.prepare('PRAGMA table_info(media)').all().map((column) => column.name);
-    if (!mediaColumns.includes('capture_at')) this.db.exec('ALTER TABLE media ADD COLUMN capture_at TEXT');
-    if (!mediaColumns.includes('unsure_reviewed_at')) {
-      this.db.exec('ALTER TABLE media ADD COLUMN unsure_reviewed_at INTEGER NOT NULL DEFAULT 0');
-    }
-    if (!mediaColumns.includes('present')) this.db.exec('ALTER TABLE media ADD COLUMN present INTEGER NOT NULL DEFAULT 1');
-    if (!mediaColumns.includes('last_seen_scan')) this.db.exec('ALTER TABLE media ADD COLUMN last_seen_scan TEXT');
-    const operationColumns = this.db.prepare('PRAGMA table_info(apply_operations)').all().map((column) => column.name);
-    if (!operationColumns.includes('operation_type')) {
-      this.db.exec("ALTER TABLE apply_operations ADD COLUMN operation_type TEXT NOT NULL DEFAULT 'move'");
-    }
-    if (!operationColumns.includes('reverses_operation_id')) {
-      this.db.exec('ALTER TABLE apply_operations ADD COLUMN reverses_operation_id INTEGER');
-    }
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS media_capture_order
-      ON media(root_id, category, COALESCE(julianday(capture_at), modified_at / 86400000.0 + 2440587.5),
-        modified_at, relative_path COLLATE NOCASE) WHERE present = 1;
-      CREATE INDEX IF NOT EXISTS media_modified_order
-      ON media(root_id, category, modified_at, relative_path COLLATE NOCASE) WHERE present = 1;
-      CREATE INDEX IF NOT EXISTS media_filename_order
-      ON media(root_id, category, relative_path COLLATE NOCASE) WHERE present = 1;
-      CREATE INDEX IF NOT EXISTS media_review_order
-      ON media(root_id, category, unsure_reviewed_at) WHERE present = 1;
-    `);
-    this.db.prepare(`
-      INSERT OR IGNORE INTO app_settings(setting_key, setting_value) VALUES ('default_sort', 'capture-asc')
-    `).run();
-    this.db.prepare(`
-      INSERT OR IGNORE INTO app_settings(setting_key, setting_value) VALUES ('preview_cache_limit_mb', '2048')
-    `).run();
+    migrateDatabase(this.db);
     this.passkeys = new PasskeyService(this.db);
     await this.recoverApplyOperations();
     setImmediate(() => {
@@ -389,6 +461,9 @@ class PhotoSorter {
     this.eventStreams.clear();
     for (const watcher of this.rootWatchers.values()) watcher.close();
     this.rootWatchers.clear();
+    for (const timer of this.watchFallbackTimers.values()) clearInterval(timer);
+    this.watchFallbackTimers.clear();
+    this.watchModes.clear();
     for (const timer of this.watchRetryTimers.values()) clearTimeout(timer);
     this.watchRetryTimers.clear();
     this.watchRetryAttempts.clear();
@@ -534,26 +609,56 @@ class PhotoSorter {
   }
 
   watchRoot(rootId) {
-    if (this.closed || this.rootWatchers.has(rootId)) return;
+    if (this.closed || this.rootWatchers.has(rootId) || this.watchFallbackTimers.has(rootId)) return;
+    this.watchModes.set(rootId, { mode: 'starting', error: null });
     const root = this.db.prepare(`
       SELECT r.path FROM roots r JOIN collections c ON c.id = r.collection_id
       WHERE r.id = ? AND r.active = 1 AND c.active = 1
     `).get(rootId);
     if (!root) return;
     try {
-      const watcher = fsSync.watch(root.path, { recursive: true }, () => this.scheduleScan(rootId));
+      const watcher = this.watchFactory(root.path, { recursive: true }, () => this.scheduleScan(rootId));
       watcher.on('error', (error) => {
         watcher.close();
         if (this.rootWatchers.get(rootId) === watcher) this.rootWatchers.delete(rootId);
-        this.scheduleWatchRetry(rootId, root.path, error);
+        if (isRecursiveWatchUnsupported(error)) this.startWatchFallback(rootId, root.path, error);
+        else this.scheduleWatchRetry(rootId, root.path, error);
       });
       this.rootWatchers.set(rootId, watcher);
+      this.watchModes.set(rootId, { mode: 'recursive', error: null });
       clearTimeout(this.watchRetryTimers.get(rootId));
       this.watchRetryTimers.delete(rootId);
       this.watchRetryAttempts.delete(rootId);
+      this.log('watch_ready', { rootId, path: root.path, mode: 'recursive' });
     } catch (error) {
-      this.scheduleWatchRetry(rootId, root.path, error);
+      if (isRecursiveWatchUnsupported(error)) this.startWatchFallback(rootId, root.path, error);
+      else this.scheduleWatchRetry(rootId, root.path, error);
     }
+  }
+
+  startWatchFallback(rootId, rootPath, error) {
+    if (this.closed || this.watchFallbackTimers.has(rootId)) return;
+    const active = this.db?.prepare(`
+      SELECT r.id FROM roots r JOIN collections c ON c.id = r.collection_id
+      WHERE r.id = ? AND r.active = 1 AND c.active = 1
+    `).get(rootId);
+    if (!active) return;
+    clearTimeout(this.watchRetryTimers.get(rootId));
+    this.watchRetryTimers.delete(rootId);
+    this.watchModes.set(rootId, { mode: 'polling', error: error.message });
+    this.log('watch_fallback', {
+      rootId, path: rootPath, message: error.message, intervalMs: this.watchFallbackIntervalMs,
+    });
+    const timer = setInterval(() => {
+      if (this.closed) return;
+      try {
+        this.startScan(rootId);
+      } catch (scanError) {
+        this.log('watch_poll_error', { rootId, path: rootPath, message: scanError.message });
+      }
+    }, this.watchFallbackIntervalMs);
+    timer.unref?.();
+    this.watchFallbackTimers.set(rootId, timer);
   }
 
   scheduleWatchRetry(rootId, rootPath, error) {
@@ -566,6 +671,7 @@ class PhotoSorter {
     const attempt = (this.watchRetryAttempts.get(rootId) || 0) + 1;
     this.watchRetryAttempts.set(rootId, attempt);
     const delay = Math.min(60_000, 1_000 * (2 ** Math.min(attempt - 1, 6)));
+    this.watchModes.set(rootId, { mode: 'retrying', error: error.message, retryInMs: delay });
     this.log('watch_error', { rootId, path: rootPath, message: error.message, retryInMs: delay });
     const timer = setTimeout(() => {
       this.watchRetryTimers.delete(rootId);
@@ -596,6 +702,9 @@ class PhotoSorter {
     clearTimeout(this.watchRetryTimers.get(rootId));
     this.watchRetryTimers.delete(rootId);
     this.watchRetryAttempts.delete(rootId);
+    clearInterval(this.watchFallbackTimers.get(rootId));
+    this.watchFallbackTimers.delete(rootId);
+    this.watchModes.delete(rootId);
     clearTimeout(this.scanDebounceTimers.get(rootId));
     this.scanDebounceTimers.delete(rootId);
   }
@@ -937,12 +1046,22 @@ class PhotoSorter {
     return roots.map((root) => this.startScan(root.id));
   }
 
+  startRootScan(collectionId, rootId) {
+    const root = this.db.prepare(`
+      SELECT r.id FROM roots r JOIN collections c ON c.id = r.collection_id
+      WHERE r.id = ? AND r.collection_id = ? AND r.active = 1 AND c.active = 1
+    `).get(rootId, collectionId);
+    if (!root) throw new Error('Root not found in this collection.');
+    return this.startScan(rootId);
+  }
+
   listScanStatus(collectionId) {
     if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
       throw new Error('Collection not found.');
     }
     return this.db.prepare(`
       SELECT r.id AS rootId, r.path, r.online, s.status, s.visited, s.indexed, s.error,
+        s.error_count AS errorCount,
         s.started_at AS startedAt, s.completed_at AS completedAt
       FROM roots r LEFT JOIN scan_jobs s ON s.root_id = r.id
       WHERE r.collection_id = ? AND r.active = 1 ORDER BY r.path COLLATE NOCASE
@@ -951,6 +1070,12 @@ class PhotoSorter {
       status: scan.status || 'idle',
       visited: scan.visited || 0,
       indexed: scan.indexed || 0,
+      errorCount: scan.errorCount || 0,
+      watch: this.watchModes.get(scan.rootId) || { mode: 'starting', error: null },
+      errors: this.db.prepare(`
+        SELECT path, message FROM scan_errors WHERE root_id = ?
+        ORDER BY created_at DESC, path COLLATE NOCASE LIMIT 10
+      `).all(scan.rootId),
     }));
   }
 
@@ -958,36 +1083,49 @@ class PhotoSorter {
     const root = this.db.prepare('SELECT * FROM roots WHERE id = ? AND active = 1').get(rootId);
     if (!root) throw new Error('Root not found.');
     this.db.prepare(`
-      INSERT INTO scan_jobs(root_id, status, visited, indexed, started_at)
-      VALUES (?, 'running', 0, 0, ?)
+      INSERT INTO scan_jobs(root_id, status, visited, indexed, error_count, started_at)
+      VALUES (?, 'running', 0, 0, 0, ?)
       ON CONFLICT(root_id) DO UPDATE SET status = 'running', visited = 0, indexed = 0,
-        error = NULL, started_at = excluded.started_at, completed_at = NULL
+        error = NULL, error_count = 0, started_at = excluded.started_at, completed_at = NULL
     `).run(rootId, new Date().toISOString());
+    this.db.prepare('DELETE FROM scan_errors WHERE root_id = ?').run(rootId);
     this.log('scan_started', { rootId, path: root.path });
     let base;
     try {
-      base = await fs.realpath(root.path);
+      base = await this.scanFs.realpath(root.path);
       if (!comparePaths(base, root.path)) throw new Error('Registered root no longer resolves to its original directory.');
       const directories = [base];
       const upsert = this.db.prepare(`
-        INSERT INTO media(id, root_id, relative_path, size, modified_at, category, capture_at, present, last_seen_scan)
-        VALUES (?, ?, ?, ?, ?, NULL, ?, 1, ?)
+        INSERT INTO media(id, root_id, relative_path, size, modified_at, category, capture_at, present, last_seen_scan, kind)
+        VALUES (?, ?, ?, ?, ?, NULL, ?, 1, ?, ?)
         ON CONFLICT(root_id, relative_path) DO UPDATE SET
           category = CASE WHEN media.size != excluded.size OR media.modified_at != excluded.modified_at
             THEN NULL ELSE media.category END,
           size = excluded.size, modified_at = excluded.modified_at, capture_at = excluded.capture_at,
-          present = 1, last_seen_scan = excluded.last_seen_scan
+          present = 1, last_seen_scan = excluded.last_seen_scan, kind = excluded.kind
       `);
       let entriesVisited = 0;
       let scanErrors = 0;
+      let storedScanErrors = 0;
       const scanId = crypto.randomUUID();
       let entriesExamined = 0;
+      const recordScanError = (filename, error) => {
+        scanErrors += 1;
+        if (storedScanErrors < MAX_STORED_SCAN_ERRORS) {
+          this.db.prepare(`
+            INSERT INTO scan_errors(root_id, path, message, created_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(root_id, path) DO UPDATE SET message = excluded.message, created_at = excluded.created_at
+          `).run(rootId, filename, error.message, new Date().toISOString());
+          storedScanErrors += 1;
+        }
+        this.log('scan_error', { rootId, path: filename, message: error.message });
+      };
       const updateProgress = (status, error = null) => {
         this.db.prepare(`
-          UPDATE scan_jobs SET status = ?, visited = ?, indexed = ?, error = ?,
+          UPDATE scan_jobs SET status = ?, visited = ?, indexed = ?, error = ?, error_count = ?,
             completed_at = CASE WHEN ? IN ('completed', 'failed', 'cancelled') THEN ? ELSE NULL END
           WHERE root_id = ?
-        `).run(status, entriesExamined, entriesVisited, error,
+        `).run(status, entriesExamined, entriesVisited, error, scanErrors,
           status, status === 'running' ? null : new Date().toISOString(), rootId);
         if (status !== 'running' || entriesExamined % 512 === 0) {
           this.publishQueueChange(root.collection_id);
@@ -1004,13 +1142,12 @@ class PhotoSorter {
         const directory = directories.pop();
         let entries;
         try {
-          const directoryStat = await fs.lstat(directory);
+          const directoryStat = await this.scanFs.lstat(directory);
           if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()
-            || !isWithin(base, await fs.realpath(directory))) continue;
-          entries = await fs.readdir(directory, { withFileTypes: true });
+            || !isWithin(base, await this.scanFs.realpath(directory))) continue;
+          entries = await this.scanFs.readdir(directory, { withFileTypes: true });
         } catch (error) {
-          scanErrors += 1;
-          this.log('scan_error', { rootId, path: directory, message: error.message });
+          recordScanError(directory, error);
           continue;
         }
         for (const entry of entries) {
@@ -1032,17 +1169,16 @@ class PhotoSorter {
           const kind = IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : null;
           if (!kind) continue;
           try {
-            const stat = await fs.lstat(fullPath);
-            const resolvedPath = await fs.realpath(fullPath);
+            const stat = await this.scanFs.lstat(fullPath);
+            const resolvedPath = await this.scanFs.realpath(fullPath);
             if (!stat.isFile() || stat.isSymbolicLink() || !isWithin(base, resolvedPath)) continue;
             const relativePath = path.relative(base, fullPath);
             const captureDate = IMAGE_EXTENSIONS.has(extension) ? await readCaptureDate(resolvedPath) : null;
             upsert.run(crypto.createHash('sha256').update(`${rootId}\0${relativePath}`).digest('hex'),
-              rootId, relativePath, stat.size, stat.mtimeMs, captureDate, scanId);
+              rootId, relativePath, stat.size, stat.mtimeMs, captureDate, scanId, kind);
             entriesVisited += 1;
           } catch (error) {
-            scanErrors += 1;
-            this.log('scan_error', { rootId, path: fullPath, message: error.message });
+            recordScanError(fullPath, error);
           }
         }
       }
@@ -1063,16 +1199,20 @@ class PhotoSorter {
         `).run(scanId, rootId);
       }
       updateProgress('completed');
-      this.log('scan_completed', { rootId, path: base, indexed: entriesVisited });
+      this.log('scan_completed', { rootId, path: base, indexed: entriesVisited, errors: scanErrors });
       return entriesVisited;
     } catch (error) {
       if (!this.closed) {
         this.db.prepare('UPDATE roots SET online = 0 WHERE id = ?').run(rootId);
+        this.db.prepare('DELETE FROM scan_errors WHERE root_id = ?').run(rootId);
         this.db.prepare(`
-          INSERT INTO scan_jobs(root_id, status, error, started_at, completed_at)
-          VALUES (?, 'failed', ?, ?, ?)
+          INSERT INTO scan_errors(root_id, path, message, created_at) VALUES (?, ?, ?, ?)
+        `).run(rootId, root.path, error.message, new Date().toISOString());
+        this.db.prepare(`
+          INSERT INTO scan_jobs(root_id, status, error, error_count, started_at, completed_at)
+          VALUES (?, 'failed', ?, 1, ?, ?)
           ON CONFLICT(root_id) DO UPDATE SET status = 'failed', error = excluded.error,
-            completed_at = excluded.completed_at
+            error_count = 1, completed_at = excluded.completed_at
         `).run(rootId, error.message, new Date().toISOString(), new Date().toISOString());
         this.log('scan_error', { rootId, path: root.path, message: error.message });
       }
@@ -1082,16 +1222,72 @@ class PhotoSorter {
 
   async rescanCollection(collectionId) {
     const roots = this.db.prepare('SELECT id FROM roots WHERE collection_id = ? AND active = 1').all(collectionId);
-    let indexed = 0;
-    for (const root of roots) {
-      try { indexed += await this.scanRoot(root.id); } catch {}
+    const results = await Promise.allSettled(roots.map((root) => this.scanRoot(root.id)));
+    const failures = results.filter((result) => result.status === 'rejected');
+    if (failures.length) {
+      throw new AggregateError(failures.map((result) => result.reason), `${failures.length} root scan(s) failed.`);
     }
-    return indexed;
+    return results.reduce((indexed, result) => indexed + result.value, 0);
   }
 
-  listMedia({ collectionId, category, sort = 'capture-asc', offset = 0, limit = 60 }) {
+  listMedia({
+    collectionId,
+    category,
+    sort = 'capture-asc',
+    offset = 0,
+    limit = 60,
+    search = '',
+    fromDate = '',
+    toDate = '',
+    kind = '',
+    rootId = '',
+  }) {
     const filters = ['r.collection_id = ?', 'r.active = 1', 'c.active = 1', 'm.present = 1'];
     const values = [collectionId];
+    if (typeof search !== 'string' || search.length > 160) throw new Error('Invalid search query.');
+    const normalizedSearch = search.trim();
+    if (normalizedSearch) {
+      const escapedSearch = normalizedSearch.replace(/[\\%_]/g, '\\$&');
+      filters.push("m.relative_path LIKE ? ESCAPE '\\'");
+      values.push(`${escapedSearch}%`);
+    }
+    const parseFilterDate = (value) => {
+      if (value === '') return null;
+      if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        throw new Error('Invalid date filter.');
+      }
+      const timestamp = Date.parse(`${value}T00:00:00.000Z`);
+      if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== value) {
+        throw new Error('Invalid date filter.');
+      }
+      return timestamp / 86400000 + 2440587.5;
+    };
+    const fromJulian = parseFilterDate(fromDate);
+    const toJulian = parseFilterDate(toDate);
+    if (fromJulian !== null && toJulian !== null && fromJulian > toJulian) {
+      throw new Error('Start date must be on or before end date.');
+    }
+    const captureDateExpression = 'COALESCE(julianday(m.capture_at), m.modified_at / 86400000.0 + 2440587.5)';
+    if (fromJulian !== null) {
+      filters.push(`${captureDateExpression} >= ?`);
+      values.push(fromJulian);
+    }
+    if (toJulian !== null) {
+      filters.push(`${captureDateExpression} < ?`);
+      values.push(toJulian + 1);
+    }
+    if (kind) {
+      if (!['image', 'video'].includes(kind)) throw new Error('Invalid media type.');
+      filters.push('m.kind = ?');
+      values.push(kind);
+    }
+    if (rootId) {
+      if (!this.db.prepare(`
+        SELECT 1 FROM roots WHERE id = ? AND collection_id = ? AND active = 1
+      `).get(rootId, collectionId)) throw new Error('Root not found in this collection.');
+      filters.push('r.id = ?');
+      values.push(rootId);
+    }
     if (category === 'unseen') filters.push('m.category IS NULL');
     else if (category === 'review') filters.push("(m.category IS NULL OR m.category = 'unsure')");
     else if (CATEGORIES.has(category)) {
@@ -1110,13 +1306,7 @@ class PhotoSorter {
       ? "CASE WHEN m.category IS NULL THEN 0 ELSE 1 END ASC, m.unsure_reviewed_at ASC, "
       : '';
     const items = this.db.prepare(`
-      SELECT m.id, m.relative_path, m.size, m.modified_at, m.capture_at, m.category,
-        CASE WHEN lower(m.relative_path) GLOB '*.mp4' OR lower(m.relative_path) GLOB '*.mov'
-          OR lower(m.relative_path) GLOB '*.m4v' OR lower(m.relative_path) GLOB '*.webm'
-          OR lower(m.relative_path) GLOB '*.avi' OR lower(m.relative_path) GLOB '*.mkv'
-          OR lower(m.relative_path) GLOB '*.mpeg' OR lower(m.relative_path) GLOB '*.mpg'
-          OR lower(m.relative_path) GLOB '*.3gp' OR lower(m.relative_path) GLOB '*.wmv'
-          OR lower(m.relative_path) GLOB '*.mts' THEN 'video' ELSE 'image' END AS kind,
+      SELECT m.id, m.relative_path, m.size, m.modified_at, m.capture_at, m.category, m.kind,
         r.online, r.read_only
       FROM media m JOIN roots r ON r.id = m.root_id JOIN collections c ON c.id = r.collection_id
       WHERE ${filters.join(' AND ')}
@@ -1924,6 +2114,11 @@ class PhotoSorter {
           sort,
           offset,
           limit,
+          search: url.searchParams.get('q') || '',
+          fromDate: url.searchParams.get('from') || '',
+          toDate: url.searchParams.get('to') || '',
+          kind: url.searchParams.get('kind') || '',
+          rootId: url.searchParams.get('rootId') || '',
         });
         return this.sendJson(response, 200, result);
       }
@@ -1980,8 +2175,9 @@ class PhotoSorter {
         return this.sendJson(response, 200, await this.planApply(collectionId));
       }
       if (request.method === 'POST' && url.pathname === '/api/rescan') {
-        const { collectionId } = await this.readJson(request);
-        return this.sendJson(response, 202, { scans: this.startCollectionScan(collectionId) });
+        const { collectionId, rootId } = await this.readJson(request);
+        const scans = rootId ? [this.startRootScan(collectionId, rootId)] : this.startCollectionScan(collectionId);
+        return this.sendJson(response, 202, { scans });
       }
       if (request.method === 'POST' && url.pathname === '/api/apply/confirm') {
         const body = await this.readJson(request);

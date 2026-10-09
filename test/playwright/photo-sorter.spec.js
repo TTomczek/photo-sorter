@@ -566,6 +566,137 @@ test('mobile layout preserves explicit actions and maps a right swipe to keep', 
   }
 });
 
+test('Browse search filters by path, date, media type, and registered folder', async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await setupAccount(page);
+    const green = fixture.app.listMedia({
+      collectionId: fixture.collectionId, category: 'all', sort: 'filename',
+    }).items.find((item) => item.relative_path === '02-green.png');
+    fixture.app.db.prepare('UPDATE media SET capture_at = ? WHERE id = ?')
+      .run('2024-02-01T12:00:00.000Z', green.id);
+
+    await page.locator('#app-navigation [data-view="browse"]').click();
+    await page.locator('#media-search-query').fill('02-');
+    await page.locator('#media-search-form button[type="submit"]').click();
+    await expect(page.locator('#media-grid button.media-name')).toHaveCount(1);
+    await expect(page.locator('#media-grid')).toContainText('02-green.png');
+
+    await page.locator('#clear-media-search').click();
+    await page.locator('#media-kind').selectOption('video');
+    await page.locator('#media-search-form button[type="submit"]').click();
+    await expect(page.locator('#media-grid button.media-name')).toHaveCount(1);
+    await expect(page.locator('#media-grid')).toContainText('99-unplayable.mp4');
+
+    await page.locator('#clear-media-search').click();
+    await page.locator('#media-root').selectOption(fixture.rootId);
+    await page.locator('#media-from-date').fill('2024-02-01');
+    await page.locator('#media-to-date').fill('2024-02-01');
+    await page.locator('#media-search-form button[type="submit"]').click();
+    await expect(page.locator('#media-grid button.media-name')).toHaveCount(1);
+    await expect(page.locator('#media-grid')).toContainText('02-green.png');
+  } finally {
+    await context.close();
+  }
+});
+
+test('Browse reports a missing root scan and retries it after the folder returns', async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const unavailableRoot = `${fixture.root}-offline`;
+  try {
+    await setupAccount(page);
+    await page.locator('#app-navigation [data-view="browse"]').click();
+    await fs.rename(fixture.root, unavailableRoot);
+    fixture.app.startRootScan(fixture.collectionId, fixture.rootId);
+    await expect.poll(() => fixture.app.listScanStatus(fixture.collectionId)[0].status).toBe('failed');
+    await expect(page.locator('#scan-status-list')).toContainText('ENOENT');
+    await expect(page.locator('#scan-status-list [data-rescan-root]')).toBeEnabled();
+    const retryButton = page.locator('#scan-status-list [data-rescan-root]');
+    await expect(retryButton.locator('xpath=..')).toHaveClass(/scan-status-heading/);
+    expect(await retryButton.evaluate((button) =>
+      button.getBoundingClientRect().width < button.closest('.scan-status-root').getBoundingClientRect().width / 2,
+    )).toBe(true);
+
+    await fs.rename(unavailableRoot, fixture.root);
+    await retryButton.click();
+    await expect.poll(() => fixture.app.listScanStatus(fixture.collectionId)[0].status).toBe('completed');
+    await expect.poll(() => fixture.app.listScanStatus(fixture.collectionId)[0].errorCount).toBe(0);
+    await expect(page.locator('#scan-status-list')).toContainText('Scan complete');
+    await expect(page.locator('#media-grid')).toContainText('01-red.png');
+  } finally {
+    if (await fs.stat(unavailableRoot).catch(() => null)) await fs.rename(unavailableRoot, fixture.root);
+    await context.close();
+  }
+});
+
+test('200,000-item browser browsing keeps pages and rendered cards bounded', async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    const originalCount = fixture.app.listMedia({
+      collectionId: fixture.collectionId, category: 'all',
+    }).total;
+    const insert = fixture.app.db.prepare(`
+      INSERT INTO media(id, root_id, relative_path, size, modified_at, present, kind)
+      VALUES (?, ?, ?, 1, ?, 1, 'image')
+    `);
+    fixture.app.db.exec('BEGIN');
+    try {
+      for (let index = 0; index < 200_000 - originalCount; index += 1) {
+        const filename = String(index).padStart(6, '0');
+        insert.run(
+          `virtual-${filename}`,
+          fixture.rootId,
+          `virtual-${filename}.jpg`,
+          1_700_000_000_000 + index,
+        );
+      }
+      fixture.app.db.exec('COMMIT');
+    } catch (error) {
+      fixture.app.db.exec('ROLLBACK');
+      throw error;
+    }
+
+    await setupAccount(page);
+    await page.locator('#app-navigation [data-view="browse"]').click();
+    await page.locator('#filters [data-category="all"]').click();
+    await expect(page.locator('#media-grid .media-card')).toHaveCount(60);
+    const pageResponse = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === '/api/media' && Number(url.searchParams.get('offset')) > 0;
+    });
+    const startedAt = performance.now();
+    await page.locator('#media-viewport').evaluate((viewport) => {
+      viewport.scrollTop = document.querySelector('#media-virtual-space').getBoundingClientRect().height * 0.75;
+    });
+    const response = await pageResponse;
+    const responseDurationMs = performance.now() - startedAt;
+    const result = await response.json();
+    expect(result.total).toBe(200_000);
+    expect(result.items.length).toBeLessThanOrEqual(60);
+    await expect(page.locator('#media-grid .media-card')).toHaveCount(60);
+    const metrics = await page.evaluate(() => ({
+      renderedCards: document.querySelectorAll('#media-grid .media-card').length,
+      domNodes: document.getElementsByTagName('*').length,
+      heapBytes: performance.memory?.usedJSHeapSize ?? null,
+      virtualHeightPx: document.querySelector('#media-virtual-space').getBoundingClientRect().height,
+    }));
+    expect(metrics.renderedCards).toBe(60);
+    expect(metrics.domNodes).toBeLessThan(1_000);
+    expect(metrics.virtualHeightPx).toBeGreaterThan(200_000);
+    const measured = { responseDurationMs, ...metrics, pageItems: result.items.length };
+    console.log(`Large-library browser metrics: ${JSON.stringify(measured)}`);
+    await test.info().attach('large-library-browser-metrics.json', {
+      body: Buffer.from(JSON.stringify(measured)),
+      contentType: 'application/json',
+    });
+  } finally {
+    await context.close();
+  }
+});
+
 test('undecodable media stays sortable without a generic red preview error', async () => {
   await expect.poll(() => fixture.app.db.prepare(
     "SELECT COUNT(*) AS count FROM scan_jobs WHERE status IN ('queued', 'running')",

@@ -48,7 +48,7 @@ test('preview extraction closes files without thumbnails and rejects stale cache
   })).response.status, 200);
   const media = await api(`/api/media?collectionId=${collectionId}&category=unseen`);
   assert.equal(media.body.items.length, 3);
-  const item = media.body.items.find((candidate) => candidate.kind === 'image');
+  const item = media.body.items.find((candidate) => candidate.relative_path === 'photo.jpg');
   const video = media.body.items.find((candidate) => candidate.kind === 'video');
   const noThumbnail = media.body.items.find((candidate) => candidate.relative_path === 'no-thumbnail.png');
   const originalOpen = fs.open;

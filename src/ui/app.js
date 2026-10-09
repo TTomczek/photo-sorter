@@ -10,6 +10,7 @@ const state = {
   offset: 0,
   total: 0,
   limit: 60,
+  filters: { search: '', fromDate: '', toDate: '', kind: '', rootId: '' },
   busy: false,
   lockedItemId: '',
   lockReady: false,
@@ -30,6 +31,7 @@ const state = {
   autoCategorizeCollectionId: '',
   drawerOpen: false,
   lastScanStatusKey: '',
+  lastScanUiKey: '',
   statusKind: 'user',
 };
 const byId = (id) => document.getElementById(id);
@@ -272,6 +274,7 @@ async function refreshScans() {
   scanPollBusy = true;
   try {
     const { scans } = await request(`/api/scans?collectionId=${encodeURIComponent(state.collectionId)}`);
+    renderScanStatus(scans);
     const active = scans.filter((scan) => ['queued', 'running'].includes(scan.status));
     if (active.length) {
       const indexed = active.reduce((sum, scan) => sum + scan.indexed, 0);
@@ -284,12 +287,22 @@ async function refreshScans() {
       state.restoreMediaId = current?.id || '';
       await loadMedia();
       await maybeStartAutomaticCategorizing();
-    } else if (scans.some((scan) => scan.status === 'failed')) {
-      const failed = scans.filter((scan) => scan.status === 'failed');
-      const statusKey = `failed:${failed.map((scan) => scan.error).join('|')}`;
+    } else if (scans.some((scan) => scan.status === 'failed' || scan.errorCount
+      || ['polling', 'retrying', 'unavailable'].includes(scan.watch.mode))) {
+      const failed = scans.filter((scan) => scan.status === 'failed' || scan.errorCount
+        || ['polling', 'retrying', 'unavailable'].includes(scan.watch.mode));
+      const statusKey = `attention:${failed.map((scan) => `${scan.rootId}:${scan.errorCount}:${scan.error}:${scan.watch.mode}`).join('|')}`;
       if (statusKey !== state.lastScanStatusKey) {
         state.lastScanStatusKey = statusKey;
-        setStatus(`${failed.length} folder scan(s) failed: ${failed[0].error}`, true, 'scan');
+        const issueCount = failed.reduce((sum, scan) => sum + scan.errorCount, 0);
+        const fallbackCount = failed.filter((scan) => scan.watch.mode === 'polling').length;
+        const failureCount = failed.filter((scan) => scan.status === 'failed').length;
+        const details = [
+          failureCount ? `${failureCount} scan(s) failed` : '',
+          issueCount ? `${issueCount} path error(s)` : '',
+          fallbackCount ? `${fallbackCount} folder(s) use periodic scan recovery` : '',
+        ].filter(Boolean).join('; ');
+        setStatus(`Folder attention needed: ${details}. Open Browse to inspect errors or retry a folder.`, true, 'scan');
       }
     } else if (scans.some((scan) => scan.status === 'completed')) {
       const indexed = scans.reduce((sum, scan) => sum + scan.indexed, 0);
@@ -306,6 +319,50 @@ async function refreshScans() {
     setStatus(error.message, true);
   } finally {
     scanPollBusy = false;
+  }
+}
+
+function renderScanStatus(scans) {
+  const panel = byId('scan-status-panel');
+  const list = byId('scan-status-list');
+  const signature = JSON.stringify(scans);
+  panel.classList.toggle('hidden', !scans.length);
+  if (signature === state.lastScanUiKey) return;
+  state.lastScanUiKey = signature;
+  list.replaceChildren();
+  for (const scan of scans) {
+    const entry = element('li', undefined, `scan-status-root scan-status-root-${scan.status}`);
+    const status = scan.status === 'running' || scan.status === 'queued'
+      ? `${scan.status}: ${scan.indexed} indexed of ${scan.visited} visited`
+      : scan.status === 'failed' ? 'Scan failed'
+        : scan.status === 'completed' ? `Scan complete: ${scan.indexed} indexed`
+          : 'Not scanned yet';
+    const heading = element('div', undefined, 'scan-status-heading');
+    heading.append(element('strong', scan.path));
+    const retry = element('button', 'Retry scan', 'quiet scan-status-retry');
+    retry.type = 'button';
+    retry.dataset.rescanRoot = scan.rootId;
+    retry.disabled = ['queued', 'running'].includes(scan.status);
+    heading.append(retry);
+    entry.append(heading, element('small', `${status} · watcher: ${scan.watch.mode}`, 'scan-status-summary'));
+    if (scan.error) entry.append(element('p', scan.error, 'scan-status-warning'));
+    if (scan.watch.error) {
+      const watchMessage = scan.watch.mode === 'polling'
+        ? `Recursive watching is unavailable; this folder is rescanned periodically. ${scan.watch.error}`
+        : `File watching is retrying. ${scan.watch.error}`;
+      entry.append(element('p', watchMessage, 'scan-status-warning'));
+    }
+    if (scan.errorCount) {
+      const errors = element('ul', undefined, 'scan-status-errors');
+      for (const issue of scan.errors) {
+        errors.append(element('li', `${issue.path}: ${issue.message}`));
+      }
+      if (scan.errorCount > scan.errors.length) {
+        errors.append(element('li', `Showing ${scan.errors.length} of ${scan.errorCount} path errors.`));
+      }
+      entry.append(element('strong', `${scan.errorCount} path error(s)`), errors);
+    }
+    list.append(entry);
   }
 }
 
@@ -437,6 +494,31 @@ async function request(url, options = {}) {
   const result = response.headers.get('content-type')?.includes('application/json') ? await response.json() : null;
   if (!response.ok) throw new Error(result?.error || `Request failed (${response.status}).`);
   return result;
+}
+
+function mediaListUrl({
+  collectionId = state.collectionId,
+  category = state.category,
+  sort = state.sort,
+  offset = state.offset,
+  limit = state.limit,
+  filters = state.filters,
+} = {}) {
+  const params = new URLSearchParams({
+    collectionId,
+    category,
+    sort,
+    offset: String(offset),
+    limit: String(limit),
+  });
+  if (category !== 'review') {
+    if (filters.search) params.set('q', filters.search);
+    if (filters.fromDate) params.set('from', filters.fromDate);
+    if (filters.toDate) params.set('to', filters.toDate);
+    if (filters.kind) params.set('kind', filters.kind);
+    if (filters.rootId) params.set('rootId', filters.rootId);
+  }
+  return `/api/media?${params}`;
 }
 
 function setStatus(message, error = false, kind = 'user') {
@@ -592,9 +674,12 @@ function renderCurrent() {
   byId('photo-info-toggle').setAttribute('aria-expanded', 'false');
   const item = state.items[state.index];
   if (!item) {
+    const hasFilters = state.filters.search || state.filters.fromDate || state.filters.toDate
+      || state.filters.kind || state.filters.rootId;
     container.append(element('div', state.total ? 'Loading items…'
-      : state.category === 'review' ? 'No unseen or unsure items. Browse your collection or add more photos.'
-        : state.category === 'all' ? 'No items in this collection.' : 'No items in this category.'));
+      : hasFilters ? 'No media matches these filters.'
+        : state.category === 'review' ? 'No unseen or unsure items. Browse your collection or add more photos.'
+          : state.category === 'all' ? 'No items in this collection.' : 'No items in this category.'));
     byId('item-count').textContent = state.total ? `${state.total} items` : '';
     byId('review-progress').textContent = '';
     updateItemLock(null);
@@ -694,7 +779,7 @@ async function loadMedia() {
     renderGrid();
     return;
   }
-  const data = await request(`/api/media?collectionId=${encodeURIComponent(state.collectionId)}&category=${state.category}&sort=${state.sort}&offset=${state.offset}&limit=${state.limit}`);
+  const data = await request(mediaListUrl());
   if (requestId !== state.mediaRequestId) return;
   state.items = data.items;
   state.total = data.total;
@@ -819,11 +904,13 @@ async function refreshQueue() {
     category: state.category,
     sort: state.sort,
     offset: state.offset,
+    filters: { ...state.filters },
   };
   try {
-    const result = await request(`/api/media?collectionId=${encodeURIComponent(snapshot.collectionId)}&category=${snapshot.category}&sort=${snapshot.sort}&offset=${snapshot.offset}&limit=${state.limit}`);
+    const result = await request(mediaListUrl({ ...snapshot, limit: state.limit }));
     if (snapshot.collectionId !== state.collectionId || snapshot.category !== state.category
-      || snapshot.sort !== state.sort || snapshot.offset !== state.offset) return;
+      || snapshot.sort !== state.sort || snapshot.offset !== state.offset
+      || JSON.stringify(snapshot.filters) !== JSON.stringify(state.filters)) return;
     const unchanged = result.total === state.total
       && result.items.length === state.items.length
       && result.items.every((item, index) => item.id === state.items[index].id
@@ -871,6 +958,8 @@ async function loadCollections(preferredId) {
     state.classificationPending = false;
     state.collectionId = '';
     state.collectionItemCount = 0;
+    state.filters = { search: '', fromDate: '', toDate: '', kind: '', rootId: '' };
+    byId('media-search-form').reset();
     state.autoCategorizeCollectionId = '';
     byId('active-collection-name').textContent = 'Photo Sorter';
     byId('archive-collection').disabled = true;
@@ -921,6 +1010,7 @@ async function loadCollections(preferredId) {
   byId('active-collection-name').textContent = collection.name;
   setStatus(collection.offline_roots ? `${collection.offline_roots} root(s) are currently offline.` : '');
   await Promise.all([loadRootManagement(), loadArchivedCollections()]);
+  loadBrowseFilters();
   await loadMedia();
   if (collectionChanged) await maybeStartAutomaticCategorizing();
   if (state.total === 0 && state.category === 'review') {
@@ -1008,6 +1098,17 @@ async function loadRootManagement() {
   list.replaceChildren();
   if (!state.collectionId) return;
   const { roots } = await request(`/api/collections/${encodeURIComponent(state.collectionId)}/roots`);
+  const rootFilter = byId('media-root');
+  const selectedRoot = rootFilter.value;
+  rootFilter.replaceChildren(element('option', 'All folders'));
+  rootFilter.options[0].value = '';
+  for (const root of roots) {
+    const option = element('option', root.path);
+    option.value = root.id;
+    option.title = root.path;
+    rootFilter.append(option);
+  }
+  rootFilter.value = roots.some((root) => root.id === selectedRoot) ? selectedRoot : '';
   for (const root of roots) {
     const item = element('li', `${root.path}${root.online ? '' : ' · offline'}${root.read_only ? ' · read-only' : ''}`);
     const remove = element('button', '−', 'remove-root-button');
@@ -1032,6 +1133,43 @@ async function loadRootManagement() {
     list.append(item);
   }
   if (!roots.length) list.append(element('li', 'No folders are registered.'));
+}
+
+function loadBrowseFilters() {
+  const key = `photo-sorter-browse-filters:${state.collectionId}`;
+  const serialized = localStorage.getItem(key);
+  let filters = { search: '', fromDate: '', toDate: '', kind: '', rootId: '' };
+  if (serialized) {
+    try {
+      const saved = JSON.parse(serialized);
+      if (saved && typeof saved === 'object') {
+        filters = {
+          search: typeof saved.search === 'string' ? saved.search.slice(0, 160) : '',
+          fromDate: typeof saved.fromDate === 'string' ? saved.fromDate : '',
+          toDate: typeof saved.toDate === 'string' ? saved.toDate : '',
+          kind: ['image', 'video'].includes(saved.kind) ? saved.kind : '',
+          rootId: typeof saved.rootId === 'string' ? saved.rootId : '',
+        };
+      }
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      localStorage.removeItem(key);
+      setStatus('Saved browse filters could not be read; filters were cleared.', true);
+    }
+  }
+  if (![...byId('media-root').options].some((option) => option.value === filters.rootId)) {
+    filters.rootId = '';
+  }
+  state.filters = filters;
+  byId('media-search-query').value = filters.search;
+  byId('media-from-date').value = filters.fromDate;
+  byId('media-to-date').value = filters.toDate;
+  byId('media-kind').value = filters.kind;
+  byId('media-root').value = filters.rootId;
+}
+
+function saveBrowseFilters() {
+  localStorage.setItem(`photo-sorter-browse-filters:${state.collectionId}`, JSON.stringify(state.filters));
 }
 
 async function loadArchivedCollections() {
@@ -1511,6 +1649,40 @@ byId('archive-collection').addEventListener('click', async () => {
     setStatus(error.message, true);
   }
 });
+byId('media-search-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  state.filters = {
+    search: byId('media-search-query').value.trim(),
+    fromDate: byId('media-from-date').value,
+    toDate: byId('media-to-date').value,
+    kind: byId('media-kind').value,
+    rootId: byId('media-root').value,
+  };
+  state.offset = 0;
+  state.index = 0;
+  state.gridTargetIndex = null;
+  state.restoreGridScroll = true;
+  saveBrowseFilters();
+  try {
+    await loadMedia();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+byId('clear-media-search').addEventListener('click', async () => {
+  state.filters = { search: '', fromDate: '', toDate: '', kind: '', rootId: '' };
+  byId('media-search-form').reset();
+  state.offset = 0;
+  state.index = 0;
+  state.gridTargetIndex = null;
+  state.restoreGridScroll = true;
+  saveBrowseFilters();
+  try {
+    await loadMedia();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
 byId('sort-order').addEventListener('change', async (event) => {
   state.sort = event.target.value;
   state.offset = 0;
@@ -1565,6 +1737,22 @@ byId('rescan').addEventListener('click', async () => {
     setStatus(`Started scanning ${result.scans.length} folder(s).`);
     refreshScans();
   } catch (error) { setStatus(error.message, true); }
+});
+byId('scan-status-list').addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-rescan-root]');
+  if (!button) return;
+  button.disabled = true;
+  try {
+    await request('/api/rescan', {
+      method: 'POST',
+      body: JSON.stringify({ collectionId: state.collectionId, rootId: button.dataset.rescanRoot }),
+    });
+    setStatus('Folder scan retry started.', false, 'scan');
+    await refreshScans();
+  } catch (error) {
+    button.disabled = false;
+    setStatus(error.message, true);
+  }
 });
 byId('mark-unseen').addEventListener('click', () => decide('unseen'));
 byId('audit').addEventListener('click', async () => {

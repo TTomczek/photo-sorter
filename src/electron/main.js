@@ -3,6 +3,7 @@ const { watch } = require('node:fs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { PhotoSorter, defaultDataDirectory } = require('../app');
+const { registerHostIpc } = require('./host-ipc');
 
 app.setName('photo-sorter');
 app.setPath('userData', defaultDataDirectory());
@@ -105,35 +106,13 @@ app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock.setIcon(appIcon);
   service = await new PhotoSorter().initialize();
   serverPort = await service.listen();
-  ipcMain.handle('photo-sorter:choose-root', async (_event, collectionId) => {
-    if (_event.senderFrame !== _event.sender.mainFrame
-      || new URL(_event.senderFrame.url).origin !== `http://127.0.0.1:${serverPort}`) {
-      throw new Error('Folder selection is only available in the host app.');
-    }
-    if (typeof collectionId !== 'string' || collectionId.length > 64) throw new Error('Invalid collection.');
-    const result = await dialog.showOpenDialog(window, {
-      title: 'Choose a photo or video folder',
-      properties: ['openDirectory'],
-    });
-    if (result.canceled || !result.filePaths[0]) return { canceled: true };
-    const rootId = await service.addRoot(collectionId, result.filePaths[0], { waitForScan: false });
-    return { rootId };
-  });
-  ipcMain.handle('photo-sorter:set-autostart', (_event, enabled) => {
-    if (_event.senderFrame !== _event.sender.mainFrame
-      || new URL(_event.senderFrame.url).origin !== `http://127.0.0.1:${serverPort}`) {
-      throw new Error('This setting is only available in the host app.');
-    }
-    if (typeof enabled !== 'boolean') throw new Error('Invalid autostart setting.');
-    app.setLoginItemSettings({ openAtLogin: enabled });
-    return app.getLoginItemSettings().openAtLogin;
-  });
-  ipcMain.handle('photo-sorter:get-autostart', (_event) => {
-    if (_event.senderFrame !== _event.sender.mainFrame
-      || new URL(_event.senderFrame.url).origin !== `http://127.0.0.1:${serverPort}`) {
-      throw new Error('This setting is only available in the host app.');
-    }
-    return app.getLoginItemSettings().openAtLogin;
+  registerHostIpc({
+    ipcMain,
+    dialog,
+    app,
+    getWindow: () => window,
+    getService: () => service,
+    getPort: () => serverPort,
   });
   await createWindow();
   tray = new Tray(appIcon.resize({ width: 16, height: 16 }));

@@ -37,6 +37,24 @@
     'File': 'Datei',
     'Date': 'Datum',
     'All items': 'Alle Elemente',
+    'Filename or folder starts with': 'Dateiname oder Ordner beginnt mit',
+    'From date': 'Ab Datum',
+    'To date': 'Bis Datum',
+    'Media type': 'Medientyp',
+    'All media': 'Alle Medien',
+    'Images': 'Bilder',
+    'Videos': 'Videos',
+    'Folder': 'Ordner',
+    'All folders': 'Alle Ordner',
+    'Apply filters': 'Filter anwenden',
+    'Clear filters': 'Filter löschen',
+    'Folder scan status': 'Ordnerscan-Status',
+    'Retry scan': 'Scan wiederholen',
+    'Scan failed': 'Scan fehlgeschlagen',
+    'Not scanned yet': 'Noch nicht gescannt',
+    'Recursive watching is unavailable; this folder is rescanned periodically.':
+      'Rekursives Überwachen ist nicht verfügbar; dieser Ordner wird regelmäßig erneut gescannt.',
+    'File watching is retrying.': 'Die Dateiüberwachung wird erneut versucht.',
     'No unseen or unsure items. Browse your collection or add more photos.':
       'Keine ungesehenen oder unsicheren Fotos. Durchsuche deine Sammlung oder füge weitere Fotos hinzu.',
     'All unseen and unsure photos are resolved. Browse the collection or apply your decisions.':
@@ -196,6 +214,9 @@
     'passkey_removed': 'Passkey entfernt',
     'audit_cleared': 'Audit-Protokoll geleert',
     'No items in this category.': 'Keine Elemente in dieser Kategorie.',
+    'No media matches these filters.': 'Keine Medien entsprechen diesen Filtern.',
+    'queued': 'in Warteschlange',
+    'running': 'läuft',
     'No items in this collection.': 'Keine Elemente in dieser Sammlung.',
     'Loading items…': 'Elemente werden geladen…',
     'Preview unavailable. This file can still be sorted.': 'Vorschau nicht verfügbar. Diese Datei kann trotzdem sortiert werden.',
@@ -275,6 +296,39 @@
       (_, folders, items) => `Scanne ${folders} Ordner; bisher ${items} Medienelemente indiziert.`)
       .replace(/Scanning complete: (\d+) media item\(s\) indexed\./,
         (_, items) => `Scan abgeschlossen: ${items} Medienelemente indiziert.`)
+      .replace(/^(queued|running): (\d+) indexed of (\d+) visited · watcher: (.*)$/,
+        (_, status, indexed, visited, mode) =>
+          `${translate(status)}: ${indexed} indiziert, ${visited} durchsucht · Überwachung: ${translate(mode)}`)
+      .replace(/^Scan complete: (\d+) indexed · watcher: (.*)$/,
+        (_, indexed, mode) => `Scan abgeschlossen: ${indexed} indiziert · Überwachung: ${translate(mode)}`)
+      .replace(/^Scan failed · watcher: (.*)$/,
+        (_, mode) => `Scan fehlgeschlagen · Überwachung: ${translate(mode)}`)
+      .replace(/Recursive watching is unavailable; this folder is rescanned periodically\. (.*)/,
+        (_, message) => `Rekursives Überwachen ist nicht verfügbar; dieser Ordner wird regelmäßig erneut gescannt. ${message}`)
+      .replace(/File watching is retrying\. (.*)/,
+        (_, message) => `Die Dateiüberwachung wird erneut versucht. ${message}`)
+      .replace(/(\w+): (\d+) indexed of (\d+) visited/,
+        (_, status, indexed, visited) => `${translate(status)}: ${indexed} indiziert, ${visited} durchsucht`)
+      .replace(/Scan complete: (\d+) indexed/,
+        (_, indexed) => `Scan abgeschlossen: ${indexed} indiziert`)
+      .replace(/watcher: polling/,
+        'Überwachung: regelmäßiger Scan')
+      .replace(/watcher: recursive/,
+        'Überwachung: rekursiv')
+      .replace(/Folder attention needed: (.*)\. Open Browse to inspect errors or retry a folder\./,
+        (_, details) => `Ordner erfordern Aufmerksamkeit: ${details}. Öffne Durchsuchen, um Fehler zu prüfen oder einen neuen Scan zu starten.`)
+      .replace(/(\d+) scan\(s\) failed/,
+        (_, count) => `${count} Scan(s) fehlgeschlagen`)
+      .replace(/(\d+) path error\(s\)/,
+        (_, count) => `${count} Pfadfehler`)
+      .replace(/(\d+) folder\(s\) use periodic scan recovery/,
+        (_, count) => `${count} Ordner verwenden regelmäßige Scan-Wiederherstellung`)
+      .replace(/^polling$/, 'regelmäßiger Scan')
+      .replace(/^recursive$/, 'rekursiv')
+      .replace(/^retrying$/, 'wird erneut versucht')
+      .replace(/^starting$/, 'wird gestartet')
+      .replace(/Showing (\d+) of (\d+) path errors\./,
+        (_, shown, total) => `${shown} von ${total} Pfadfehlern werden angezeigt.`)
       .replace(/Started scanning (\d+) folder\(s\)\./,
         (_, folders) => `Scan für ${folders} Ordner gestartet.`)
       .replace(/There are no delete\/unsure moves to apply\./,

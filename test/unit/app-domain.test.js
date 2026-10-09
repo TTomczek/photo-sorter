@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
 const { PhotoSorter, defaultDataDirectory } = require('../../src/app');
 
 async function createSorter(t) {
@@ -82,6 +83,179 @@ test('collection/media queries honor capture fallback, filename order, category 
   assert.equal(page.items.length, 1);
   assert.equal(page.items[0].id, bravo.id);
   assert.throws(() => app.listMedia({ collectionId, category: 'unseen', sort: 'random' }), /Invalid sort order/);
+});
+
+test('library filters search path prefixes and bound type, root, and date results', async (t) => {
+  const { app, collectionId } = await createSorter(t);
+  const roots = app.listRoots(collectionId);
+  const items = app.listMedia({ collectionId, category: 'all', sort: 'filename' }).items;
+  const alpha = items.find((item) => item.relative_path === 'alpha.jpg');
+  const bravo = items.find((item) => item.relative_path === 'bravo.png');
+  const charlie = items.find((item) => item.relative_path === 'charlie.mp4');
+  app.db.prepare('UPDATE media SET capture_at = ? WHERE id = ?')
+    .run('2024-02-01T12:00:00.000Z', alpha.id);
+  app.db.prepare('UPDATE media SET modified_at = ? WHERE id = ?')
+    .run(Date.parse('2024-01-10T00:00:00.000Z'), bravo.id);
+  app.db.prepare('UPDATE media SET modified_at = ? WHERE id = ?')
+    .run(Date.parse('2024-03-10T00:00:00.000Z'), charlie.id);
+
+  const byPrefixAndKind = app.listMedia({
+    collectionId, category: 'all', search: 'BR', kind: 'image', rootId: roots[0].id,
+  });
+  assert.deepEqual(byPrefixAndKind.items.map((item) => item.relative_path), ['bravo.png']);
+  assert.equal(app.listMedia({
+    collectionId, category: 'all', search: '%', sort: 'filename',
+  }).total, 0);
+  assert.deepEqual(app.listMedia({
+    collectionId, category: 'all', fromDate: '2024-02-01', toDate: '2024-02-01',
+  }).items.map((item) => item.relative_path), ['alpha.jpg']);
+  assert.deepEqual(app.listMedia({
+    collectionId, category: 'all', kind: 'video',
+  }).items.map((item) => item.relative_path), ['charlie.mp4']);
+  assert.throws(() => app.listMedia({
+    collectionId, category: 'all', rootId: 'another-collection-root',
+  }), /Root not found in this collection/);
+  assert.throws(() => app.listMedia({
+    collectionId, category: 'all', fromDate: '2024-02-30',
+  }), /Invalid date filter/);
+  assert.throws(() => app.listMedia({
+    collectionId, category: 'all', fromDate: '2024-03-01', toDate: '2024-02-01',
+  }), /Start date must be on or before end date/);
+});
+
+test('legacy SQLite data is upgraded with versioned migrations and remains usable', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-migration-'));
+  const filename = path.join(temporary, 'photo-sorter.sqlite');
+  const legacy = new DatabaseSync(filename);
+  legacy.exec(`
+    CREATE TABLE collections (id TEXT PRIMARY KEY, name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+    CREATE TABLE roots (
+      id TEXT PRIMARY KEY, collection_id TEXT NOT NULL REFERENCES collections(id),
+      path TEXT NOT NULL, online INTEGER NOT NULL DEFAULT 1, read_only INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(collection_id, path)
+    );
+    CREATE TABLE media (
+      id TEXT PRIMARY KEY, root_id TEXT NOT NULL REFERENCES roots(id), relative_path TEXT NOT NULL,
+      size INTEGER NOT NULL, modified_at INTEGER NOT NULL, category TEXT,
+      UNIQUE(root_id, relative_path)
+    );
+    CREATE TABLE apply_operations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL REFERENCES apply_batches(id),
+      media_id TEXT NOT NULL, root_id TEXT NOT NULL, from_path TEXT NOT NULL, to_path TEXT NOT NULL,
+      category TEXT NOT NULL, status TEXT NOT NULL
+    );
+    INSERT INTO collections VALUES ('legacy-collection', 'Legacy', 0, '2024-01-01T00:00:00.000Z');
+    INSERT INTO roots(id, collection_id, path) VALUES ('legacy-root', 'legacy-collection', 'C:/legacy');
+    INSERT INTO media(id, root_id, relative_path, size, modified_at, category)
+      VALUES ('legacy-video', 'legacy-root', 'clip.MP4', 42, 1704067200000, 'keep');
+  `);
+  legacy.close();
+  t.after(async () => fs.rm(temporary, { recursive: true, force: true }));
+
+  const app = await new PhotoSorter({ dataDirectory: temporary }).initialize();
+  assert.equal(app.db.prepare('PRAGMA user_version').get().user_version, 3);
+  assert.deepEqual(
+    { ...app.db.prepare('SELECT id, active FROM roots WHERE id = ?').get('legacy-root') },
+    { id: 'legacy-root', active: 1 },
+  );
+  assert.deepEqual(
+    { ...app.db.prepare('SELECT id, category, kind, present FROM media WHERE id = ?').get('legacy-video') },
+    { id: 'legacy-video', category: 'keep', kind: 'video', present: 1 },
+  );
+  await app.close();
+
+  const reopened = await new PhotoSorter({ dataDirectory: temporary }).initialize();
+  assert.equal(reopened.db.prepare('PRAGMA user_version').get().user_version, 3);
+  assert.equal(reopened.db.prepare('SELECT COUNT(*) AS count FROM media').get().count, 1);
+  await reopened.close();
+});
+
+test('unsupported recursive watching switches to periodic scan recovery', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-watch-fallback-'));
+  const root = path.join(temporary, 'library');
+  await fs.mkdir(root);
+  await fs.writeFile(path.join(root, 'first.jpg'), 'first');
+  const error = Object.assign(new Error('Recursive watching is not supported'), {
+    code: 'ERR_FEATURE_UNAVAILABLE_ON_PLATFORM',
+  });
+  const app = await new PhotoSorter({
+    dataDirectory: path.join(temporary, 'data'),
+    watchFactory: () => { throw error; },
+    watchFallbackIntervalMs: 20,
+  }).initialize();
+  t.after(async () => {
+    await app.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+  const collectionId = app.createCollection('Fallback');
+  const rootId = await app.addRoot(collectionId, root);
+  const fallback = app.listScanStatus(collectionId)[0];
+  assert.equal(fallback.watch.mode, 'polling');
+  assert.equal(fallback.watch.error, error.message);
+
+  await fs.writeFile(path.join(root, 'second.jpg'), 'second');
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    const count = app.listMedia({ collectionId, category: 'all' }).total;
+    if (count === 2) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(app.listMedia({ collectionId, category: 'all' }).total, 2);
+  assert.equal(app.listScanStatus(collectionId)[0].rootId, rootId);
+});
+
+test('failed root scans retain a visible error and can be retried only in their collection', async (t) => {
+  const { app, collectionId, root } = await createSorter(t);
+  const rootId = app.listRoots(collectionId)[0].id;
+  await fs.rm(root, { recursive: true });
+  await assert.rejects(app.scanRoot(rootId));
+
+  const [scan] = app.listScanStatus(collectionId);
+  assert.equal(scan.status, 'failed');
+  assert.equal(scan.online, 0);
+  assert.equal(scan.errorCount, 1);
+  assert.equal(scan.errors[0].path, root);
+  assert.match(scan.errors[0].message, /ENOENT/);
+  assert.throws(() => app.startRootScan('different-collection', rootId), /Root not found in this collection/);
+  assert.deepEqual(app.startRootScan(collectionId, rootId), { started: true, rootId });
+});
+
+test('partial scans report individual unreadable folders and retain incomplete presence information', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-partial-scan-'));
+  const root = path.join(temporary, 'library');
+  const blocked = path.join(root, 'unreadable');
+  await fs.mkdir(blocked, { recursive: true });
+  await fs.writeFile(path.join(root, 'visible.jpg'), 'visible');
+  await fs.writeFile(path.join(blocked, 'hidden.jpg'), 'hidden');
+  const denied = Object.assign(new Error('Permission denied by test fixture'), { code: 'EACCES' });
+  let denyDirectory = false;
+  const scanFs = {
+    realpath: fs.realpath.bind(fs),
+    lstat: fs.lstat.bind(fs),
+    readdir: async (directory, options) => {
+      if (denyDirectory && directory === blocked) throw denied;
+      return fs.readdir(directory, options);
+    },
+  };
+  const app = await new PhotoSorter({
+    dataDirectory: path.join(temporary, 'data'),
+    scanFs,
+  }).initialize();
+  t.after(async () => {
+    await app.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+  const collectionId = app.createCollection('Partial scan');
+  const rootId = await app.addRoot(collectionId, root);
+  denyDirectory = true;
+  await app.scanRoot(rootId);
+
+  const [scan] = app.listScanStatus(collectionId);
+  assert.equal(scan.status, 'completed');
+  assert.equal(scan.errorCount, 1);
+  assert.deepEqual(scan.errors.map((issue) => issue.path), [blocked]);
+  assert.equal(scan.errors[0].message, denied.message);
+  assert.equal(app.listMedia({ collectionId, category: 'all' }).total, 2);
 });
 
 test('review queue orders unseen first and defers repeated unsure decisions to the pass tail', async (t) => {

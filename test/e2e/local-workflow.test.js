@@ -123,6 +123,11 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
   assert.equal(unseen.body.total, 2);
   assert.deepEqual(new Set(unseen.body.items.map((item) => item.kind)), new Set(['image', 'video']));
   assert.equal(unseen.body.items.some((item) => item.relative_path.includes('linked')), false);
+  const filteredMedia = await api(`/api/media?collectionId=${collectionId}&category=all&q=trip&kind=video&rootId=${registeredRootId}`);
+  assert.equal(filteredMedia.body.total, 1);
+  assert.equal(filteredMedia.body.items[0].relative_path, path.join('trip', 'clip.mp4'));
+  assert.equal((await api(`/api/media?collectionId=${collectionId}&category=all&rootId=not-this-root`))
+    .response.status, 400);
 
   const photo = unseen.body.items.find((item) => item.relative_path.endsWith('photo.jpg'));
   assert.equal((await api(`/api/media/${photo.id}/preview`)).response.status, 404);

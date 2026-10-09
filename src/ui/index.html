@@ -98,6 +98,42 @@
                 <button type="button" data-category="delete" aria-pressed="false">Delete</button>
                 <button type="button" data-category="unsure" aria-pressed="false">Unsure</button>
               </nav>
+              <form id="media-search-form" class="media-search panel">
+                <div class="media-filter-field media-filter-search">
+                  <label for="media-search-query">Filename or folder starts with</label>
+                  <input id="media-search-query" type="search" maxlength="160" autocomplete="off">
+                </div>
+                <div class="media-filter-field">
+                  <label for="media-from-date">From date</label>
+                  <input id="media-from-date" type="date">
+                </div>
+                <div class="media-filter-field">
+                  <label for="media-to-date">To date</label>
+                  <input id="media-to-date" type="date">
+                </div>
+                <div class="media-filter-field">
+                  <label for="media-kind">Media type</label>
+                  <select id="media-kind">
+                    <option value="">All media</option>
+                    <option value="image">Images</option>
+                    <option value="video">Videos</option>
+                  </select>
+                </div>
+                <div class="media-filter-field">
+                  <label for="media-root">Folder</label>
+                  <select id="media-root">
+                    <option value="">All folders</option>
+                  </select>
+                </div>
+                <div class="media-filter-actions">
+                  <button type="submit">Apply filters</button>
+                  <button id="clear-media-search" type="button" class="quiet">Clear filters</button>
+                </div>
+              </form>
+              <section id="scan-status-panel" class="panel scan-status-panel hidden" aria-label="Scan status">
+                <h2>Folder scan status</h2>
+                <ul id="scan-status-list"></ul>
+              </section>
               <section class="panel grid-section">
                 <div class="section-heading">
                   <h2>Collection grid</h2>
@@ -112,7 +148,7 @@
                     <button id="rescan" type="button">Rescan roots</button>
                   </div>
                 </div>
-                <div id="media-viewport" class="media-viewport">
+                <div id="media-viewport" class="media-viewport" aria-label="Collection media">
                   <div id="media-virtual-space" aria-hidden="true"></div>
                   <div id="media-grid" class="media-grid"></div>
                 </div>

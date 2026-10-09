@@ -116,6 +116,13 @@ Implement the application from scratch using this handoff as the product source 
 - Persist server-backed settings immediately when their controls change; do not require a separate save action.
 - Allow an authenticated user to change the account password from Settings after verifying the current password. Keep the current session active and revoke other sessions.
 
+### Confirmed follow-up improvements (2026-10-09)
+
+- Browse supports case-insensitive path-prefix search, capture-date range, media type, and registered-root filters. Filtering remains server-side and paginated; current Browse filters are saved per collection on the device.
+- Scan status exposes per-path failures with bounded samples and per-root retry. Platforms without recursive filesystem watching use a visible periodic-rescan fallback.
+- Browser regression coverage loads a 200,000-item fixture, navigates a virtualized page, records the observed page response and browser DOM/heap metrics, and verifies the UI continues to render only one bounded page.
+- SQLite schema changes run through numbered `PRAGMA user_version` migrations. CI exercises the Electron host folder-picker IPC contract and produces native packages on Windows, macOS, and Linux.
+
 ## Authoritative safety and behavior invariants
 
 1. Never permanently delete or overwrite an original media file.
