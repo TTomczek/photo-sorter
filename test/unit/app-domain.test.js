@@ -14,6 +14,7 @@ async function createSorter(t) {
   await fs.writeFile(path.join(root, 'bravo.png'), 'bravo');
   await fs.writeFile(path.join(root, 'charlie.mp4'), 'charlie');
   const app = await new PhotoSorter({ dataDirectory: path.join(temporary, 'data') }).initialize();
+  await new Promise((resolve) => setImmediate(resolve));
   t.after(async () => {
     await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
@@ -207,7 +208,8 @@ test('unsupported recursive watching switches to periodic scan recovery', async 
 
 test('failed root scans retain a visible error and can be retried only in their collection', async (t) => {
   const { app, collectionId, root } = await createSorter(t);
-  const rootId = app.listRoots(collectionId)[0].id;
+  const [registeredRoot] = app.listRoots(collectionId);
+  const rootId = registeredRoot.id;
   await fs.rm(root, { recursive: true });
   await assert.rejects(app.scanRoot(rootId));
 
@@ -215,7 +217,7 @@ test('failed root scans retain a visible error and can be retried only in their 
   assert.equal(scan.status, 'failed');
   assert.equal(scan.online, 0);
   assert.equal(scan.errorCount, 1);
-  assert.equal(scan.errors[0].path, root);
+  assert.equal(scan.errors[0].path, registeredRoot.path);
   assert.match(scan.errors[0].message, /ENOENT/);
   assert.throws(() => app.startRootScan('different-collection', rootId), /Root not found in this collection/);
   assert.deepEqual(app.startRootScan(collectionId, rootId), { started: true, rootId });
@@ -242,19 +244,21 @@ test('partial scans report individual unreadable folders and retain incomplete p
     dataDirectory: path.join(temporary, 'data'),
     scanFs,
   }).initialize();
+  await new Promise((resolve) => setImmediate(resolve));
   t.after(async () => {
     await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
   const collectionId = app.createCollection('Partial scan');
   const rootId = await app.addRoot(collectionId, root);
+  const registeredRoot = app.listRoots(collectionId)[0].path;
   denyDirectory = true;
   await app.scanRoot(rootId);
 
   const [scan] = app.listScanStatus(collectionId);
   assert.equal(scan.status, 'completed');
   assert.equal(scan.errorCount, 1);
-  assert.deepEqual(scan.errors.map((issue) => issue.path), [blocked]);
+  assert.deepEqual(scan.errors.map((issue) => issue.path), [path.join(registeredRoot, 'unreadable')]);
   assert.equal(scan.errors[0].message, denied.message);
   assert.equal(app.listMedia({ collectionId, category: 'all' }).total, 2);
 });
