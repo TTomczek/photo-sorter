@@ -1397,37 +1397,39 @@ class PhotoSorter {
       throw new Error('Invalid Photo Health page.');
     }
     const duplicateHandled = handled === 'open'
-      ? 'HAVING SUM(CASE WHEN m.category IS NULL THEN 1 ELSE 0 END) > 0'
-      : handled === 'handled'
-        ? 'HAVING SUM(CASE WHEN m.category IS NULL THEN 1 ELSE 0 END) = 0'
-        : '';
+      ? 'AND SUM(CASE WHEN m.category IS NULL THEN 1 ELSE 0 END) > 0'
+      : handled === 'handled' ? 'AND SUM(CASE WHEN m.category IS NULL THEN 1 ELSE 0 END) = 0' : '';
     const blurHandled = handled === 'open'
       ? 'AND m.category IS NULL'
       : handled === 'handled' ? 'AND m.category IS NOT NULL' : '';
     const duplicateQuery = type === 'blur' ? `
       SELECT NULL AS groupId, 'duplicate' AS type, NULL AS mediaId, NULL AS reason,
-        NULL AS strength, 0 AS memberCount, 0 AS handled WHERE 0
+        NULL AS strength, 0 AS memberCount, 0 AS handled, NULL AS label, NULL AS category WHERE 0
     ` : `
       SELECT g.id AS groupId, 'duplicate' AS type, NULL AS mediaId,
         CASE g.match_type WHEN 'exact' THEN 'Exact file match'
           ELSE 'Very similar image framing and content' END AS reason,
         MAX(pm.strength) AS strength, COUNT(*) AS memberCount,
-        CASE WHEN SUM(CASE WHEN m.category IS NULL THEN 1 ELSE 0 END) = 0 THEN 1 ELSE 0 END AS handled
+        CASE WHEN SUM(CASE WHEN m.category IS NULL THEN 1 ELSE 0 END) = 0 THEN 1 ELSE 0 END AS handled,
+        NULL AS label, NULL AS category
       FROM photo_health_groups g
       JOIN photo_health_members pm ON pm.group_id = g.id
       JOIN media m ON m.id = pm.media_id
       JOIN roots r ON r.id = m.root_id
+      JOIN photo_health_items h ON h.media_id = m.id AND h.status = 'analyzed'
+        AND h.size = m.size AND h.modified_at = m.modified_at
       WHERE g.collection_id = ? AND r.collection_id = ? AND r.active = 1 AND m.present = 1
       GROUP BY g.id, g.match_type
-      ${duplicateHandled}
+      HAVING COUNT(*) >= 2 ${duplicateHandled}
     `;
     const blurQuery = type === 'duplicate' ? `
       SELECT NULL AS groupId, 'blur' AS type, NULL AS mediaId, NULL AS reason,
-        NULL AS strength, 0 AS memberCount, 0 AS handled WHERE 0
+        NULL AS strength, 0 AS memberCount, 0 AS handled, NULL AS label, NULL AS category WHERE 0
     ` : `
       SELECT NULL AS groupId, 'blur' AS type, m.id AS mediaId,
         'Low edge sharpness (score ' || printf('%.2f', h.blur_score) || ')' AS reason,
-        NULL AS strength, 1 AS memberCount, CASE WHEN m.category IS NULL THEN 0 ELSE 1 END AS handled
+        NULL AS strength, 1 AS memberCount, CASE WHEN m.category IS NULL THEN 0 ELSE 1 END AS handled,
+        m.relative_path AS label, m.category AS category
       FROM photo_health_items h
       JOIN media m ON m.id = h.media_id JOIN roots r ON r.id = m.root_id
       WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1 AND m.kind = 'image'
@@ -1464,12 +1466,16 @@ class PhotoSorter {
         m.category, m.kind, pm.strength
       FROM photo_health_members pm JOIN media m ON m.id = pm.media_id
       JOIN roots r ON r.id = m.root_id
+      JOIN photo_health_items h ON h.media_id = m.id AND h.status = 'analyzed'
+        AND h.size = m.size AND h.modified_at = m.modified_at
       WHERE pm.group_id = ? AND r.collection_id = ? AND r.active = 1 AND m.present = 1
       ORDER BY m.relative_path COLLATE NOCASE LIMIT ? OFFSET ?
     `).all(...params, limit, offset);
     const total = this.db.prepare(`
       SELECT COUNT(*) AS count FROM photo_health_members pm JOIN media m ON m.id = pm.media_id
       JOIN roots r ON r.id = m.root_id
+      JOIN photo_health_items h ON h.media_id = m.id AND h.status = 'analyzed'
+        AND h.size = m.size AND h.modified_at = m.modified_at
       WHERE pm.group_id = ? AND r.collection_id = ? AND r.active = 1 AND m.present = 1
     `).get(...params).count;
     return { items, total, offset, limit };
@@ -1491,6 +1497,8 @@ class PhotoSorter {
       const memberFilter = `
         FROM photo_health_members pm JOIN media m ON m.id = pm.media_id
         JOIN roots r ON r.id = m.root_id
+        JOIN photo_health_items h ON h.media_id = m.id AND h.status = 'analyzed'
+          AND h.size = m.size AND h.modified_at = m.modified_at
         WHERE pm.group_id = ? AND r.collection_id = ? AND r.active = 1 AND m.present = 1
       `;
       const memberCount = this.db.prepare(`SELECT COUNT(*) AS count ${memberFilter}`).get(groupId, collectionId).count;
@@ -1523,6 +1531,9 @@ class PhotoSorter {
         UPDATE media SET category = CASE WHEN id IN (${selected}) THEN 'keep' ELSE 'delete' END
         WHERE id IN (SELECT pm.media_id FROM photo_health_members pm
           JOIN roots r ON r.id = (SELECT root_id FROM media WHERE id = pm.media_id)
+          JOIN photo_health_items h ON h.media_id = pm.media_id AND h.status = 'analyzed'
+          JOIN media indexed_media ON indexed_media.id = pm.media_id
+            AND h.size = indexed_media.size AND h.modified_at = indexed_media.modified_at
           WHERE pm.group_id = ? AND r.collection_id = ? AND r.active = 1)
           AND present = 1
       `).run(...keepIds, groupId, collectionId);
