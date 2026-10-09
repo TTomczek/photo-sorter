@@ -6,6 +6,7 @@ const ANALYSIS_PIXEL_LIMIT = 200_000_000;
 const HASH_SIZE = 32;
 const HASH_FREQUENCIES = 8;
 const PHASH_MAX_DISTANCE = 2;
+const SIMILARITY_PIXEL_DIFFERENCE_LIMIT = 3;
 const BLUR_LAPLACIAN_VARIANCE_LIMIT = 5;
 const BLUR_MIN_CONTRAST = 18;
 const HASH_COSINES = Array.from({ length: HASH_FREQUENCIES }, (_, frequency) => (
@@ -23,13 +24,7 @@ function perceptualHash(pixels) {
   const samples = new Float64Array(HASH_SIZE * HASH_SIZE);
   for (let y = 0; y < HASH_SIZE; y += 1) {
     for (let x = 0; x < HASH_SIZE; x += 1) {
-      let sum = 0;
-      for (let dy = 0; dy < 8; dy += 1) {
-        for (let dx = 0; dx < 8; dx += 1) {
-          sum += pixels[(y * 8 + dy) * 256 + x * 8 + dx];
-        }
-      }
-      samples[y * HASH_SIZE + x] = sum / 64;
+      samples[y * HASH_SIZE + x] = pixels[y * HASH_SIZE + x];
     }
   }
 
@@ -61,6 +56,31 @@ function perceptualHash(pixels) {
   let hash = 0n;
   for (const coefficient of coefficients) hash = (hash << 1n) | (coefficient > median ? 1n : 0n);
   return hash.toString(16).padStart(16, '0');
+}
+
+function normalizedImageSignature(pixels) {
+  const signature = Buffer.alloc(HASH_SIZE * HASH_SIZE);
+  for (let y = 0; y < HASH_SIZE; y += 1) {
+    for (let x = 0; x < HASH_SIZE; x += 1) {
+      let sum = 0;
+      for (let dy = 0; dy < 8; dy += 1) {
+        for (let dx = 0; dx < 8; dx += 1) {
+          sum += pixels[(y * 8 + dy) * 256 + x * 8 + dx];
+        }
+      }
+      signature[y * HASH_SIZE + x] = Math.round(sum / 64);
+    }
+  }
+  return signature;
+}
+
+function signatureDifference(left, right) {
+  if (!left || !right || left.length !== HASH_SIZE * HASH_SIZE || right.length !== left.length) return Infinity;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    difference += Math.abs(left[index] - right[index]);
+  }
+  return difference / left.length;
 }
 
 function laplacianVariance(pixels, width, height) {
@@ -125,9 +145,11 @@ async function analyzeImage(filename) {
       .toBuffer({ resolveWithObject: true }),
   ]);
   const { variance, contrast } = laplacianVariance(decoded.data, decoded.info.width, decoded.info.height);
+  const signature = normalizedImageSignature(decoded.data);
   return {
     sha256,
-    phash: perceptualHash(decoded.data),
+    phash: perceptualHash(signature),
+    imageSignature: signature,
     width: dimensions.width,
     height: dimensions.height,
     blurScore: Math.round(variance * 100) / 100,
@@ -142,4 +164,6 @@ module.exports = {
   fileSha256,
   hashBuckets,
   hashDistance,
+  signatureDifference,
+  SIMILARITY_PIXEL_DIFFERENCE_LIMIT,
 };

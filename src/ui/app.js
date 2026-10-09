@@ -638,6 +638,10 @@ async function loadPhotoHealth({ statusOnly = false } = {}) {
     byId('photo-health-status').textContent = 'Choose a collection to use Photo Health.';
     byId('photo-health-list').replaceChildren();
     byId('photo-health-count').textContent = '';
+    byId('photo-health-progress').classList.add('hidden');
+    byId('photo-health-enable').classList.add('hidden');
+    byId('photo-health-pause').classList.add('hidden');
+    byId('photo-health-resume').classList.add('hidden');
     return;
   }
   const collectionId = encodeURIComponent(state.collectionId);
@@ -721,6 +725,9 @@ async function loadPhotoHealth({ statusOnly = false } = {}) {
     if (finding.handled) card.append(element('p', 'Handled · decision is shared with other views.'));
     list.append(card);
   }
+  if (!findings.items.length) {
+    list.append(element('p', status.enabled ? 'No findings match these filters.' : 'Enable analysis to discover findings.'));
+  }
   byId('photo-health-count').textContent = status.enabled
     ? `${findings.total} finding(s) · ${status.unsupported} unsupported · ${status.failed} analysis failure(s)`
     : '';
@@ -792,10 +799,16 @@ async function renderPhotoHealthGroup(card, groupId) {
     for (let index = 0; index < 2; index += 1) {
       const figure = element('figure');
       const viewport = element('div', undefined, 'health-compare-viewport');
-      const image = element('img');
-      image.alt = '';
-      image.draggable = false;
-      viewport.append(image);
+      const member = members.find((item) => item.id === photoHealth.compareIds[index]);
+      const preview = member?.kind === 'video' ? element('video') : element('img');
+      if (preview instanceof HTMLVideoElement) {
+        preview.controls = true;
+        preview.preload = 'metadata';
+      } else {
+        preview.alt = member?.relativePath || '';
+        preview.draggable = false;
+      }
+      viewport.append(preview);
       figure.append(viewport, element('figcaption'));
       comparison.append(figure);
       viewport.addEventListener('pointerdown', (event) => {
@@ -866,12 +879,13 @@ function updateHealthCompareImages(container, members) {
   const figures = container.querySelectorAll('.health-compare figure');
   for (let index = 0; index < figures.length; index += 1) {
     const member = members.find((item) => item.id === photoHealth.compareIds[index]);
-    const image = figures[index].querySelector('img');
+    const image = figures[index].querySelector('img, video');
     const caption = figures[index].querySelector('figcaption');
     if (!member) continue;
     if (image.dataset.mediaId !== member.id) {
       image.dataset.mediaId = member.id;
       image.src = mediaUrl(member);
+      image.alt = member.relativePath;
       caption.textContent = `${member.relativePath} · ${formatBytes(member.size)}`;
     }
     image.style.transform = `translate(${photoHealth.panX}px, ${photoHealth.panY}px) scale(${photoHealth.zoomScale})`;

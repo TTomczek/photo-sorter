@@ -34,7 +34,7 @@ test('Photo Health finds exact and resized copies, flags blur, and exposes failu
   const exact = await sharp(scene()).png().toBuffer();
   const similarOriginal = await sharp(scene({ background: '#c9e8df', shift: 70 })).png().toBuffer();
   const similar = await sharp(similarOriginal).resize(128, 128).jpeg({ quality: 70 }).toBuffer();
-  const cropped = await sharp(similarOriginal).extract({ left: 0, top: 0, width: 128, height: 256 }).png().toBuffer();
+  const cropped = await sharp(similarOriginal).extract({ left: 16, top: 16, width: 224, height: 224 }).png().toBuffer();
   const clearScene = await sharp(scene({ background: '#d3d8e8', shift: 30 })).png().toBuffer();
   const blurryScene = await sharp(clearScene).blur(8).png().toBuffer();
   await fs.writeFile(path.join(root, '01-exact-a.png'), exact);
@@ -44,9 +44,10 @@ test('Photo Health finds exact and resized copies, flags blur, and exposes failu
   await fs.writeFile(path.join(root, '05-similar-copy.jpg'), similar);
   await fs.writeFile(path.join(root, '06-clear.png'), clearScene);
   await fs.writeFile(path.join(root, '07-blurry.png'), blurryScene);
-  await fs.writeFile(path.join(root, '08-video-a.mp4'), 'same video bytes');
-  await fs.writeFile(path.join(root, '09-video-b.mp4'), 'same video bytes');
-  await fs.writeFile(path.join(root, '10-broken.jpg'), 'not an image');
+  await fs.writeFile(path.join(root, '08-blurry-copy.png'), blurryScene);
+  await fs.writeFile(path.join(root, '09-video-a.mp4'), 'same video bytes');
+  await fs.writeFile(path.join(root, '10-video-b.mp4'), 'same video bytes');
+  await fs.writeFile(path.join(root, '11-broken.jpg'), 'not an image');
 
   const app = await new PhotoSorter({ dataDirectory }).initialize();
   t.after(async () => {
@@ -54,14 +55,14 @@ test('Photo Health finds exact and resized copies, flags blur, and exposes failu
     await fs.rm(temporary, { recursive: true, force: true });
   });
   const collectionId = app.createCollection('Health');
-  await app.addRoot(collectionId, root);
+  const rootId = await app.addRoot(collectionId, root);
   app.setPhotoHealthState(collectionId, 'enable');
 
   const status = await waitForHealth(app, collectionId);
-  assert.equal(status.total, 10);
-  assert.equal(status.processed, 10);
+  assert.equal(status.total, 11);
+  assert.equal(status.processed, 11);
   assert.equal(status.unsupported, 1);
-  assert.equal(status.blurry, 1);
+  assert.equal(status.blurry, 2);
   assert.equal(status.status, 'completed');
 
   const findings = app.listPhotoHealthFindings(collectionId, { type: 'duplicate', limit: 100 });
@@ -74,7 +75,7 @@ test('Photo Health finds exact and resized copies, flags blur, and exposes failu
   assert.ok(similarGroup.strength >= 0.95);
   const videoGroup = findings.items.find((finding) => (
     app.listPhotoHealthGroup(collectionId, finding.groupId).items
-      .some((member) => member.relativePath === '08-video-a.mp4')
+      .some((member) => member.relativePath === '09-video-a.mp4')
   ));
   assert.ok(videoGroup);
   assert.equal(app.listPhotoHealthGroup(collectionId, videoGroup.groupId).total, 2);
@@ -85,7 +86,9 @@ test('Photo Health finds exact and resized copies, flags blur, and exposes failu
   assert.equal(findings.items.some((finding) => app.listPhotoHealthGroup(collectionId, finding.groupId).items
     .some((member) => member.relativePath === '04-crop.png')), false);
 
-  const blur = app.listPhotoHealthFindings(collectionId, { type: 'blur' }).items[0];
+  const blurs = app.listPhotoHealthFindings(collectionId, { type: 'blur' }).items;
+  assert.equal(blurs.length, 2);
+  const blur = blurs.find((finding) => finding.label === '07-blurry.png');
   assert.equal(blur.label, '07-blurry.png');
   const blurredMedia = app.db.prepare(`
     SELECT m.id FROM media m JOIN roots r ON r.id = m.root_id
@@ -93,8 +96,14 @@ test('Photo Health finds exact and resized copies, flags blur, and exposes failu
   `).get(collectionId, blur.label).id;
   app.claimMediaLock(blurredMedia, 'phone');
   app.setDeviceDecision(blurredMedia, 'unsure', 'phone');
+  const blurryCopy = app.db.prepare(`
+    SELECT m.id FROM media m JOIN roots r ON r.id = m.root_id
+    WHERE r.collection_id = ? AND m.relative_path = '08-blurry-copy.png'
+  `).get(collectionId).id;
+  app.claimMediaLock(blurryCopy, 'phone');
+  app.setDeviceDecision(blurryCopy, 'unsure', 'phone');
   assert.equal(app.listPhotoHealthFindings(collectionId, { type: 'blur' }).total, 0);
-  assert.equal(app.listPhotoHealthFindings(collectionId, { type: 'blur', handled: 'handled' }).total, 1);
+  assert.equal(app.listPhotoHealthFindings(collectionId, { type: 'blur', handled: 'handled' }).total, 2);
 
   const members = app.listPhotoHealthGroup(collectionId, exactGroup.groupId).items;
   app.claimMediaLock(members[1].id, 'other-device');
@@ -112,6 +121,13 @@ test('Photo Health finds exact and resized copies, flags blur, and exposes failu
     .items.some((finding) => finding.groupId === exactGroup.groupId), true);
   assert.equal((await fs.readFile(path.join(root, '01-exact-a.png'))).equals(exact), true);
   assert.throws(() => app.listPhotoHealthGroup('another-collection', exactGroup.groupId), /not found/);
+
+  await fs.writeFile(path.join(root, '12-video-c.mp4'), 'same video bytes');
+  await app.scanRoot(rootId);
+  const updatedStatus = await waitForHealth(app, collectionId);
+  assert.equal(updatedStatus.total, 12);
+  assert.equal(updatedStatus.processed, 12);
+  assert.equal(app.listPhotoHealthGroup(collectionId, videoGroup.groupId).total, 3);
 });
 
 test('image analysis distinguishes a resized recompressed copy from a blurred image', async (t) => {

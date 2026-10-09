@@ -169,7 +169,7 @@
                   </div>
                 </div>
                 <p id="photo-health-status" role="status">Analysis is not enabled.</p>
-                <progress id="photo-health-progress" class="hidden" max="1" value="0"></progress>
+                <progress id="photo-health-progress" class="hidden" max="1" value="0" aria-label="Photo Health analysis progress"></progress>
                 <ul id="photo-health-errors" class="photo-health-errors"></ul>
                 <div class="photo-health-filters">
                   <label>Finding type
@@ -243,6 +243,7 @@
                   <li>Use the zoom controls or pinch on an image to zoom; drag a zoomed image to pan. Scroll the collection grid to browse large libraries. Press Escape to pause review.</li>
                   <li>Apply shows a move summary first, then requires a separate confirmation. Delete-category files move into a <code>deleted</code> folder; nothing is permanently deleted.</li>
                   <li>Restore moves the latest apply batch back when the original paths are free. Conflicts are never overwritten.</li>
+                  <li>Photo Health can find exact duplicates, near-identical photo copies, and clearly blurry photos. Analysis can be paused across devices; its review decisions never move files.</li>
                   <li>Unsupported image/video previews can still be categorized. Video playback depends on codecs available in your operating system.</li>
                   <li>Only use trusted local networks, or put the service behind your own HTTPS/VPN proxy. Do not expose it publicly.</li>
                   <li>PWA installation and passkeys require a secure HTTPS origin; passkeys also need host configuration.</li>

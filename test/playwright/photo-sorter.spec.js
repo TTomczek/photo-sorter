@@ -919,6 +919,35 @@ test('bounded grid pagination and real-time updates between browser devices', as
   }
 });
 
+test('Photo Health progress, duplicate comparison, and safe group review work in the browser', async () => {
+  const copyPath = path.join(fixture.root, '04-copy.png');
+  await fs.copyFile(path.join(fixture.root, '01-red.png'), copyPath);
+  await fixture.app.rescanCollection(fixture.collectionId);
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await setupAccount(page);
+    await page.locator('#app-navigation [data-view="photo-health"]').click();
+    await page.locator('#photo-health-enable').click();
+    await expect(page.locator('#photo-health-status')).toContainText('Analysis complete');
+    await expect(page.locator('.photo-health-finding h3').first()).toHaveText('Duplicate group · 2 photos');
+    await page.getByRole('button', { name: 'Compare and review' }).click();
+    await expect(page.locator('.health-compare img')).toHaveCount(2);
+    await expect(page.locator('.health-compare img').first()).toHaveJSProperty('naturalWidth', 96);
+    await expect(page.locator('.health-member-list input[type="checkbox"]')).toHaveCount(2);
+    await page.locator('.health-member-list input[type="checkbox"]').first().check();
+    await page.getByRole('button', { name: 'Keep selected; stage the rest as Deleted' }).click();
+    await expect(page.locator('#confirm-dialog')).toBeVisible();
+    await page.locator('#dialog-confirm').click();
+    await expect(page.locator('#photo-health-list')).toContainText('No findings match');
+    expect((await fs.readFile(path.join(fixture.root, '01-red.png'))).equals(
+      await fs.readFile(copyPath),
+    )).toBe(true);
+  } finally {
+    await context.close();
+  }
+});
+
 test('WebAuthn passkey registration, authentication and removal with a virtual authenticator', async () => {
   test.setTimeout(30_000);
   const context = await browser.newContext();

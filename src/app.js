@@ -10,10 +10,12 @@ const QRCode = require('qrcode');
 const { PasskeyService } = require('./passkeys');
 const {
   PHASH_MAX_DISTANCE,
+  SIMILARITY_PIXEL_DIFFERENCE_LIMIT,
   analyzeImage,
   fileSha256,
   hashBuckets,
   hashDistance,
+  signatureDifference,
 } = require('./photo-health');
 
 const IMAGE_EXTENSIONS = new Set([
@@ -327,6 +329,7 @@ function migrateDatabase(db) {
           status TEXT NOT NULL,
           sha256 TEXT,
           phash TEXT,
+          image_signature BLOB,
           width INTEGER,
           height INTEGER,
           blur_score REAL,
@@ -431,14 +434,7 @@ class PhotoSorter {
     this.db.prepare("UPDATE photo_health_items SET status = 'pending' WHERE status = 'processing'").run();
     this.passkeys = new PasskeyService(this.db);
     await this.recoverApplyOperations();
-    this.photoHealthTimer = setInterval(() => {
-      if (this.photoHealthTask) return;
-      this.photoHealthTask = this.processPhotoHealthQueue()
-        .catch((error) => {
-          if (!this.closed) console.error('Photo Health analysis failed:', error);
-        })
-        .finally(() => { this.photoHealthTask = null; });
-    }, 250);
+    this.photoHealthTimer = setInterval(() => this.schedulePhotoHealthWork(), 250);
     this.photoHealthTimer.unref();
     setImmediate(() => {
       if (this.closed || !this.db) return;
@@ -1216,7 +1212,7 @@ class PhotoSorter {
       this.photoHealthCursors.delete(collectionId);
       this.photoHealthBackfillComplete.delete(collectionId);
     }
-    const enabled = action === 'enable' ? 1 : 1;
+    const enabled = 1;
     const paused = action === 'pause' ? 1 : 0;
     this.db.prepare(`
       INSERT INTO photo_health_settings(collection_id, enabled, paused, updated_at)
@@ -1280,13 +1276,27 @@ class PhotoSorter {
       if (!media) this.photoHealthBackfillComplete.add(state.collectionId);
       else this.photoHealthCursors.set(state.collectionId, media.rowId);
     }
-    if (!media) return;
+    if (!media) return false;
     this.photoHealthBusy = true;
     try {
       await this.analyzePhotoHealthItem(state.collectionId, media);
+      return true;
     } finally {
       this.photoHealthBusy = false;
     }
+  }
+
+  schedulePhotoHealthWork() {
+    if (this.closed || this.photoHealthTask) return;
+    const task = this.processPhotoHealthQueue();
+    this.photoHealthTask = task;
+    task.then((processed) => {
+      if (this.photoHealthTask === task) this.photoHealthTask = null;
+      if (processed && !this.closed) setImmediate(() => this.schedulePhotoHealthWork());
+    }, (error) => {
+      if (!this.closed) console.error('Photo Health analysis failed:', error);
+      if (this.photoHealthTask === task) this.photoHealthTask = null;
+    });
   }
 
   async analyzePhotoHealthItem(collectionId, media) {
@@ -1295,7 +1305,8 @@ class PhotoSorter {
       INSERT INTO photo_health_items(media_id, size, modified_at, kind, status)
       VALUES (?, ?, ?, ?, 'processing')
       ON CONFLICT(media_id) DO UPDATE SET size = excluded.size, modified_at = excluded.modified_at,
-        kind = excluded.kind, status = 'processing', sha256 = NULL, phash = NULL, width = NULL,
+        kind = excluded.kind, status = 'processing', sha256 = NULL, phash = NULL,
+        image_signature = NULL, width = NULL,
         height = NULL, blur_score = NULL, is_blurry = 0, error = NULL, analyzed_at = NULL
     `).run(media.id, media.size, media.modifiedAt, media.kind);
     let status = 'failed';
@@ -1315,7 +1326,10 @@ class PhotoSorter {
       }
       const result = media.kind === 'image'
         ? await analyzeImage(resolvedPath)
-        : { sha256: await fileSha256(resolvedPath), phash: null, width: null, height: null, blurScore: null, isBlurry: false };
+        : {
+          sha256: await fileSha256(resolvedPath), phash: null, imageSignature: null,
+          width: null, height: null, blurScore: null, isBlurry: false,
+        };
       const finalStat = await fs.stat(resolvedPath);
       if (finalStat.size !== media.size || finalStat.mtimeMs !== media.modifiedAt) {
         throw new Error('File changed during analysis. Rescan the collection to update its index.');
@@ -1329,10 +1343,10 @@ class PhotoSorter {
       }
       const analyzedAt = new Date().toISOString();
       this.db.prepare(`
-        UPDATE photo_health_items SET status = 'analyzed', sha256 = ?, phash = ?, width = ?, height = ?,
-          blur_score = ?, is_blurry = ?, error = NULL, analyzed_at = ?
+        UPDATE photo_health_items SET status = 'analyzed', sha256 = ?, phash = ?, image_signature = ?,
+          width = ?, height = ?, blur_score = ?, is_blurry = ?, error = NULL, analyzed_at = ?
         WHERE media_id = ?
-      `).run(result.sha256, result.phash, result.width, result.height, result.blurScore,
+      `).run(result.sha256, result.phash, result.imageSignature, result.width, result.height, result.blurScore,
         result.isBlurry ? 1 : 0, analyzedAt, media.id);
       this.recordPhotoHealthMatches(collectionId, media, result);
       this.log('photo_health_item_analyzed', {
@@ -1361,7 +1375,7 @@ class PhotoSorter {
     const distances = new Map(exactMatches.map((match) => [match.mediaId, 0]));
     if (media.kind === 'image') {
       const candidates = this.db.prepare(`
-        SELECT DISTINCT h.media_id AS mediaId, h.phash, h.width, h.height
+        SELECT DISTINCT h.media_id AS mediaId, h.phash, h.image_signature AS imageSignature, h.width, h.height
         FROM photo_health_hash_buckets b JOIN photo_health_items h ON h.media_id = b.media_id
         JOIN media m ON m.id = h.media_id JOIN roots r ON r.id = m.root_id
         WHERE b.collection_id = ? AND b.bucket IN (?, ?, ?, ?) AND b.media_id != ?
@@ -1375,7 +1389,11 @@ class PhotoSorter {
         const newRatio = result.width / result.height;
         if (Math.abs(oldRatio - newRatio) / Math.max(oldRatio, newRatio) > 0.01) continue;
         const distance = hashDistance(result.phash, candidate.phash);
-        if (distance <= PHASH_MAX_DISTANCE) distances.set(candidate.mediaId, distance);
+        if (distance <= PHASH_MAX_DISTANCE
+          && signatureDifference(result.imageSignature, candidate.imageSignature)
+            <= SIMILARITY_PIXEL_DIFFERENCE_LIMIT) {
+          distances.set(candidate.mediaId, distance);
+        }
       }
       for (const bucket of hashBuckets(result.phash)) {
         this.db.prepare(`
@@ -1617,7 +1635,8 @@ class PhotoSorter {
         JOIN photo_health_settings s ON s.collection_id = r.collection_id AND s.enabled = 1
         WHERE m.id = ?
         ON CONFLICT(media_id) DO UPDATE SET size = excluded.size, modified_at = excluded.modified_at,
-          kind = excluded.kind, status = 'pending', sha256 = NULL, phash = NULL, width = NULL,
+          kind = excluded.kind, status = 'pending', sha256 = NULL, phash = NULL,
+          image_signature = NULL, width = NULL,
           height = NULL, blur_score = NULL, is_blurry = 0, error = NULL, analyzed_at = NULL
         WHERE photo_health_items.size != excluded.size OR photo_health_items.modified_at != excluded.modified_at
           OR photo_health_items.kind != excluded.kind

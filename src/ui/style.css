@@ -118,7 +118,12 @@ button.keep { background: #1d7542; }
 .health-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; margin: .6rem 0; }
 .health-compare figure { min-width: 0; margin: 0; }
 .health-compare-viewport { height: 15rem; overflow: hidden; display: grid; place-items: center; border-radius: .45rem; background: #101418; touch-action: none; }
-.health-compare-viewport img { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; }
+.health-compare-viewport img, .health-compare-viewport video {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+}
 .health-compare figcaption { margin-top: .25rem; overflow-wrap: anywhere; font-size: .82rem; }
 .health-member-list { display: grid; gap: .35rem; max-height: 14rem; overflow: auto; padding: .4rem; border: 1px solid #d7dce1; border-radius: .45rem; }
 .health-member-list label { display: flex; align-items: center; gap: .5rem; min-width: 0; overflow-wrap: anywhere; }
