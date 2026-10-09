@@ -6,6 +6,17 @@
     'Local-network HTTP is not encrypted. Use only on a trusted LAN; never expose this service directly to the internet.':
       'HTTP im lokalen Netzwerk ist nicht verschlüsselt. Nur in einem vertrauenswürdigen LAN verwenden und niemals direkt dem Internet aussetzen.',
     'Password': 'Passwort',
+    'Change password': 'Passwort ändern',
+    'Current password': 'Aktuelles Passwort',
+    'New password': 'Neues Passwort',
+    'Confirm new password': 'Neues Passwort bestätigen',
+    'Changing your password signs out other devices.': 'Beim Ändern des Passworts werden andere Geräte abgemeldet.',
+    'Use at least 12 characters, including uppercase and lowercase letters, a number, and a special character.':
+      'Verwende mindestens 12 Zeichen mit Groß- und Kleinbuchstaben, einer Zahl und einem Sonderzeichen.',
+    'New passwords do not match.': 'Die neuen Passwörter stimmen nicht überein.',
+    'Current password is incorrect.': 'Das aktuelle Passwort ist falsch.',
+    'Password changed. Other devices have been signed out.':
+      'Passwort geändert. Andere Geräte wurden abgemeldet.',
     'Continue': 'Weiter',
     'Collection': 'Sammlung',
     'Collections': 'Sammlungen',
@@ -140,14 +151,15 @@
     'Log in': 'Anmelden',
     'Create your password': 'Passwort erstellen',
     'Your session ends when the host service restarts.': 'Deine Sitzung endet beim Neustart des Hostdienstes.',
-    'Use at least 12 characters. This password protects access to your local library.':
-      'Verwende mindestens 12 Zeichen. Dieses Passwort schützt den Zugriff auf deine lokale Bibliothek.',
     'Set password': 'Passwort festlegen',
     'Cannot reach the local host': 'Der lokale Host ist nicht erreichbar',
     'Authentication required.': 'Anmeldung erforderlich.',
     'Incorrect password.': 'Falsches Passwort.',
     'Too many attempts. Try again later.': 'Zu viele Versuche. Bitte später erneut versuchen.',
     'Use a password of at least 12 characters.': 'Verwende ein Passwort mit mindestens 12 Zeichen.',
+    'Password must not exceed 1024 bytes.': 'Das Passwort darf höchstens 1024 Byte lang sein.',
+    'Password must include an uppercase letter, a lowercase letter, a number, and a special character.':
+      'Das Passwort muss einen Großbuchstaben, einen Kleinbuchstaben, eine Zahl und ein Sonderzeichen enthalten.',
     'Password setup has already been completed.': 'Die Passworteinrichtung wurde bereits abgeschlossen.',
     'Collection not found.': 'Sammlung nicht gefunden.',
     'Root not found.': 'Ordner nicht gefunden.',

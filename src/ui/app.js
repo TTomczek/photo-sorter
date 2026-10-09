@@ -1147,7 +1147,7 @@ async function showAuthentication() {
   byId('auth-title').textContent = setupComplete ? 'Log in' : 'Create your password';
   byId('auth-description').textContent = setupComplete
     ? 'Your session ends when the host service restarts.'
-    : 'Use at least 12 characters. This password protects access to your local library.';
+    : 'Use at least 12 characters, including uppercase and lowercase letters, a number, and a special character.';
   byId('auth-submit').textContent = setupComplete ? 'Log in' : 'Set password';
   byId('password').autocomplete = setupComplete ? 'current-password' : 'new-password';
   byId('auth-form').onsubmit = async (event) => {
@@ -1450,6 +1450,31 @@ byId('settings-form').addEventListener('submit', (event) => {
   queueSettingsSave();
 });
 
+byId('password-change-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const error = byId('password-change-error');
+  error.textContent = '';
+  const newPassword = byId('new-password').value;
+  if (newPassword !== byId('confirm-new-password').value) {
+    error.textContent = 'New passwords do not match.';
+    return;
+  }
+  try {
+    await request('/api/password', {
+      method: 'PUT',
+      body: JSON.stringify({
+        currentPassword: byId('current-password').value,
+        newPassword,
+      }),
+    });
+    form.reset();
+    setStatus('Password changed. Other devices have been signed out.');
+  } catch (requestError) {
+    error.textContent = requestError.message;
+  }
+});
+
 byId('autostart').addEventListener('change', async (event) => {
   try {
     event.target.checked = await window.photoSorter.setAutostart(event.target.checked);
@@ -1675,12 +1700,10 @@ for (const eventName of ['pointerup', 'pointercancel', 'lostpointercapture']) {
 }
 
 async function initializeApp() {
-  if (developmentMode) {
-    const { authenticated } = await request('/api/session');
-    if (authenticated) {
-      showApp();
-      return;
-    }
+  const { authenticated } = await request('/api/session');
+  if (authenticated) {
+    showApp();
+    return;
   }
   await showAuthentication();
 }

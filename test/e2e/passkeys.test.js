@@ -20,7 +20,7 @@ test('passkey APIs enforce the configured origin and preserve password login', a
     if (priorRpId === undefined) delete process.env.PHOTO_SORTER_WEBAUTHN_RP_ID;
     else process.env.PHOTO_SORTER_WEBAUTHN_RP_ID = priorRpId;
   });
-  await app.createPassword('a secure test password');
+  await app.createPassword('A secure test password! 42');
   const port = await app.listen(0);
   const origin = `http://127.0.0.1:${port}`;
   let cookie = '';
@@ -46,7 +46,7 @@ test('passkey APIs enforce the configured origin and preserve password login', a
   const login = await api('/api/login', {
     method: 'POST',
     requestOrigin: 'https://photos.example.test',
-    body: JSON.stringify({ password: 'a secure test password' }),
+    body: JSON.stringify({ password: 'A secure test password! 42' }),
   });
   assert.equal(login.response.status, 200);
   const sessionCookie = login.response.headers.getSetCookie()

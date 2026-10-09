@@ -5,7 +5,7 @@
 1. Install Node.js 22.13+.
 2. Run `npm install`.
 3. Run `npm run dev`.
-4. In the host window, set a password of at least 12 characters, create a collection, and choose one or more folders.
+4. In the host window, set a password of at least 12 characters containing uppercase and lowercase letters, a number, and a special character; then create a collection and choose one or more folders.
 5. Log in from a phone using a displayed address on the same private network.
 
 `npm run lint` runs ESLint. `npm test` runs unit tests, HTTP workflow tests, and Playwright browser tests against a real local server. Browser tests launch Chromium and create generated PNG fixtures to exercise image decoding, generated preview caching, responsive review controls, and file operations. Run `npx playwright install chromium` once after installing npm packages. `npm run test:unit`, `npm run test:e2e`, and `npm run test:browser` run the individual suites. `npm run build` checks and packages the unpacked app for the current OS; `npm run dist:win`, `npm run dist:mac`, and `npm run dist:linux` build the native installer/package target.

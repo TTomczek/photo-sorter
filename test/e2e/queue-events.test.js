@@ -16,7 +16,7 @@ test('authenticated queue event streams publish shared decision changes promptly
     await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
-  await app.createPassword('a secure test password');
+  await app.createPassword('A secure test password! 42');
   const collectionId = app.createCollection('Queue events');
   await app.addRoot(collectionId, root);
   const port = await app.listen(0);
@@ -25,7 +25,7 @@ test('authenticated queue event streams publish shared decision changes promptly
   const login = await fetch(`${origin}/api/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password: 'a secure test password' }),
+    body: JSON.stringify({ password: 'A secure test password! 42' }),
   });
   assert.equal(login.status, 200);
   const cookie = (login.headers.getSetCookie?.() || []).map((value) => value.split(';')[0]).join('; ');

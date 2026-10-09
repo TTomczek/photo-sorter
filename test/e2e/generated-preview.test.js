@@ -18,7 +18,7 @@ test('preview extraction closes files without thumbnails and rejects stale cache
     await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
-  await app.createPassword('a secure test password');
+  await app.createPassword('A secure test password! 42');
   const collectionId = app.createCollection('Preview test');
   const rootId = await app.addRoot(collectionId, root);
   const port = await app.listen(0);
@@ -44,7 +44,7 @@ test('preview extraction closes files without thumbnails and rejects stale cache
 
   assert.equal((await api('/api/login', {
     method: 'POST',
-    body: JSON.stringify({ password: 'a secure test password' }),
+    body: JSON.stringify({ password: 'A secure test password! 42' }),
   })).response.status, 200);
   const media = await api(`/api/media?collectionId=${collectionId}&category=unseen`);
   assert.equal(media.body.items.length, 3);

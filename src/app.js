@@ -458,17 +458,28 @@ class PhotoSorter {
   async createPassword(password) {
     if (this.isSetupComplete()) throw new Error('Password setup has already been completed.');
     this.validatePassword(password);
+    const credentials = await this.derivePasswordCredentials(password);
+    this.db.prepare('INSERT INTO account(id, salt, password_hash) VALUES (1, ?, ?)')
+      .run(credentials.salt, credentials.passwordHash);
+    this.log('account_created', {});
+  }
+
+  async derivePasswordCredentials(password) {
     const salt = crypto.randomBytes(16).toString('hex');
     const hash = await new Promise((resolve, reject) => {
       crypto.scrypt(password, salt, 64, (error, derived) => error ? reject(error) : resolve(derived.toString('hex')));
     });
-    this.db.prepare('INSERT INTO account(id, salt, password_hash) VALUES (1, ?, ?)').run(salt, hash);
-    this.log('account_created', {});
+    return { salt, passwordHash: hash };
   }
 
   validatePassword(password) {
-    if (typeof password !== 'string' || password.length < 12 || Buffer.byteLength(password) > 1024) {
+    if (typeof password !== 'string' || Array.from(password).length < 12) {
       throw new Error('Use a password of at least 12 characters.');
+    }
+    if (Buffer.byteLength(password) > 1024) throw new Error('Password must not exceed 1024 bytes.');
+    if (!/\p{Lu}/u.test(password) || !/\p{Ll}/u.test(password)
+      || !/\p{N}/u.test(password) || !/[^\p{L}\p{N}\s]/u.test(password)) {
+      throw new Error('Password must include an uppercase letter, a lowercase letter, a number, and a special character.');
     }
   }
 
@@ -479,6 +490,17 @@ class PhotoSorter {
       crypto.scrypt(password, account.salt, 64, (error, derived) => error ? reject(error) : resolve(derived));
     });
     return crypto.timingSafeEqual(actual, Buffer.from(account.password_hash, 'hex'));
+  }
+
+  async changePassword(currentPassword, newPassword) {
+    if (!await this.authenticate(currentPassword)) {
+      throw Object.assign(new Error('Current password is incorrect.'), { status: 401 });
+    }
+    this.validatePassword(newPassword);
+    const credentials = await this.derivePasswordCredentials(newPassword);
+    this.db.prepare('UPDATE account SET salt = ?, password_hash = ? WHERE id = 1')
+      .run(credentials.salt, credentials.passwordHash);
+    this.log('password_changed', {});
   }
 
   createCollection(name) {
@@ -1789,6 +1811,17 @@ class PhotoSorter {
         return this.sendJson(response, 200, { addresses });
       }
       const session = this.requireSession(request);
+      if (request.method === 'PUT' && url.pathname === '/api/password') {
+        const { currentPassword, newPassword } = await this.readJson(request);
+        await this.changePassword(currentPassword, newPassword);
+        const currentToken = this.sessionToken(request);
+        for (const token of this.sessions.keys()) {
+          if (token === currentToken) continue;
+          this.sessions.delete(token);
+          this.closeEventStreamsForSession(token);
+        }
+        return this.sendJson(response, 200, { changed: true });
+      }
       if (request.method === 'GET' && url.pathname === '/api/events') {
         const collectionId = url.searchParams.get('collectionId');
         if (collectionId && !this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {

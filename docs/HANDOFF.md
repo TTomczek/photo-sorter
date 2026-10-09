@@ -20,12 +20,12 @@ Implement the application from scratch using this handoff as the product source 
 | 4 | Which host operating systems? | Windows, macOS, and Linux desktops. |
 | 5 | One universal installer or per-OS packages? | Use a cross-platform technology and one codebase; produce a separate native installer/package for each OS. One identical native installer artifact is not expected. |
 | 6 | Preferred stack? | Node.js with Electron, shared responsive web UI, and native desktop folder picker. |
-| 7 | Authentication method? | Strong password required; biometric/passkey login was acceptable where supported, but is deferred from the MVP. |
+| 7 | Authentication method? | Require a password of at least 12 characters with uppercase and lowercase letters, a number, and a special character; biometric/passkey login was acceptable where supported, but is deferred from the MVP. |
 | 8 | Forgotten-password recovery? | Host-only reset command; no email service. |
 | 9 | Internet/cloud dependency? | Fully local. Normal operation must not need an internet connection, cloud account, or cloud sync. |
 | 10 | HTTPS ownership? | HTTPS is handled by the user's reverse proxy/VPN, not by the app in the MVP. |
 | 11 | Is LAN HTTP allowed? | Yes, with a prominent warning that credentials and media are not encrypted in transit. Do not expose the service directly to the public internet. HTTPS/VPN is optional but recommended on untrusted networks. |
-| 12 | How long should a login last? | Require authentication again after each browser/app restart. |
+| 12 | How long should a login last? | Keep the current host session across page reloads, but require authentication again after the host service or browser session restarts. |
 | 13 | How are scan roots chosen from a phone? | Only the host desktop app can invoke the native folder picker. Phone users can select and use existing collections, not enter arbitrary host paths. |
 | 14 | How does a phone connect? | Show local address(es) and a scannable QR code in the host UI. |
 | 15 | Should the host keep serving after the desktop window closes? | Yes. Offer a background service/autostart option and an explicit quit/stop control. |
@@ -114,6 +114,7 @@ Implement the application from scratch using this handoff as the product source 
 - Pausing review or completing the queue opens Browse. Browse starts at All and remembers its last category filter on that device. Review retains swipe and arrow-key mappings plus compact explicit phone buttons, zoom, and pan.
 - Keep a pinned, narrow, collapsible side sheet visible by default on large screens. On phone-sized screens keep it closed behind a burger button and open it as an overlay drawer. Give Review, Collections, Browse, Apply/restore, History, Help, and Settings equal navigation prominence within that sheet.
 - Persist server-backed settings immediately when their controls change; do not require a separate save action.
+- Allow an authenticated user to change the account password from Settings after verifying the current password. Keep the current session active and revoke other sessions.
 
 ## Authoritative safety and behavior invariants
 

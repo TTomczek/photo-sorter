@@ -5,7 +5,7 @@ const path = require('node:path');
 const zlib = require('node:zlib');
 const { PhotoSorter } = require('../../src/app');
 
-const PASSWORD = 'browser test password';
+const PASSWORD = 'Browser test password! 42';
 const TEST_IMAGE_NAMES = ['01-red.png', '02-green.png', '03-blue.png'];
 let browser;
 let fixture;
@@ -416,15 +416,12 @@ test('unsure items return at the end of the review queue and resolved queue open
   }
 });
 
-test('development reload keeps an authenticated session', async () => {
+test('page reload keeps an authenticated session', async () => {
   const context = await browser.newContext();
   const page = await context.newPage();
   try {
     await fixture.app.createPassword(PASSWORD);
-    await page.addInitScript(() => {
-      window.photoSorter = { isDesktop: true, getAutostart: async () => false };
-    });
-    await page.goto(`${fixture.origin}/?dev=1`);
+    await page.goto(fixture.origin);
     await expect(page.locator('#auth-title')).toHaveText('Log in');
     await page.locator('#password').fill(PASSWORD);
     await page.locator('#auth-submit').click();
@@ -434,6 +431,41 @@ test('development reload keeps an authenticated session', async () => {
     await expect(page.locator('#app-panel')).toBeVisible();
     await expect(page.locator('#auth-panel')).toBeHidden();
     await expect(page.locator('#collection-title')).toHaveText('Review');
+  } finally {
+    await context.close();
+  }
+});
+
+test('logged-in users can change their password without losing the current session', async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const newPassword = 'A completely new secure password! 42';
+  try {
+    await setupAccount(page);
+    await page.locator('#app-navigation [data-view="settings"]').click();
+    await page.locator('#password-management summary').click();
+    await page.locator('#current-password').fill(PASSWORD);
+    await page.locator('#new-password').fill('a completely new secure password 42');
+    await page.locator('#confirm-new-password').fill('a completely new secure password 42');
+    await page.locator('#password-change-form button[type="submit"]').click();
+    await expect(page.locator('#password-change-error'))
+      .toContainText('Password must include an uppercase letter, a lowercase letter, a number, and a special character.');
+    await page.locator('#new-password').fill(newPassword);
+    await page.locator('#confirm-new-password').fill(newPassword);
+    await page.locator('#password-change-form button[type="submit"]').click();
+    await expect(page.locator('#status')).toContainText('Password changed. Other devices have been signed out.');
+    await expect(page.locator('#current-password')).toHaveValue('');
+    await page.reload();
+    await expect(page.locator('#app-panel')).toBeVisible();
+
+    await page.locator('#logout').click();
+    await expect(page.locator('#auth-panel')).toBeVisible();
+    await page.locator('#password').fill(PASSWORD);
+    await page.locator('#auth-submit').click();
+    await expect(page.locator('#auth-error')).toHaveText('Incorrect password.');
+    await page.locator('#password').fill(newPassword);
+    await page.locator('#auth-submit').click();
+    await expect(page.locator('#app-panel')).toBeVisible();
   } finally {
     await context.close();
   }
@@ -599,10 +631,8 @@ test('settings, German localization, theme/grid preferences, device state, colle
       previewCacheLimitMb: 0,
     });
     await page.reload();
-    await expect(page.locator('#auth-title')).toHaveText('Anmelden');
-    await page.locator('#password').fill(PASSWORD);
-    await page.locator('#auth-submit').click();
     await expect(page.locator('#app-panel')).toBeVisible();
+    await expect(page.locator('#auth-panel')).toBeHidden();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
     await expect(page.locator('html')).toHaveAttribute('data-grid-columns', '4');
     await expect(page.locator('#language')).toHaveValue('de');
@@ -639,10 +669,8 @@ test('settings, German localization, theme/grid preferences, device state, colle
     await expect(page.locator('#current-media')).toContainText('Keine ungesehenen oder unsicheren Fotos');
     await fixture.app.addRoot(fixture.collectionId, fixture.root);
     await page.reload();
-    await expect(page.locator('#auth-title')).toHaveText('Anmelden');
-    await page.locator('#password').fill(PASSWORD);
-    await page.locator('#auth-submit').click();
     await expect(page.locator('#app-panel')).toBeVisible();
+    await expect(page.locator('#auth-panel')).toBeHidden();
     await page.locator('#app-navigation [data-view="collections"]').click();
     await expect(page.locator('#root-list')).toContainText(fixture.root);
     await expect(page.locator('#root-list button')).toHaveAttribute('aria-label', 'Entfernen');

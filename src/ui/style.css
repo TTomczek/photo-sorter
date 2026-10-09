@@ -364,6 +364,8 @@ body.app-active #network-warning {
 #new-collection-form input { flex: 1 1 14rem; }
 #collections-view details { margin-top: 1rem; }
 #settings-form { max-width: 48rem; }
+#password-change-form { display: grid; gap: .5rem; max-width: 32rem; }
+#password-change-form > button { justify-self: start; }
 #settings-panel { margin-top: 1rem; }
 #lan-addresses { margin-top: .7rem; }
 #audit-list { max-height: 65vh; }

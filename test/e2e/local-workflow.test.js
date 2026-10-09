@@ -25,7 +25,7 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
     await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
-  await app.createPassword('a secure test password');
+  await app.createPassword('A secure test password! 42');
   const collectionId = app.createCollection('Weekend');
   const registeredRootId = await app.addRoot(collectionId, root);
   assert.equal(await app.addRoot(collectionId, root), registeredRootId);
@@ -52,7 +52,7 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
 
   const unauthorized = await api('/api/collections');
   assert.equal(unauthorized.response.status, 401);
-  const login = await api('/api/login', { method: 'POST', body: JSON.stringify({ password: 'a secure test password' }) });
+  const login = await api('/api/login', { method: 'POST', body: JSON.stringify({ password: 'A secure test password! 42' }) });
   assert.equal(login.response.status, 200);
   const otherDevice = async (route, options = {}) => {
     const response = await fetch(`${baseUrl}${route}`, {
@@ -70,7 +70,7 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
   };
   otherDevice.cookie = '';
   const secondLogin = await otherDevice('/api/login', {
-    method: 'POST', body: JSON.stringify({ password: 'a secure test password' }),
+    method: 'POST', body: JSON.stringify({ password: 'A secure test password! 42' }),
   });
   assert.equal(secondLogin.response.status, 200);
 
@@ -168,6 +168,34 @@ test('authenticated collection scan, review, safe apply, and conflict-aware rest
   assert.equal((await otherDevice(`/api/media/${photo.id}/lock`, { method: 'POST' })).response.status, 200);
   await otherDevice(`/api/media/${photo.id}/lock`, { method: 'DELETE' });
   await api(`/api/media/${photo.id}/lock`, { method: 'POST' });
+  assert.equal((await api('/api/password', {
+    method: 'PUT',
+    body: JSON.stringify({
+      currentPassword: 'incorrect password',
+      newPassword: 'A second secure test password! 42',
+    }),
+  })).response.status, 401);
+  assert.equal((await api('/api/password', {
+    method: 'PUT',
+    body: JSON.stringify({ currentPassword: 'A secure test password! 42', newPassword: 'short' }),
+  })).response.status, 400);
+  assert.deepEqual((await api('/api/password', {
+    method: 'PUT',
+    body: JSON.stringify({
+      currentPassword: 'A secure test password! 42',
+      newPassword: 'A second secure test password! 42',
+    }),
+  })).body, { changed: true });
+  assert.equal((await api('/api/session')).body.authenticated, true);
+  assert.equal((await otherDevice('/api/collections')).response.status, 401);
+  assert.equal((await otherDevice('/api/login', {
+    method: 'POST',
+    body: JSON.stringify({ password: 'A secure test password! 42' }),
+  })).response.status, 401);
+  assert.equal((await otherDevice('/api/login', {
+    method: 'POST',
+    body: JSON.stringify({ password: 'A second secure test password! 42' }),
+  })).response.status, 200);
   const invalidDecision = await api(`/api/media/${photo.id}/decision`, {
     method: 'PUT', body: JSON.stringify({ category: 'purge' }),
   });
@@ -239,7 +267,7 @@ test('a symlinked output directory cannot redirect an apply outside its register
     await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
-  await app.createPassword('a secure test password');
+  await app.createPassword('A secure test password! 42');
   const collectionId = app.createCollection('Safe collection');
   await app.addRoot(collectionId, root);
   const item = app.listMedia({ collectionId, category: 'unseen' }).items[0];
@@ -269,7 +297,7 @@ test('replacing a registered root with a symlink cannot expose its new target', 
     await fs.rm(temporary, { recursive: true, force: true });
   });
 
-  await app.createPassword('a secure test password');
+  await app.createPassword('A secure test password! 42');
   const collectionId = app.createCollection('Root identity');
   const rootId = await app.addRoot(collectionId, root);
   await fs.rename(root, originalDirectory);
@@ -285,7 +313,7 @@ test('replacing a registered root with a symlink cannot expose its new target', 
   const login = await fetch(`${baseUrl}/api/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password: 'a secure test password' }),
+    body: JSON.stringify({ password: 'A secure test password! 42' }),
   });
   const cookie = login.headers.get('set-cookie').split(';')[0];
   const item = app.listMedia({ collectionId, category: 'unseen' }).items[0];
@@ -305,7 +333,7 @@ test('root removal and collection archival preserve history while releasing acti
     await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
-  await app.createPassword('a secure test password');
+  await app.createPassword('A secure test password! 42');
   const originalCollection = app.createCollection('Original');
   const registeredRoot = await app.addRoot(originalCollection, root);
   const media = app.listMedia({ collectionId: originalCollection, category: 'unseen' }).items[0];
@@ -319,7 +347,7 @@ test('root removal and collection archival preserve history while releasing acti
   const response = await fetch(`http://127.0.0.1:${port}/api/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password: 'a secure test password' }),
+    body: JSON.stringify({ password: 'A secure test password! 42' }),
   });
   const cookies = response.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ');
   app.archiveCollection(originalCollection);
@@ -360,7 +388,7 @@ test('background scans expose incremental progress and finish indexing without b
     await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
-  await app.createPassword('a secure test password');
+  await app.createPassword('A secure test password! 42');
   const collectionId = app.createCollection('Large collection');
   const rootId = await app.addRoot(collectionId, root, { waitForScan: false });
   const initial = app.listScanStatus(collectionId);
@@ -381,7 +409,7 @@ test('background scans expose incremental progress and finish indexing without b
   const login = await fetch(`http://127.0.0.1:${port}/api/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password: 'a secure test password' }),
+    body: JSON.stringify({ password: 'A secure test password! 42' }),
   });
   const cookies = login.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ');
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -414,7 +442,7 @@ test('root watcher indexes additions, resets changed-file decisions, and hides r
     await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
-  await app.createPassword('a secure test password');
+  await app.createPassword('A secure test password! 42');
   const collectionId = app.createCollection('Watched');
   const rootId = await app.addRoot(collectionId, root);
   if (!app.rootWatchers.has(rootId)) return t.skip('Recursive filesystem watching is unavailable.');
@@ -458,7 +486,7 @@ test('confirmed apply reconciles category changes by moving and restoring files'
     await fs.rm(temporary, { recursive: true, force: true });
   });
 
-  await app.createPassword('a secure test password');
+  await app.createPassword('A secure test password! 42');
   const collectionId = app.createCollection('Reconcile');
   await app.addRoot(collectionId, root);
   const item = app.listMedia({ collectionId, category: 'unseen' }).items[0];

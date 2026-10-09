@@ -22,21 +22,38 @@ async function createSorter(t) {
   return { app, collectionId, root };
 }
 
-test('password setup validates strength, stores only a salted hash, and authenticates correctly', async (t) => {
+test('password setup and changes validate strength, store salted hashes, and authenticate correctly', async (t) => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-password-'));
   const app = await new PhotoSorter({ dataDirectory: temporary }).initialize();
+  const originalPassword = 'A sufficiently strong password! 42';
+  const replacementPassword = 'Another secure password! 42';
   t.after(async () => {
     await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
 
   await assert.rejects(app.createPassword('too-short'), /at least 12 characters/);
-  await app.createPassword('a password with enough length');
+  for (const weakPassword of [
+    'a sufficiently long 123!',
+    'A SUFFICIENTLY LONG 123!',
+    'A sufficiently long password!',
+    'A sufficiently long password 123',
+  ]) {
+    await assert.rejects(app.createPassword(weakPassword), /uppercase letter.*special character/);
+  }
+  await app.createPassword(originalPassword);
   const account = app.db.prepare('SELECT salt, password_hash FROM account WHERE id = 1').get();
-  assert.notEqual(account.password_hash, 'a password with enough length');
+  assert.notEqual(account.password_hash, originalPassword);
   assert.notEqual(account.salt, account.password_hash);
-  assert.equal(await app.authenticate('a password with enough length'), true);
+  assert.equal(await app.authenticate(originalPassword), true);
   assert.equal(await app.authenticate('incorrect password'), false);
+  await assert.rejects(app.changePassword('incorrect password', replacementPassword), /Current password is incorrect/);
+  await assert.rejects(app.changePassword(originalPassword, 'short'), /at least 12 characters/);
+  await app.changePassword(originalPassword, replacementPassword);
+  const changedAccount = app.db.prepare('SELECT salt, password_hash FROM account WHERE id = 1').get();
+  assert.notEqual(changedAccount.salt, account.salt);
+  assert.equal(await app.authenticate(originalPassword), false);
+  assert.equal(await app.authenticate(replacementPassword), true);
   await assert.rejects(app.createPassword('another sufficiently long password'), /already been completed/);
 });
 

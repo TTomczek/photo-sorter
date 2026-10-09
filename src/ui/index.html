@@ -214,6 +214,21 @@
                   </label>
                 </form>
               </details>
+              <details id="password-management" class="panel">
+                <summary>Change password</summary>
+                <p>Changing your password signs out other devices.</p>
+                <form id="password-change-form" class="account-form">
+                  <label for="current-password">Current password</label>
+                  <input id="current-password" type="password" autocomplete="current-password" required>
+                  <label for="new-password">New password</label>
+                  <input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required>
+                  <small>Use at least 12 characters, including uppercase and lowercase letters, a number, and a special character.</small>
+                  <label for="confirm-new-password">Confirm new password</label>
+                  <input id="confirm-new-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required>
+                  <p id="password-change-error" class="error" role="alert"></p>
+                  <button type="submit">Change password</button>
+                </form>
+              </details>
               <details id="passkey-management" class="panel hidden">
                 <summary>Passkeys</summary>
                 <p id="passkey-info"></p>
