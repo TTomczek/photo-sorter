@@ -8,6 +8,13 @@ const { DatabaseSync } = require('node:sqlite');
 const exifr = require('exifr');
 const QRCode = require('qrcode');
 const { PasskeyService } = require('./passkeys');
+const {
+  PHASH_MAX_DISTANCE,
+  analyzeImage,
+  fileSha256,
+  hashBuckets,
+  hashDistance,
+} = require('./photo-health');
 
 const IMAGE_EXTENSIONS = new Set([
   '.avif', '.bmp', '.gif', '.heic', '.heif', '.jpeg', '.jpg', '.png',
@@ -303,6 +310,57 @@ function migrateDatabase(db) {
         `);
       },
     },
+    {
+      version: 4,
+      apply: () => db.exec(`
+        CREATE TABLE IF NOT EXISTS photo_health_settings (
+          collection_id TEXT PRIMARY KEY REFERENCES collections(id),
+          enabled INTEGER NOT NULL DEFAULT 0,
+          paused INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS photo_health_items (
+          media_id TEXT PRIMARY KEY REFERENCES media(id),
+          size INTEGER NOT NULL,
+          modified_at INTEGER NOT NULL,
+          kind TEXT NOT NULL,
+          status TEXT NOT NULL,
+          sha256 TEXT,
+          phash TEXT,
+          width INTEGER,
+          height INTEGER,
+          blur_score REAL,
+          is_blurry INTEGER NOT NULL DEFAULT 0,
+          error TEXT,
+          analyzed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS photo_health_hash
+          ON photo_health_items(sha256, kind, status);
+        CREATE TABLE IF NOT EXISTS photo_health_groups (
+          id TEXT PRIMARY KEY,
+          collection_id TEXT NOT NULL REFERENCES collections(id),
+          match_type TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS photo_health_groups_collection
+          ON photo_health_groups(collection_id, match_type, id);
+        CREATE TABLE IF NOT EXISTS photo_health_members (
+          media_id TEXT PRIMARY KEY REFERENCES media(id),
+          group_id TEXT NOT NULL REFERENCES photo_health_groups(id) ON DELETE CASCADE,
+          strength REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS photo_health_members_group
+          ON photo_health_members(group_id, media_id);
+        CREATE TABLE IF NOT EXISTS photo_health_hash_buckets (
+          collection_id TEXT NOT NULL REFERENCES collections(id),
+          bucket TEXT NOT NULL,
+          media_id TEXT NOT NULL REFERENCES media(id),
+          PRIMARY KEY(collection_id, bucket, media_id)
+        );
+        CREATE INDEX IF NOT EXISTS photo_health_hash_bucket_media
+          ON photo_health_hash_buckets(media_id);
+      `),
+    },
   ];
   if (currentVersion > migrations.at(-1).version) {
     throw new Error(`Database schema version ${currentVersion} is newer than this application supports.`);
@@ -350,6 +408,8 @@ class PhotoSorter {
     this.watchRetryTimers = new Map();
     this.watchRetryAttempts = new Map();
     this.scanDebounceTimers = new Map();
+    this.photoHealthTimer = null;
+    this.photoHealthBusy = false;
     this.eventStreams = new Set();
     this.closed = false;
     this.db = null;
@@ -362,8 +422,15 @@ class PhotoSorter {
     await fs.mkdir(this.dataDirectory, { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path.join(this.dataDirectory, 'photo-sorter.sqlite'));
     migrateDatabase(this.db);
+    this.db.prepare("UPDATE photo_health_items SET status = 'pending' WHERE status = 'processing'").run();
     this.passkeys = new PasskeyService(this.db);
     await this.recoverApplyOperations();
+    this.photoHealthTimer = setInterval(() => {
+      this.processPhotoHealthQueue().catch((error) => {
+        if (!this.closed) console.error('Photo Health analysis failed:', error);
+      });
+    }, 250);
+    this.photoHealthTimer.unref();
     setImmediate(() => {
       if (this.closed || !this.db) return;
       const roots = this.db.prepare(`
@@ -454,6 +521,8 @@ class PhotoSorter {
 
   close() {
     this.closed = true;
+    if (this.photoHealthTimer) clearInterval(this.photoHealthTimer);
+    this.photoHealthTimer = null;
     for (const stream of this.eventStreams) {
       clearInterval(stream.heartbeat);
       stream.response.end();

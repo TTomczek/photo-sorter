@@ -139,6 +139,7 @@ module.exports = {
   BLUR_LAPLACIAN_VARIANCE_LIMIT,
   PHASH_MAX_DISTANCE,
   analyzeImage,
+  fileSha256,
   hashBuckets,
   hashDistance,
 };
