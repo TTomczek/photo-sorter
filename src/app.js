@@ -1148,6 +1148,396 @@ class PhotoSorter {
     }));
   }
 
+  getPhotoHealthStatus(collectionId) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    const settings = this.db.prepare(`
+      SELECT enabled, paused, updated_at AS updatedAt
+      FROM photo_health_settings WHERE collection_id = ?
+    `).get(collectionId);
+    const totals = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        SUM(CASE WHEN h.status IN ('analyzed', 'unsupported', 'failed')
+          AND h.size = m.size AND h.modified_at = m.modified_at THEN 1 ELSE 0 END) AS processed,
+        SUM(CASE WHEN h.status = 'unsupported' AND h.size = m.size AND h.modified_at = m.modified_at
+          THEN 1 ELSE 0 END) AS unsupported,
+        SUM(CASE WHEN h.status = 'failed' AND h.size = m.size AND h.modified_at = m.modified_at
+          THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN h.is_blurry = 1 AND h.status = 'analyzed'
+          AND h.size = m.size AND h.modified_at = m.modified_at THEN 1 ELSE 0 END) AS blurry
+      FROM media m JOIN roots r ON r.id = m.root_id
+      LEFT JOIN photo_health_items h ON h.media_id = m.id
+      WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1
+    `).get(collectionId);
+    const errors = this.db.prepare(`
+      SELECT m.relative_path AS path, h.status, h.error
+      FROM photo_health_items h JOIN media m ON m.id = h.media_id
+      JOIN roots r ON r.id = m.root_id
+      WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1
+        AND h.status IN ('unsupported', 'failed') AND h.size = m.size AND h.modified_at = m.modified_at
+      ORDER BY h.analyzed_at DESC, m.relative_path COLLATE NOCASE LIMIT 10
+    `).all(collectionId);
+    const total = totals.total || 0;
+    const processed = totals.processed || 0;
+    return {
+      enabled: Boolean(settings?.enabled),
+      paused: Boolean(settings?.paused),
+      status: !settings?.enabled ? 'disabled' : settings.paused ? 'paused' : total === processed ? 'completed' : 'running',
+      total,
+      processed,
+      pending: Math.max(0, total - processed),
+      unsupported: totals.unsupported || 0,
+      failed: totals.failed || 0,
+      blurry: totals.blurry || 0,
+      updatedAt: settings?.updatedAt || null,
+      errors,
+    };
+  }
+
+  setPhotoHealthState(collectionId, action) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    if (!['enable', 'pause', 'resume'].includes(action)) throw new Error('Invalid Photo Health action.');
+    const enabled = action === 'enable' ? 1 : 1;
+    const paused = action === 'pause' ? 1 : 0;
+    this.db.prepare(`
+      INSERT INTO photo_health_settings(collection_id, enabled, paused, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(collection_id) DO UPDATE SET enabled = excluded.enabled,
+        paused = excluded.paused, updated_at = excluded.updated_at
+    `).run(collectionId, enabled, paused, new Date().toISOString());
+    this.log('photo_health_state_changed', { collectionId, action });
+    this.publishQueueChange(collectionId);
+    return this.getPhotoHealthStatus(collectionId);
+  }
+
+  clearPhotoHealthResult(mediaId) {
+    const groups = this.db.prepare('SELECT group_id FROM photo_health_members WHERE media_id = ?').all(mediaId);
+    for (const { group_id: groupId } of groups) {
+      const count = this.db.prepare('SELECT COUNT(*) AS count FROM photo_health_members WHERE group_id = ?')
+        .get(groupId).count;
+      if (count <= 2) this.db.prepare('DELETE FROM photo_health_groups WHERE id = ?').run(groupId);
+      else this.db.prepare('DELETE FROM photo_health_members WHERE media_id = ?').run(mediaId);
+    }
+    this.db.prepare('DELETE FROM photo_health_hash_buckets WHERE media_id = ?').run(mediaId);
+  }
+
+  async processPhotoHealthQueue() {
+    if (this.closed || this.photoHealthBusy || !this.db) return;
+    const state = this.db.prepare(`
+      SELECT s.collection_id AS collectionId
+      FROM photo_health_settings s JOIN collections c ON c.id = s.collection_id
+      WHERE s.enabled = 1 AND s.paused = 0 AND c.active = 1
+      ORDER BY s.updated_at, s.collection_id LIMIT 1
+    `).get();
+    if (!state) return;
+    const media = this.db.prepare(`
+      SELECT m.id, m.root_id AS rootId, m.relative_path AS relativePath, m.size,
+        m.modified_at AS modifiedAt, m.kind, r.path AS rootPath
+      FROM media m JOIN roots r ON r.id = m.root_id
+      WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1
+        AND NOT EXISTS (
+          SELECT 1 FROM photo_health_items h WHERE h.media_id = m.id
+            AND h.size = m.size AND h.modified_at = m.modified_at
+            AND h.status IN ('analyzed', 'unsupported', 'failed')
+        )
+      ORDER BY m.root_id, m.relative_path COLLATE NOCASE LIMIT 1
+    `).get(state.collectionId);
+    if (!media) return;
+    this.photoHealthBusy = true;
+    try {
+      await this.analyzePhotoHealthItem(state.collectionId, media);
+    } finally {
+      this.photoHealthBusy = false;
+    }
+  }
+
+  async analyzePhotoHealthItem(collectionId, media) {
+    this.clearPhotoHealthResult(media.id);
+    this.db.prepare(`
+      INSERT INTO photo_health_items(media_id, size, modified_at, kind, status)
+      VALUES (?, ?, ?, ?, 'processing')
+      ON CONFLICT(media_id) DO UPDATE SET size = excluded.size, modified_at = excluded.modified_at,
+        kind = excluded.kind, status = 'processing', sha256 = NULL, phash = NULL, width = NULL,
+        height = NULL, blur_score = NULL, is_blurry = 0, error = NULL, analyzed_at = NULL
+    `).run(media.id, media.size, media.modifiedAt, media.kind);
+    let status = 'failed';
+    let errorMessage = null;
+    try {
+      const canonicalRoot = await fs.realpath(media.rootPath);
+      if (!comparePaths(canonicalRoot, media.rootPath)) throw new Error('Registered root no longer resolves to its original directory.');
+      const filename = path.resolve(canonicalRoot, media.relativePath);
+      if (!isWithin(canonicalRoot, filename)) throw new Error('Indexed path is outside its registered root.');
+      const linkStat = await fs.lstat(filename);
+      const resolvedPath = await fs.realpath(filename);
+      if (!linkStat.isFile() || linkStat.isSymbolicLink() || !isWithin(canonicalRoot, resolvedPath)) {
+        throw new Error('Indexed file is no longer a regular file inside its registered root.');
+      }
+      if (linkStat.size !== media.size || linkStat.mtimeMs !== media.modifiedAt) {
+        throw new Error('File changed before analysis. Rescan the collection to update its index.');
+      }
+      const result = media.kind === 'image'
+        ? await analyzeImage(resolvedPath)
+        : { sha256: await fileSha256(resolvedPath), phash: null, width: null, height: null, blurScore: null, isBlurry: false };
+      const finalStat = await fs.stat(resolvedPath);
+      if (finalStat.size !== media.size || finalStat.mtimeMs !== media.modifiedAt) {
+        throw new Error('File changed during analysis. Rescan the collection to update its index.');
+      }
+      if (!this.db.prepare(`
+        SELECT 1 FROM photo_health_settings WHERE collection_id = ? AND enabled = 1 AND paused = 0
+      `).get(collectionId)) {
+        this.db.prepare("UPDATE photo_health_items SET status = 'pending' WHERE media_id = ?").run(media.id);
+        return;
+      }
+      const analyzedAt = new Date().toISOString();
+      this.db.prepare(`
+        UPDATE photo_health_items SET status = 'analyzed', sha256 = ?, phash = ?, width = ?, height = ?,
+          blur_score = ?, is_blurry = ?, error = NULL, analyzed_at = ?
+        WHERE media_id = ?
+      `).run(result.sha256, result.phash, result.width, result.height, result.blurScore,
+        result.isBlurry ? 1 : 0, analyzedAt, media.id);
+      this.recordPhotoHealthMatches(collectionId, media, result);
+      this.log('photo_health_item_analyzed', {
+        collectionId, mediaId: media.id, blurry: Boolean(result.isBlurry),
+      });
+    } catch (error) {
+      const unsupported = media.kind === 'image' && !['ENOENT', 'EACCES', 'EPERM'].includes(error.code);
+      status = unsupported ? 'unsupported' : 'failed';
+      errorMessage = error.message;
+      this.db.prepare(`
+        UPDATE photo_health_items SET status = ?, error = ?, analyzed_at = ? WHERE media_id = ?
+      `).run(status, errorMessage, new Date().toISOString(), media.id);
+      this.log('photo_health_item_error', { collectionId, mediaId: media.id, status, error: errorMessage });
+    }
+    this.publishQueueChange(collectionId);
+  }
+
+  recordPhotoHealthMatches(collectionId, media, result) {
+    const exactMatches = this.db.prepare(`
+      SELECT h.media_id AS mediaId FROM photo_health_items h
+      JOIN media m ON m.id = h.media_id JOIN roots r ON r.id = m.root_id
+      WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1 AND m.kind = ?
+        AND h.status = 'analyzed' AND h.sha256 = ? AND h.media_id != ?
+        AND h.size = m.size AND h.modified_at = m.modified_at
+    `).all(collectionId, media.kind, result.sha256, media.id);
+    const distances = new Map(exactMatches.map((match) => [match.mediaId, 0]));
+    if (media.kind === 'image') {
+      const candidates = this.db.prepare(`
+        SELECT DISTINCT h.media_id AS mediaId, h.phash, h.width, h.height
+        FROM photo_health_hash_buckets b JOIN photo_health_items h ON h.media_id = b.media_id
+        JOIN media m ON m.id = h.media_id JOIN roots r ON r.id = m.root_id
+        WHERE b.collection_id = ? AND b.bucket IN (?, ?, ?, ?) AND b.media_id != ?
+          AND r.active = 1 AND m.present = 1 AND m.kind = 'image' AND h.status = 'analyzed'
+          AND h.size = m.size AND h.modified_at = m.modified_at
+        LIMIT 500
+      `).all(collectionId, ...hashBuckets(result.phash), media.id);
+      for (const candidate of candidates) {
+        if (distances.has(candidate.mediaId)) continue;
+        const oldRatio = candidate.width / candidate.height;
+        const newRatio = result.width / result.height;
+        if (Math.abs(oldRatio - newRatio) / Math.max(oldRatio, newRatio) > 0.01) continue;
+        const distance = hashDistance(result.phash, candidate.phash);
+        if (distance <= PHASH_MAX_DISTANCE) distances.set(candidate.mediaId, distance);
+      }
+      for (const bucket of hashBuckets(result.phash)) {
+        this.db.prepare(`
+          INSERT OR IGNORE INTO photo_health_hash_buckets(collection_id, bucket, media_id) VALUES (?, ?, ?)
+        `).run(collectionId, bucket, media.id);
+      }
+    }
+    if (!distances.size) return;
+    const groupIds = new Set();
+    for (const mediaId of distances.keys()) {
+      const groupId = this.db.prepare('SELECT group_id AS id FROM photo_health_members WHERE media_id = ?').get(mediaId)?.id;
+      if (groupId) groupIds.add(groupId);
+    }
+    const targetGroupId = [...groupIds].sort()[0] || crypto.randomUUID();
+    const oldTypes = groupIds.size ? this.db.prepare(`
+      SELECT match_type AS matchType FROM photo_health_groups WHERE id IN (${[...groupIds].map(() => '?').join(',')})
+    `).all(...groupIds) : [];
+    const matchType = distances.has([...distances.keys()].find((id) => distances.get(id) === 0))
+      || oldTypes.some((group) => group.matchType === 'exact') ? 'exact' : 'similar';
+    this.db.prepare(`
+      INSERT OR IGNORE INTO photo_health_groups(id, collection_id, match_type, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(targetGroupId, collectionId, matchType, new Date().toISOString());
+    for (const groupId of groupIds) {
+      if (groupId === targetGroupId) continue;
+      this.db.prepare('UPDATE photo_health_members SET group_id = ? WHERE group_id = ?').run(targetGroupId, groupId);
+      this.db.prepare('DELETE FROM photo_health_groups WHERE id = ?').run(groupId);
+    }
+    if (matchType === 'exact') {
+      this.db.prepare("UPDATE photo_health_groups SET match_type = 'exact' WHERE id = ?").run(targetGroupId);
+    }
+    for (const [mediaId, distance] of distances) {
+      this.db.prepare(`
+        INSERT INTO photo_health_members(media_id, group_id, strength) VALUES (?, ?, ?)
+        ON CONFLICT(media_id) DO UPDATE SET group_id = excluded.group_id,
+          strength = MAX(photo_health_members.strength, excluded.strength)
+      `).run(mediaId, targetGroupId, 1 - (distance / 64));
+    }
+    this.db.prepare(`
+      INSERT INTO photo_health_members(media_id, group_id, strength) VALUES (?, ?, 1)
+      ON CONFLICT(media_id) DO UPDATE SET group_id = excluded.group_id, strength = 1
+    `).run(media.id, targetGroupId);
+  }
+
+  listPhotoHealthFindings(collectionId, {
+    type = 'all', handled = 'open', offset = 0, limit = 30,
+  } = {}) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    if (!['all', 'duplicate', 'blur'].includes(type)) throw new Error('Invalid Photo Health finding type.');
+    if (!['open', 'handled', 'all'].includes(handled)) throw new Error('Invalid handled filter.');
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 2_000_000
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error('Invalid Photo Health page.');
+    }
+    const duplicateHandled = handled === 'open'
+      ? 'HAVING SUM(CASE WHEN m.category IS NULL THEN 1 ELSE 0 END) > 0'
+      : handled === 'handled'
+        ? 'HAVING SUM(CASE WHEN m.category IS NULL THEN 1 ELSE 0 END) = 0'
+        : '';
+    const blurHandled = handled === 'open'
+      ? 'AND m.category IS NULL'
+      : handled === 'handled' ? 'AND m.category IS NOT NULL' : '';
+    const duplicateQuery = type === 'blur' ? `
+      SELECT NULL AS groupId, 'duplicate' AS type, NULL AS mediaId, NULL AS reason,
+        NULL AS strength, 0 AS memberCount, 0 AS handled WHERE 0
+    ` : `
+      SELECT g.id AS groupId, 'duplicate' AS type, NULL AS mediaId,
+        CASE g.match_type WHEN 'exact' THEN 'Exact file match'
+          ELSE 'Very similar image framing and content' END AS reason,
+        MAX(pm.strength) AS strength, COUNT(*) AS memberCount,
+        CASE WHEN SUM(CASE WHEN m.category IS NULL THEN 1 ELSE 0 END) = 0 THEN 1 ELSE 0 END AS handled
+      FROM photo_health_groups g
+      JOIN photo_health_members pm ON pm.group_id = g.id
+      JOIN media m ON m.id = pm.media_id
+      JOIN roots r ON r.id = m.root_id
+      WHERE g.collection_id = ? AND r.collection_id = ? AND r.active = 1 AND m.present = 1
+      GROUP BY g.id, g.match_type
+      ${duplicateHandled}
+    `;
+    const blurQuery = type === 'duplicate' ? `
+      SELECT NULL AS groupId, 'blur' AS type, NULL AS mediaId, NULL AS reason,
+        NULL AS strength, 0 AS memberCount, 0 AS handled WHERE 0
+    ` : `
+      SELECT NULL AS groupId, 'blur' AS type, m.id AS mediaId,
+        'Low edge sharpness (score ' || printf('%.2f', h.blur_score) || ')' AS reason,
+        NULL AS strength, 1 AS memberCount, CASE WHEN m.category IS NULL THEN 0 ELSE 1 END AS handled
+      FROM photo_health_items h
+      JOIN media m ON m.id = h.media_id JOIN roots r ON r.id = m.root_id
+      WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1 AND m.kind = 'image'
+        AND h.status = 'analyzed' AND h.is_blurry = 1 AND h.size = m.size AND h.modified_at = m.modified_at
+        ${blurHandled}
+    `;
+    const query = `
+      WITH findings AS (${duplicateQuery} UNION ALL ${blurQuery})
+      SELECT * FROM findings ORDER BY type, groupId, mediaId LIMIT ? OFFSET ?
+    `;
+    const values = [];
+    if (type !== 'blur') values.push(collectionId, collectionId);
+    if (type !== 'duplicate') values.push(collectionId);
+    const items = this.db.prepare(query).all(...values, limit, offset);
+    const countQuery = `
+      WITH findings AS (${duplicateQuery} UNION ALL ${blurQuery})
+      SELECT COUNT(*) AS total FROM findings
+    `;
+    const total = this.db.prepare(countQuery).get(...values).total;
+    return { items, total, offset, limit };
+  }
+
+  listPhotoHealthGroup(collectionId, groupId, { offset = 0, limit = 100 } = {}) {
+    if (!this.db.prepare(`
+      SELECT 1 FROM photo_health_groups WHERE id = ? AND collection_id = ?
+    `).get(groupId, collectionId)) throw new Error('Duplicate group not found in this collection.');
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 2_000_000
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error('Invalid Photo Health page.');
+    }
+    const params = [groupId, collectionId];
+    const items = this.db.prepare(`
+      SELECT m.id, m.relative_path AS relativePath, m.size, m.modified_at AS modifiedAt,
+        m.category, m.kind, pm.strength
+      FROM photo_health_members pm JOIN media m ON m.id = pm.media_id
+      JOIN roots r ON r.id = m.root_id
+      WHERE pm.group_id = ? AND r.collection_id = ? AND r.active = 1 AND m.present = 1
+      ORDER BY m.relative_path COLLATE NOCASE LIMIT ? OFFSET ?
+    `).all(...params, limit, offset);
+    const total = this.db.prepare(`
+      SELECT COUNT(*) AS count FROM photo_health_members pm JOIN media m ON m.id = pm.media_id
+      JOIN roots r ON r.id = m.root_id
+      WHERE pm.group_id = ? AND r.collection_id = ? AND r.active = 1 AND m.present = 1
+    `).get(...params).count;
+    return { items, total, offset, limit };
+  }
+
+  decidePhotoHealthGroup(collectionId, groupId, keepIds, deviceId) {
+    if (!Array.isArray(keepIds) || keepIds.length < 1 || keepIds.length > 100
+      || keepIds.some((id) => typeof id !== 'string') || new Set(keepIds).size !== keepIds.length) {
+      throw new Error('Choose between one and 100 photos to keep.');
+    }
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (!this.db.prepare(`
+        SELECT 1 FROM photo_health_groups WHERE id = ? AND collection_id = ?
+      `).get(groupId, collectionId)
+        || !this.db.prepare('SELECT 1 FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+        throw new Error('Duplicate group not found in this collection.');
+      }
+      const memberFilter = `
+        FROM photo_health_members pm JOIN media m ON m.id = pm.media_id
+        JOIN roots r ON r.id = m.root_id
+        WHERE pm.group_id = ? AND r.collection_id = ? AND r.active = 1 AND m.present = 1
+      `;
+      const memberCount = this.db.prepare(`SELECT COUNT(*) AS count ${memberFilter}`).get(groupId, collectionId).count;
+      const selectedCount = this.db.prepare(`
+        SELECT COUNT(*) AS count ${memberFilter} AND m.id IN (${keepIds.map(() => '?').join(',')})
+      `).get(groupId, collectionId, ...keepIds).count;
+      if (!memberCount || selectedCount !== keepIds.length) {
+        throw new Error('Every selected photo must belong to this duplicate group.');
+      }
+      this.db.prepare('DELETE FROM media_locks WHERE expires_at <= ?').run(Date.now());
+      const conflict = this.db.prepare(`
+        SELECT l.media_id FROM media_locks l JOIN photo_health_members pm ON pm.media_id = l.media_id
+        JOIN media m ON m.id = pm.media_id JOIN roots r ON r.id = m.root_id
+        WHERE pm.group_id = ? AND r.collection_id = ? AND r.active = 1 AND m.present = 1
+          AND l.device_id != ? AND l.expires_at > ? LIMIT 1
+      `).get(groupId, collectionId, deviceId, Date.now());
+      if (conflict) {
+        throw Object.assign(new Error('A photo in this duplicate group is being reviewed on another device.'), { status: 409 });
+      }
+      this.db.prepare('DELETE FROM decision_history WHERE device_id = ? AND undone = 1').run(deviceId);
+      const selected = keepIds.map(() => '?').join(',');
+      const nextCategory = `CASE WHEN m.id IN (${selected}) THEN 'keep' ELSE 'delete' END`;
+      const at = new Date().toISOString();
+      this.db.prepare(`
+        INSERT INTO decision_history(media_id, device_id, previous_category, next_category, created_at)
+        SELECT m.id, ?, m.category, ${nextCategory}, ?
+        ${memberFilter} AND COALESCE(m.category, '') != ${nextCategory}
+      `).run(deviceId, ...keepIds, at, groupId, collectionId, ...keepIds);
+      this.db.prepare(`
+        UPDATE media SET category = CASE WHEN id IN (${selected}) THEN 'keep' ELSE 'delete' END
+        WHERE id IN (SELECT pm.media_id FROM photo_health_members pm
+          JOIN roots r ON r.id = (SELECT root_id FROM media WHERE id = pm.media_id)
+          WHERE pm.group_id = ? AND r.collection_id = ? AND r.active = 1)
+          AND present = 1
+      `).run(...keepIds, groupId, collectionId);
+      this.log('photo_health_group_decided', {
+        collectionId, groupId, keptCount: keepIds.length, memberCount,
+      });
+      this.publishQueueChange(collectionId);
+      this.db.exec('COMMIT');
+      return { changed: true, keptCount: keepIds.length, deletedCount: memberCount - keepIds.length };
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   async performScanRoot(rootId) {
     const root = this.db.prepare('SELECT * FROM roots WHERE id = ? AND active = 1').get(rootId);
     if (!root) throw new Error('Root not found.');
@@ -2166,6 +2556,41 @@ class PhotoSorter {
         return this.sendJson(response, 200, {
           state: this.saveDeviceState(session.deviceId, body.collectionId, body),
         });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/photo-health/status') {
+        return this.sendJson(response, 200, this.getPhotoHealthStatus(url.searchParams.get('collectionId')));
+      }
+      if (request.method === 'POST' && url.pathname === '/api/photo-health/state') {
+        const { collectionId, action } = await this.readJson(request);
+        return this.sendJson(response, 200, this.setPhotoHealthState(collectionId, action));
+      }
+      if (request.method === 'GET' && url.pathname === '/api/photo-health/findings') {
+        const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 30));
+        const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
+        return this.sendJson(response, 200, this.listPhotoHealthFindings(
+          url.searchParams.get('collectionId'),
+          {
+            type: url.searchParams.get('type') || 'all',
+            handled: url.searchParams.get('handled') || 'open',
+            offset,
+            limit,
+          },
+        ));
+      }
+      const healthGroup = url.pathname.match(/^\/api\/photo-health\/groups\/([0-9a-f-]+)$/i);
+      if (request.method === 'GET' && healthGroup) {
+        const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 100));
+        const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
+        return this.sendJson(response, 200, this.listPhotoHealthGroup(
+          url.searchParams.get('collectionId'), healthGroup[1], { offset, limit },
+        ));
+      }
+      const healthGroupDecision = url.pathname.match(/^\/api\/photo-health\/groups\/([0-9a-f-]+)\/decisions$/i);
+      if (request.method === 'POST' && healthGroupDecision) {
+        const { collectionId, keepIds } = await this.readJson(request);
+        return this.sendJson(response, 200, this.decidePhotoHealthGroup(
+          collectionId, healthGroupDecision[1], keepIds, session.deviceId,
+        ));
       }
       if (request.method === 'POST' && ['/api/decisions/undo', '/api/decisions/redo'].includes(url.pathname)) {
         const direction = url.pathname.endsWith('/undo') ? 'undo' : 'redo';
