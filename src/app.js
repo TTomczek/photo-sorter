@@ -336,6 +336,8 @@ function migrateDatabase(db) {
         );
         CREATE INDEX IF NOT EXISTS photo_health_hash
           ON photo_health_items(sha256, kind, status);
+        CREATE INDEX IF NOT EXISTS photo_health_queue
+          ON photo_health_items(status, media_id);
         CREATE TABLE IF NOT EXISTS photo_health_groups (
           id TEXT PRIMARY KEY,
           collection_id TEXT NOT NULL REFERENCES collections(id),
@@ -409,7 +411,11 @@ class PhotoSorter {
     this.watchRetryAttempts = new Map();
     this.scanDebounceTimers = new Map();
     this.photoHealthTimer = null;
+    this.photoHealthTask = null;
     this.photoHealthBusy = false;
+    this.lastPhotoHealthCollectionId = '';
+    this.photoHealthCursors = new Map();
+    this.photoHealthBackfillComplete = new Set();
     this.eventStreams = new Set();
     this.closed = false;
     this.db = null;
@@ -426,9 +432,12 @@ class PhotoSorter {
     this.passkeys = new PasskeyService(this.db);
     await this.recoverApplyOperations();
     this.photoHealthTimer = setInterval(() => {
-      this.processPhotoHealthQueue().catch((error) => {
-        if (!this.closed) console.error('Photo Health analysis failed:', error);
-      });
+      if (this.photoHealthTask) return;
+      this.photoHealthTask = this.processPhotoHealthQueue()
+        .catch((error) => {
+          if (!this.closed) console.error('Photo Health analysis failed:', error);
+        })
+        .finally(() => { this.photoHealthTask = null; });
     }, 250);
     this.photoHealthTimer.unref();
     setImmediate(() => {
@@ -562,8 +571,9 @@ class PhotoSorter {
         this.db = null;
       }
     };
-    if (this.activeScans.size || closingServers.length) {
-      return Promise.allSettled([...this.activeScans.values(), ...closingServers]).then(closeDatabase);
+    if (this.activeScans.size || closingServers.length || this.photoHealthTask) {
+      const pendingHealth = this.photoHealthTask ? [this.photoHealthTask] : [];
+      return Promise.allSettled([...this.activeScans.values(), ...closingServers, ...pendingHealth]).then(closeDatabase);
     }
     closeDatabase();
     return Promise.resolve();
@@ -1200,6 +1210,12 @@ class PhotoSorter {
       throw new Error('Collection not found.');
     }
     if (!['enable', 'pause', 'resume'].includes(action)) throw new Error('Invalid Photo Health action.');
+    if (!this.db.prepare(`
+      SELECT enabled FROM photo_health_settings WHERE collection_id = ?
+    `).get(collectionId)?.enabled) {
+      this.photoHealthCursors.delete(collectionId);
+      this.photoHealthBackfillComplete.delete(collectionId);
+    }
     const enabled = action === 'enable' ? 1 : 1;
     const paused = action === 'pause' ? 1 : 0;
     this.db.prepare(`
@@ -1230,21 +1246,40 @@ class PhotoSorter {
       SELECT s.collection_id AS collectionId
       FROM photo_health_settings s JOIN collections c ON c.id = s.collection_id
       WHERE s.enabled = 1 AND s.paused = 0 AND c.active = 1
-      ORDER BY s.updated_at, s.collection_id LIMIT 1
-    `).get();
+      ORDER BY CASE WHEN s.collection_id > ? THEN 0 ELSE 1 END, s.collection_id LIMIT 1
+    `).get(this.lastPhotoHealthCollectionId);
     if (!state) return;
-    const media = this.db.prepare(`
+    this.lastPhotoHealthCollectionId = state.collectionId;
+    let media = this.db.prepare(`
       SELECT m.id, m.root_id AS rootId, m.relative_path AS relativePath, m.size,
-        m.modified_at AS modifiedAt, m.kind, r.path AS rootPath
+        m.modified_at AS modifiedAt, m.kind, r.path AS rootPath, m.rowid AS rowId
       FROM media m JOIN roots r ON r.id = m.root_id
       WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1
-        AND NOT EXISTS (
-          SELECT 1 FROM photo_health_items h WHERE h.media_id = m.id
-            AND h.size = m.size AND h.modified_at = m.modified_at
-            AND h.status IN ('analyzed', 'unsupported', 'failed')
-        )
-      ORDER BY m.root_id, m.relative_path COLLATE NOCASE LIMIT 1
+        AND EXISTS (SELECT 1 FROM photo_health_items h WHERE h.media_id = m.id AND h.status = 'pending'
+          AND h.size = m.size AND h.modified_at = m.modified_at)
+      ORDER BY m.rowid LIMIT 1
     `).get(state.collectionId);
+    if (!media && !this.photoHealthBackfillComplete.has(state.collectionId)) {
+      let cursor = this.photoHealthCursors.get(state.collectionId) || 0;
+      const nextUnindexed = (afterRowId) => this.db.prepare(`
+        SELECT m.id, m.root_id AS rootId, m.relative_path AS relativePath, m.size,
+          m.modified_at AS modifiedAt, m.kind, r.path AS rootPath, m.rowid AS rowId
+        FROM media m JOIN roots r ON r.id = m.root_id
+        WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1 AND m.rowid > ?
+          AND NOT EXISTS (SELECT 1 FROM photo_health_items h WHERE h.media_id = m.id
+            AND h.size = m.size AND h.modified_at = m.modified_at
+            AND h.status IN ('analyzed', 'unsupported', 'failed', 'processing', 'pending'))
+        ORDER BY m.rowid LIMIT 1
+      `).get(state.collectionId, afterRowId);
+      media = nextUnindexed(cursor);
+      if (!media && cursor > 0) {
+        cursor = 0;
+        this.photoHealthCursors.set(state.collectionId, cursor);
+        media = nextUnindexed(cursor);
+      }
+      if (!media) this.photoHealthBackfillComplete.add(state.collectionId);
+      else this.photoHealthCursors.set(state.collectionId, media.rowId);
+    }
     if (!media) return;
     this.photoHealthBusy = true;
     try {
@@ -1285,6 +1320,7 @@ class PhotoSorter {
       if (finalStat.size !== media.size || finalStat.mtimeMs !== media.modifiedAt) {
         throw new Error('File changed during analysis. Rescan the collection to update its index.');
       }
+      if (this.closed) return;
       if (!this.db.prepare(`
         SELECT 1 FROM photo_health_settings WHERE collection_id = ? AND enabled = 1 AND paused = 0
       `).get(collectionId)) {
@@ -1574,6 +1610,18 @@ class PhotoSorter {
           size = excluded.size, modified_at = excluded.modified_at, capture_at = excluded.capture_at,
           present = 1, last_seen_scan = excluded.last_seen_scan, kind = excluded.kind
       `);
+      const queuePhotoHealthMedia = this.db.prepare(`
+        INSERT INTO photo_health_items(media_id, size, modified_at, kind, status)
+        SELECT m.id, m.size, m.modified_at, m.kind, 'pending'
+        FROM media m JOIN roots r ON r.id = m.root_id
+        JOIN photo_health_settings s ON s.collection_id = r.collection_id AND s.enabled = 1
+        WHERE m.id = ?
+        ON CONFLICT(media_id) DO UPDATE SET size = excluded.size, modified_at = excluded.modified_at,
+          kind = excluded.kind, status = 'pending', sha256 = NULL, phash = NULL, width = NULL,
+          height = NULL, blur_score = NULL, is_blurry = 0, error = NULL, analyzed_at = NULL
+        WHERE photo_health_items.size != excluded.size OR photo_health_items.modified_at != excluded.modified_at
+          OR photo_health_items.kind != excluded.kind
+      `);
       let entriesVisited = 0;
       let scanErrors = 0;
       let storedScanErrors = 0;
@@ -1646,6 +1694,7 @@ class PhotoSorter {
             const captureDate = IMAGE_EXTENSIONS.has(extension) ? await readCaptureDate(resolvedPath) : null;
             upsert.run(crypto.createHash('sha256').update(`${rootId}\0${relativePath}`).digest('hex'),
               rootId, relativePath, stat.size, stat.mtimeMs, captureDate, scanId, kind);
+            queuePhotoHealthMedia.run(crypto.createHash('sha256').update(`${rootId}\0${relativePath}`).digest('hex'));
             entriesVisited += 1;
           } catch (error) {
             recordScanError(fullPath, error);

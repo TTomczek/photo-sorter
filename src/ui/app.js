@@ -753,7 +753,7 @@ async function renderPhotoHealthGroup(card, groupId) {
     photoHealth.compareIds = selectedCompareIds.length
       ? selectedCompareIds : members.slice(0, 2).map((member) => member.id);
     const compareControls = element('div', undefined, 'health-zoom-controls');
-    const compareSelects = ['Left comparison', 'Right comparison'].map((label, index) => {
+    ['Left comparison', 'Right comparison'].forEach((label, index) => {
       const select = element('select');
       select.setAttribute('aria-label', label);
       for (const member of members) {
@@ -767,7 +767,6 @@ async function renderPhotoHealthGroup(card, groupId) {
         updateHealthCompareImages(details, members);
       });
       compareControls.append(select);
-      return select;
     });
     for (const [delta, label] of [[-0.25, 'Zoom out'], [0.25, 'Zoom in']]) {
       const button = element('button', label);

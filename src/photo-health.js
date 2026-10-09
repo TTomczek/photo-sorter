@@ -6,7 +6,7 @@ const ANALYSIS_PIXEL_LIMIT = 200_000_000;
 const HASH_SIZE = 32;
 const HASH_FREQUENCIES = 8;
 const PHASH_MAX_DISTANCE = 2;
-const BLUR_LAPLACIAN_VARIANCE_LIMIT = 30;
+const BLUR_LAPLACIAN_VARIANCE_LIMIT = 5;
 const BLUR_MIN_CONTRAST = 18;
 const HASH_COSINES = Array.from({ length: HASH_FREQUENCIES }, (_, frequency) => (
   Array.from({ length: HASH_SIZE }, (_, sample) => Math.cos(((2 * sample + 1) * frequency * Math.PI) / (2 * HASH_SIZE)))

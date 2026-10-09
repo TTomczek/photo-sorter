@@ -68,4 +68,44 @@ test('large-library listing returns a bounded page near the end of 200,000 index
   assert.equal(reviewPage.total, 200_000);
   assert.equal(reviewPage.items.length, 60);
   assert.equal(reviewPage.items.at(-1).relative_path, 'photo-199999.jpg');
+
+  const createGroup = app.db.prepare(`
+    INSERT INTO photo_health_groups(id, collection_id, match_type, created_at) VALUES (?, ?, 'exact', ?)
+  `);
+  const addMember = app.db.prepare('INSERT INTO photo_health_members(media_id, group_id, strength) VALUES (?, ?, 1)');
+  const addAnalysis = app.db.prepare(`
+    INSERT INTO photo_health_items(media_id, size, modified_at, kind, status, sha256, analyzed_at)
+    VALUES (?, 1, 0, 'image', 'analyzed', ?, ?)
+  `);
+  const analyzedAt = new Date().toISOString();
+  app.db.exec('BEGIN');
+  try {
+    for (let index = 0; index < 200; index += 2) {
+      const groupId = `health-group-${String(index).padStart(3, '0')}`;
+      createGroup.run(groupId, collectionId, analyzedAt);
+      for (let member = index; member < index + 2; member += 1) {
+        const mediaId = `media-${String(member).padStart(6, '0')}`;
+        addMember.run(mediaId, groupId);
+        addAnalysis.run(mediaId, `sha-${member}`, analyzedAt);
+      }
+    }
+    app.db.exec('COMMIT');
+  } catch (error) {
+    app.db.exec('ROLLBACK');
+    throw error;
+  }
+  const status = app.getPhotoHealthStatus(collectionId);
+  assert.equal(status.total, 200_000);
+  const startedAt = performance.now();
+  const healthPage = app.listPhotoHealthFindings(collectionId, { type: 'duplicate', limit: 30 });
+  const elapsed = performance.now() - startedAt;
+  assert.equal(healthPage.total, 100);
+  assert.equal(healthPage.items.length, 30);
+  assert.equal(app.listPhotoHealthFindings(collectionId, {
+    type: 'duplicate', limit: 30, offset: 30,
+  }).items.length, 30);
+  const groupPage = app.listPhotoHealthGroup(collectionId, healthPage.items[0].groupId, { limit: 1 });
+  assert.equal(groupPage.total, 2);
+  assert.equal(groupPage.items.length, 1);
+  t.diagnostic(`Photo Health page over 200,000 indexed items returned 30 of 100 groups in ${elapsed.toFixed(1)} ms.`);
 });
