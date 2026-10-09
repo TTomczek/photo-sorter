@@ -36,10 +36,32 @@ function isOutputRelativePath(relativePath) {
 
 async function readCaptureDate(filename) {
   try {
-    const metadata = await exifr.parse(filename, ['DateTimeOriginal', 'CreateDate', 'DateCreated']);
+    const metadata = await withExifReader(
+      filename,
+      ['DateTimeOriginal', 'CreateDate', 'DateCreated'],
+      (reader) => reader.parse(),
+    );
     return normalizeCaptureDate(metadata);
   } catch {
     return null;
+  }
+}
+
+async function withExifReader(filename, options, read) {
+  const reader = new exifr.Exifr(options);
+  let closing;
+  try {
+    await reader.read(filename);
+    if (reader.file?.close) {
+      const close = reader.file.close.bind(reader.file);
+      reader.file.close = () => {
+        closing ||= close();
+        return closing;
+      };
+    }
+    return await read(reader);
+  } finally {
+    if (reader.file?.close) await (closing || reader.file.close());
   }
 }
 
@@ -699,7 +721,11 @@ class PhotoSorter {
       }
     }
     if (!isImage) return null;
-    const thumbnail = await exifr.thumbnail(resolved).catch(() => null);
+    const thumbnail = await withExifReader(
+      resolved,
+      exifr.thumbnailOnlyOptions,
+      (reader) => reader.extractThumbnail(),
+    ).catch(() => null);
     if (!thumbnail) return null;
     const buffer = Buffer.from(thumbnail);
     if (!buffer.length || buffer.length > 50 * 1024 * 1024) return null;

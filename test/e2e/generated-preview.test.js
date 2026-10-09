@@ -5,12 +5,13 @@ const os = require('node:os');
 const path = require('node:path');
 const { PhotoSorter } = require('../../src/app');
 
-test('authenticated clients can populate bounded JPEG preview cache without accepting stale media', async (t) => {
+test('preview extraction closes files without thumbnails and rejects stale cached media', async (t) => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-preview-'));
   const dataDirectory = path.join(temporary, 'data');
   const root = path.join(temporary, 'photos');
   await fs.mkdir(root);
   await fs.writeFile(path.join(root, 'photo.jpg'), 'original-image-content');
+  await fs.writeFile(path.join(root, 'no-thumbnail.png'), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
   await fs.writeFile(path.join(root, 'clip.mp4'), 'video-poster-content');
   const app = await new PhotoSorter({ dataDirectory }).initialize();
   t.after(async () => {
@@ -46,9 +47,29 @@ test('authenticated clients can populate bounded JPEG preview cache without acce
     body: JSON.stringify({ password: 'a secure test password' }),
   })).response.status, 200);
   const media = await api(`/api/media?collectionId=${collectionId}&category=unseen`);
-  assert.equal(media.body.items.length, 2);
+  assert.equal(media.body.items.length, 3);
   const item = media.body.items.find((candidate) => candidate.kind === 'image');
   const video = media.body.items.find((candidate) => candidate.kind === 'video');
+  const noThumbnail = media.body.items.find((candidate) => candidate.relative_path === 'no-thumbnail.png');
+  const originalOpen = fs.open;
+  const handles = { opened: 0, closed: 0 };
+  fs.open = async (...args) => {
+    const handle = await originalOpen(...args);
+    handles.opened += 1;
+    const close = handle.close.bind(handle);
+    handle.close = async (...closeArgs) => {
+      handles.closed += 1;
+      return close(...closeArgs);
+    };
+    return handle;
+  };
+  try {
+    assert.equal(await app.getPreview(noThumbnail.id), null);
+  } finally {
+    fs.open = originalOpen;
+  }
+  assert.ok(handles.opened > 0);
+  assert.equal(handles.closed, handles.opened);
   const preview = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
   const route = `/api/media/${encodeURIComponent(item.id)}/preview`;
   const videoRoute = `/api/media/${encodeURIComponent(video.id)}/preview`;
