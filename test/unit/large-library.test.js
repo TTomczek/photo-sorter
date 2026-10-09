@@ -44,4 +44,17 @@ test('large-library listing returns a bounded page near the end of 200,000 index
   assert.equal(page.items.length, 60);
   assert.equal(page.items[0].relative_path, 'photo-199940.jpg');
   assert.equal(page.items.at(-1).relative_path, 'photo-199999.jpg');
+
+  app.db.prepare("UPDATE media SET category = 'unsure', unsure_reviewed_at = 1 WHERE id = ?")
+    .run('media-199999');
+  const reviewPage = app.listMedia({
+    collectionId,
+    category: 'review',
+    sort: 'filename',
+    offset: 199_940,
+    limit: 60,
+  });
+  assert.equal(reviewPage.total, 200_000);
+  assert.equal(reviewPage.items.length, 60);
+  assert.equal(reviewPage.items.at(-1).relative_path, 'photo-199999.jpg');
 });

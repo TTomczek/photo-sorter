@@ -8,6 +8,38 @@
     'Password': 'Passwort',
     'Continue': 'Weiter',
     'Collection': 'Sammlung',
+    'Collections': 'Sammlungen',
+    'Browse': 'Durchsuchen',
+    'Apply / restore': 'Anwenden / Wiederherstellen',
+    'History': 'Verlauf',
+    'Help': 'Hilfe',
+    'Photo info': 'Fotoinformationen',
+    'Pause review': 'Überprüfung pausieren',
+    'Open menu': 'Menü öffnen',
+    'Collapse navigation': 'Navigation einklappen',
+    'Expand navigation': 'Navigation ausklappen',
+    'Close menu': 'Menü schließen',
+    'Active collection': 'Aktive Sammlung',
+    'Apply decisions': 'Entscheidungen anwenden',
+    'Refresh history': 'Verlauf aktualisieren',
+    'Photo': 'Foto',
+    'File': 'Datei',
+    'Date': 'Datum',
+    'All items': 'Alle Elemente',
+    'No unseen or unsure items. Browse your collection or add more photos.':
+      'Keine ungesehenen oder unsicheren Fotos. Durchsuche deine Sammlung oder füge weitere Fotos hinzu.',
+    'All unseen and unsure photos are resolved. Browse the collection or apply your decisions.':
+      'Alle ungesehenen und unsicheren Fotos sind erledigt. Durchsuche die Sammlung oder wende deine Entscheidungen an.',
+    'Review paused. Your current place is saved.':
+      'Überprüfung pausiert. Deine aktuelle Position wurde gespeichert.',
+    'Choose a folder to start building this collection.':
+      'Wähle einen Ordner aus, um diese Sammlung aufzubauen.',
+    'Create or choose a collection before reviewing photos.':
+      'Erstelle oder wähle eine Sammlung aus, bevor du Fotos überprüfst.',
+    'Saved review position could not be read. Starting at the beginning.':
+      'Die gespeicherte Überprüfungsposition konnte nicht gelesen werden. Beginn am Anfang.',
+    'Saved review position is invalid. Starting at the beginning.':
+      'Die gespeicherte Überprüfungsposition ist ungültig. Beginn am Anfang.',
     'New collection name': 'Name der neuen Sammlung',
     'New collection': 'Neue Sammlung',
     'Create': 'Erstellen',
@@ -87,6 +119,8 @@
       'Verwende die Zoom-Steuerung oder ziehe zwei Finger auf einem Bild auseinander, um es zu vergrößern. Ziehe ein vergrößertes Bild zum Verschieben. Scrolle im Sammlungsraster, um große Bibliotheken zu durchsuchen.',
     'Use the zoom controls or pinch on an image to zoom; drag a zoomed image to pan. Scroll the collection grid to browse large libraries. Enter fullscreen to focus on categorizing; press Escape or use the close button to leave.':
       'Verwende die Zoom-Steuerung oder ziehe zwei Finger auf einem Bild auseinander, um es zu vergrößern. Ziehe ein vergrößertes Bild zum Verschieben. Scrolle im Sammlungsraster, um große Bibliotheken zu durchsuchen. Öffne den Vollbildmodus zum Kategorisieren; drücke Escape oder verwende die Schließen-Schaltfläche, um ihn zu verlassen.',
+    'Use the zoom controls or pinch on an image to zoom; drag a zoomed image to pan. Scroll the collection grid to browse large libraries. Press Escape to pause review.':
+      'Verwende die Zoom-Steuerung oder ziehe zwei Finger auf einem Bild auseinander, um es zu vergrößern. Ziehe ein vergrößertes Bild zum Verschieben. Scrolle im Sammlungsraster, um große Bibliotheken zu durchsuchen. Drücke Escape, um die Überprüfung zu pausieren.',
     'Apply shows a move summary first, then requires a separate confirmation. Delete-category files move into a':
       'Vor dem Anwenden wird eine Zusammenfassung angezeigt und eine separate Bestätigung verlangt. Dateien der Kategorie „Löschen“ werden in den Ordner',
     'folder; nothing is permanently deleted.': 'verschoben; nichts wird endgültig gelöscht.',
@@ -158,6 +192,7 @@
     'No LAN IPv4 address is currently available.': 'Derzeit ist keine LAN-IPv4-Adresse verfügbar.',
     'Remove': 'Entfernen',
     'Restore': 'Wiederherstellen',
+    'Clear decision': 'Entscheidung zurücksetzen',
     'No folders are registered.': 'Es sind keine Ordner registriert.',
     'No archived collections.': 'Keine archivierten Sammlungen.',
     'I reviewed the existing folders and explicitly approve reusing them.':
@@ -170,7 +205,7 @@
     'This will perform {count} file operation(s): {moves} new move(s), {recategorized} recategorization(s), and {restored} restore(s). {skipped} item(s) on read-only roots will be skipped.':
       'Es werden {count} Dateioperationen ausgeführt: {moves} neue Verschiebungen, {recategorized} Neukategorisierungen und {restored} Wiederherstellungen. {skipped} Elemente auf schreibgeschützten Ordnern werden übersprungen.',
     'There is no apply batch to restore.': 'Es gibt keine Anwendung, die wiederhergestellt werden kann.',
-    'Save settings.': 'Einstellungen gespeichert.',
+    'Saving settings.': 'Einstellungen werden gespeichert.',
     'Settings saved.': 'Einstellungen gespeichert.',
     'Sign-in startup setting updated.': 'Autostart-Einstellung aktualisiert.',
     'Folder registered; scanning has started.': 'Ordner registriert; der Scan wurde gestartet.',

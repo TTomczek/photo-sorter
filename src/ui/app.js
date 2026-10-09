@@ -1,8 +1,10 @@
 const state = {
-  category: 'unseen',
+  category: 'review',
+  view: 'review',
   sort: 'capture-asc',
   defaultSort: 'capture-asc',
   collectionId: '',
+  collectionItemCount: 0,
   items: [],
   index: 0,
   offset: 0,
@@ -25,8 +27,10 @@ const state = {
   mediaRequestId: 0,
   classificationPending: false,
   classificationTransitioning: false,
-  fullscreen: false,
   autoCategorizeCollectionId: '',
+  drawerOpen: false,
+  lastScanStatusKey: '',
+  statusKind: 'user',
 };
 const byId = (id) => document.getElementById(id);
 const mediaGrid = byId('media-grid');
@@ -44,6 +48,8 @@ const videoPosterObserver = typeof IntersectionObserver === 'undefined' ? null :
   }
 }, { rootMargin: '160px' });
 let stateSaveTimer;
+let settingsSaveQueue = Promise.resolve();
+let settingsSaveTimer;
 let scanPollTimer;
 let scanPollBusy = false;
 let queuePollTimer;
@@ -66,14 +72,91 @@ function applyVisualPreferences() {
   byId('grid-columns').value = validColumns;
 }
 
-function setFullscreenMode(active, userInitiated = false) {
-  state.fullscreen = active;
-  if (userInitiated && !active) state.autoCategorizeCollectionId = '';
-  byId('review').classList.toggle('fullscreen-review', active);
-  document.body.classList.toggle('fullscreen-review-active', active);
-  const button = byId('fullscreen-toggle');
-  button.textContent = active ? 'Exit fullscreen' : 'Enter fullscreen';
-  button.setAttribute('aria-pressed', String(active));
+function setDrawerOpen(open) {
+  state.drawerOpen = open;
+  const sideSheet = byId('side-sheet');
+  sideSheet.classList.toggle('is-open', open);
+  sideSheet.inert = matchMedia('(max-width: 760px)').matches && !open;
+  byId('drawer-backdrop').classList.toggle('is-visible', open);
+  byId('menu-toggle').setAttribute('aria-expanded', String(open));
+}
+
+function setSidebarCollapsed(collapsed) {
+  byId('app-panel').classList.toggle('sidebar-collapsed', collapsed);
+  byId('collapse-menu').setAttribute('aria-expanded', String(!collapsed));
+  const label = collapsed ? 'Expand navigation' : 'Collapse navigation';
+  byId('collapse-menu').setAttribute('aria-label', window.photoSorterI18n.translate(label));
+  localStorage.setItem('photo-sorter-sidebar-collapsed', String(collapsed));
+}
+
+function updateDrawerOffset() {
+  const warning = byId('network-warning').getBoundingClientRect();
+  const topbar = document.querySelector('.app-topbar').getBoundingClientRect();
+  document.documentElement.style.setProperty('--app-top-offset', `${warning.height + topbar.height}px`);
+}
+
+function showView(view) {
+  state.view = view;
+  byId('review-progress').textContent = view === 'review' ? `${state.total} to review` : '';
+  for (const panel of document.querySelectorAll('.app-view')) {
+    panel.classList.toggle('hidden', panel.id !== `${view}-view`);
+  }
+  for (const button of byId('app-navigation').querySelectorAll('[data-view]')) {
+    if (button.dataset.view === view) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  }
+  setDrawerOpen(false);
+}
+
+function getSavedReviewPosition(collectionId) {
+  const key = `photo-sorter-review-position:${collectionId}`;
+  const serialized = localStorage.getItem(key);
+  if (!serialized) return null;
+  let position;
+  try {
+    position = JSON.parse(serialized);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    localStorage.removeItem(key);
+    setStatus('Saved review position could not be read. Starting at the beginning.', true);
+    return null;
+  }
+  if (!position || !Number.isSafeInteger(position.offset) || position.offset < 0
+    || (position.mediaId !== null && typeof position.mediaId !== 'string')) {
+    localStorage.removeItem(key);
+    setStatus('Saved review position is invalid. Starting at the beginning.', true);
+    return null;
+  }
+  return position;
+}
+
+async function openReview() {
+  if (!state.collectionId) {
+    showView('collections');
+    setStatus('Create or choose a collection before reviewing photos.');
+    return;
+  }
+  state.classificationPending = false;
+  state.category = 'review';
+  const savedPosition = getSavedReviewPosition(state.collectionId);
+  state.offset = savedPosition?.offset || 0;
+  state.index = 0;
+  state.restoreMediaId = savedPosition?.mediaId || '';
+  await loadMedia();
+  showView('review');
+  setStatus('');
+}
+
+async function pauseReview() {
+  if (state.view !== 'review') return;
+  state.classificationPending = false;
+  state.autoCategorizeCollectionId = '';
+  saveDeviceState();
+  const filter = localStorage.getItem(`photo-sorter-browse-filter:${state.collectionId}`) || 'all';
+  activateCategory(filter);
+  await loadMedia();
+  showView('browse');
+  setStatus('Review paused. Your current place is saved.');
 }
 
 function setZoom(scale) {
@@ -192,17 +275,31 @@ async function refreshScans() {
     const active = scans.filter((scan) => ['queued', 'running'].includes(scan.status));
     if (active.length) {
       const indexed = active.reduce((sum, scan) => sum + scan.indexed, 0);
-      setStatus(`Scanning ${active.length} folder(s); ${indexed} media item(s) indexed so far.`);
+      const statusKey = `active:${active.map((scan) => `${scan.status}:${scan.indexed}`).join(',')}`;
+      if (statusKey !== state.lastScanStatusKey) {
+        state.lastScanStatusKey = statusKey;
+        setStatus(`Scanning ${active.length} folder(s); ${indexed} media item(s) indexed so far.`, false, 'scan');
+      }
       const current = state.items[state.index];
       state.restoreMediaId = current?.id || '';
       await loadMedia();
       await maybeStartAutomaticCategorizing();
     } else if (scans.some((scan) => scan.status === 'failed')) {
       const failed = scans.filter((scan) => scan.status === 'failed');
-      setStatus(`${failed.length} folder scan(s) failed: ${failed[0].error}`, true);
+      const statusKey = `failed:${failed.map((scan) => scan.error).join('|')}`;
+      if (statusKey !== state.lastScanStatusKey) {
+        state.lastScanStatusKey = statusKey;
+        setStatus(`${failed.length} folder scan(s) failed: ${failed[0].error}`, true, 'scan');
+      }
     } else if (scans.some((scan) => scan.status === 'completed')) {
       const indexed = scans.reduce((sum, scan) => sum + scan.indexed, 0);
-      setStatus(`Scanning complete: ${indexed} media item(s) indexed.`);
+      const statusKey = `completed:${indexed}`;
+      if (statusKey !== state.lastScanStatusKey) {
+        state.lastScanStatusKey = statusKey;
+        if (state.statusKind === 'scan' || !byId('status').textContent) {
+          setStatus(`Scanning complete: ${indexed} media item(s) indexed.`, false, 'scan');
+        }
+      }
     }
     if (!active.length && state.classificationPending) await continueClassification();
   } catch (error) {
@@ -214,18 +311,24 @@ async function refreshScans() {
 
 function saveDeviceState() {
   if (!state.collectionId) return;
+  const current = {
+    collectionId: state.collectionId,
+    category: state.category,
+    sort: state.sort,
+    mediaId: state.items[state.index]?.id || null,
+    offset: state.offset,
+  };
+  if (state.category === 'review') {
+    localStorage.setItem(`photo-sorter-review-position:${state.collectionId}`, JSON.stringify({
+      mediaId: current.mediaId,
+      offset: current.offset,
+    }));
+  }
   clearTimeout(stateSaveTimer);
   stateSaveTimer = setTimeout(() => {
-    const item = state.items[state.index];
     request('/api/device-state', {
       method: 'PUT',
-      body: JSON.stringify({
-        collectionId: state.collectionId,
-        category: state.category,
-        sort: state.sort,
-        mediaId: item?.id || null,
-        offset: state.offset,
-      }),
+      body: JSON.stringify(current),
     }).catch((error) => setStatus(error.message, true));
   }, 200);
 }
@@ -336,9 +439,10 @@ async function request(url, options = {}) {
   return result;
 }
 
-function setStatus(message, error = false) {
+function setStatus(message, error = false, kind = 'user') {
   byId('status').textContent = message;
   byId('status').classList.toggle('error', error);
+  state.statusKind = kind;
 }
 
 function element(tag, text, className) {
@@ -462,6 +566,12 @@ function createPreview(item, controls = false, cached = false) {
         }
         image.src = src;
       }).catch((error) => {
+        if (/source image could not be decoded/i.test(error.message)) {
+          const placeholder = element('div', 'Preview unavailable. This file can still be sorted.', 'placeholder');
+          placeholder.title = item.relative_path;
+          image.replaceWith(placeholder);
+          return;
+        }
         setStatus(error.message, true);
         image.src = mediaUrl(item);
       });
@@ -478,12 +588,15 @@ function renderCurrent() {
   resetZoom();
   container.replaceChildren();
   byId('zoom-controls').classList.add('hidden');
+  byId('photo-details').classList.add('hidden');
+  byId('photo-info-toggle').setAttribute('aria-expanded', 'false');
   const item = state.items[state.index];
-  byId('fullscreen-toggle').disabled = !item;
   if (!item) {
     container.append(element('div', state.total ? 'Loading items…'
-      : state.category === 'all' ? 'No items in this collection.' : 'No items in this category.'));
+      : state.category === 'review' ? 'No unseen or unsure items. Browse your collection or add more photos.'
+        : state.category === 'all' ? 'No items in this collection.' : 'No items in this category.'));
     byId('item-count').textContent = state.total ? `${state.total} items` : '';
+    byId('review-progress').textContent = '';
     updateItemLock(null);
     saveDeviceState();
     return;
@@ -493,6 +606,14 @@ function renderCurrent() {
   container.append(photo);
   if (item.kind === 'image') byId('zoom-controls').classList.remove('hidden');
   byId('item-count').textContent = `${state.offset + state.index + 1} of ${state.total}`;
+  byId('review-progress').textContent = state.view === 'review'
+    ? `${state.total} to review` : '';
+  const details = byId('photo-details');
+  const captureDate = item.capture_at || new Date(item.modified_at).toISOString();
+  details.replaceChildren();
+  for (const [label, value] of [['File', item.relative_path], ['Date', new Date(captureDate).toLocaleString()]]) {
+    details.append(element('dt', label), element('dd', value));
+  }
   updateItemLock(item);
   saveDeviceState();
 }
@@ -545,6 +666,7 @@ function renderGrid() {
     const card = element('article', undefined, 'media-card');
     const select = element('button', item.relative_path);
     select.setAttribute('translate', 'no');
+    select.title = item.relative_path;
     select.type = 'button';
     select.className = 'quiet media-name';
     select.addEventListener('click', () => {
@@ -587,8 +709,8 @@ async function loadMedia() {
   state.index = restoredIndex >= 0 ? restoredIndex : Math.min(state.index, Math.max(0, state.items.length - 1));
   state.gridTargetIndex = null;
   state.restoreMediaId = '';
-  byId('collection-title').textContent = state.category === 'all'
-    ? 'All items' : `${state.category[0].toUpperCase()}${state.category.slice(1)} items`;
+  byId('collection-title').textContent = state.category === 'review' ? 'Review'
+    : state.category === 'all' ? 'All items' : `${state.category[0].toUpperCase()}${state.category.slice(1)} items`;
   renderGrid();
 }
 
@@ -596,18 +718,48 @@ async function maybeStartAutomaticCategorizing() {
   const collectionId = state.autoCategorizeCollectionId;
   if (!collectionId || state.collectionId !== collectionId) return;
   const encodedCollectionId = encodeURIComponent(collectionId);
-  const [unseen, unsure] = await Promise.all(['unseen', 'unsure'].map((category) => request(
-    `/api/media?collectionId=${encodedCollectionId}&category=${category}&sort=${state.sort}&offset=0&limit=1`,
-  )));
+  const { scans } = await request(`/api/scans?collectionId=${encodedCollectionId}`);
+  if (scans.some((scan) => ['queued', 'running'].includes(scan.status))) {
+    const partialQueue = await request(
+      `/api/media?collectionId=${encodedCollectionId}&category=review&sort=${state.sort}&offset=0&limit=1`,
+    );
+    if (!partialQueue.total) return;
+  }
+  const queue = await request(
+    `/api/media?collectionId=${encodedCollectionId}&category=review&sort=${state.sort}&offset=0&limit=1`,
+  );
   if (state.collectionId !== collectionId || state.autoCategorizeCollectionId !== collectionId) return;
-  if (unseen.total === 0 && unsure.total === 0) return;
   state.classificationPending = false;
-  activateCategory(unseen.total > 0 ? 'unseen' : 'unsure');
-  state.restoreMediaId = '';
+  if (!queue.total) {
+    state.autoCategorizeCollectionId = '';
+    if (state.collectionItemCount === 0) {
+      activateCategory('review');
+      await loadMedia();
+      showView('collections');
+      setStatus('Choose a folder to start building this collection.');
+      return;
+    }
+    activateCategory(localStorage.getItem(`photo-sorter-browse-filter:${collectionId}`) || 'all');
+    await loadMedia();
+    showView('browse');
+    return;
+  }
+  const savedPosition = getSavedReviewPosition(collectionId);
+  const resumeReview = state.category === 'review' || Boolean(savedPosition?.mediaId);
+  state.category = 'review';
+  if (resumeReview && savedPosition) {
+    state.offset = savedPosition.offset;
+    state.index = 0;
+    state.restoreMediaId = savedPosition.mediaId || '';
+  } else if (!resumeReview || !state.restoreMediaId) {
+    state.offset = 0;
+    state.index = 0;
+    state.restoreMediaId = '';
+  }
   await loadMedia();
   if (state.collectionId !== collectionId || state.autoCategorizeCollectionId !== collectionId) return;
   state.autoCategorizeCollectionId = '';
-  setFullscreenMode(true);
+  showView('review');
 }
 
 function handleGridScroll() {
@@ -680,7 +832,7 @@ async function refreshQueue() {
         && item.modified_at === state.items[index].modified_at);
     if (unchanged) return;
     const currentId = state.items[state.index]?.id;
-    if (!result.total && state.total > 0 && ['unseen', 'unsure'].includes(snapshot.category)) {
+    if (!result.total && state.total > 0 && snapshot.category === 'review') {
       state.classificationPending = true;
     }
     state.items = result.items;
@@ -718,22 +870,26 @@ async function loadCollections(preferredId) {
   if (!result.collections.length) {
     state.classificationPending = false;
     state.collectionId = '';
+    state.collectionItemCount = 0;
     state.autoCategorizeCollectionId = '';
-    setFullscreenMode(false);
+    byId('active-collection-name').textContent = 'Photo Sorter';
     byId('archive-collection').disabled = true;
     byId('root-list').replaceChildren();
     setStatus('Create a collection, then choose a folder from the host desktop app.');
     await loadMedia();
     await loadArchivedCollections();
+    showView('collections');
     return;
   }
   state.collectionId = lastUsed && result.collections.some((item) => item.id === lastUsed)
     ? lastUsed : result.collections[0].id;
+  const collection = result.collections.find((item) => item.id === state.collectionId);
+  state.collectionItemCount = collection.item_count;
   const collectionChanged = state.collectionId !== previousCollectionId;
   if (collectionChanged) {
     state.classificationPending = false;
     state.autoCategorizeCollectionId = state.collectionId;
-    setFullscreenMode(false);
+    state.lastScanStatusKey = '';
   }
   state.offset = 0;
   state.index = 0;
@@ -751,26 +907,23 @@ async function loadCollections(preferredId) {
     state.restoreGridScroll = true;
     state.restoreMediaId = saved.state.mediaId || '';
     byId('sort-order').value = state.sort;
-    for (const button of byId('filters').querySelectorAll('button')) {
-      button.setAttribute('aria-pressed', String(button.dataset.category === state.category));
+    if (['all', 'unseen', 'keep', 'delete', 'unsure'].includes(state.category)) {
+      localStorage.setItem(`photo-sorter-browse-filter:${state.collectionId}`, state.category);
     }
   } else {
-    state.category = 'unseen';
+    state.category = 'review';
     state.sort = state.defaultSort;
     state.offset = 0;
     state.restoreGridScroll = true;
     state.restoreMediaId = '';
     byId('sort-order').value = state.sort;
-    for (const button of byId('filters').querySelectorAll('button')) {
-      button.setAttribute('aria-pressed', String(button.dataset.category === state.category));
-    }
   }
-  const collection = result.collections.find((item) => item.id === state.collectionId);
+  byId('active-collection-name').textContent = collection.name;
   setStatus(collection.offline_roots ? `${collection.offline_roots} root(s) are currently offline.` : '');
   await Promise.all([loadRootManagement(), loadArchivedCollections()]);
   await loadMedia();
   if (collectionChanged) await maybeStartAutomaticCategorizing();
-  if (state.total === 0 && ['unseen', 'unsure'].includes(state.category)) {
+  if (state.total === 0 && state.category === 'review') {
     state.classificationPending = true;
     await continueClassification();
   }
@@ -779,6 +932,8 @@ async function loadCollections(preferredId) {
 function showApp() {
   byId('auth-panel').classList.add('hidden');
   byId('app-panel').classList.remove('hidden');
+  document.body.classList.add('app-active');
+  updateDrawerOffset();
   byId('logout').classList.remove('hidden');
   byId('add-root').classList.toggle('hidden', !window.photoSorter?.isDesktop);
   refreshNetwork();
@@ -803,7 +958,10 @@ function showApp() {
       clearInterval(queuePollTimer);
       scanPollTimer = null;
       queuePollTimer = null;
+      state.collectionId = '';
+      state.autoCategorizeCollectionId = '';
       byId('app-panel').classList.add('hidden');
+      document.body.classList.remove('app-active');
       byId('logout').classList.add('hidden');
       showAuthentication().catch((error) => setStatus(error.message, true));
     });
@@ -852,8 +1010,10 @@ async function loadRootManagement() {
   const { roots } = await request(`/api/collections/${encodeURIComponent(state.collectionId)}/roots`);
   for (const root of roots) {
     const item = element('li', `${root.path}${root.online ? '' : ' · offline'}${root.read_only ? ' · read-only' : ''}`);
-    const remove = element('button', 'Remove');
+    const remove = element('button', '−', 'remove-root-button');
     remove.type = 'button';
+    remove.setAttribute('aria-label', 'Remove');
+    remove.title = 'Remove';
     remove.addEventListener('click', async () => {
       const choice = await showDialog('Remove folder from collection', [
         `Stop including ${root.path} in this collection? Its indexed decisions and history will be retained.`,
@@ -1015,25 +1175,29 @@ async function decide(category, item = state.items[state.index]) {
     await request(`/api/media/${encodeURIComponent(item.id)}/decision`, {
       method: 'PUT', body: JSON.stringify({ category }),
     });
-    if (state.category !== 'all' && state.category !== category
-      && ['unseen', 'unsure'].includes(state.category)) {
+    if (state.category === 'review') {
       state.classificationPending = true;
     }
     await animation;
     setStatus(`Saved ${category === 'unseen' ? 'unseen' : category} decision.`);
-    const staysInQueue = state.category === 'all' || state.category === category;
+    const staysInQueue = state.category === 'all'
+      || (state.category === 'review' && ['unsure', 'unseen'].includes(category))
+      || state.category === category;
     state.items = state.items.filter((candidate) => candidate.id !== item.id || staysInQueue);
     if (!staysInQueue) {
       state.total = Math.max(0, state.total - 1);
       state.index = Math.min(state.index, Math.max(0, state.items.length - 1));
       await loadMedia();
     } else {
-      const index = state.items.findIndex((candidate) => candidate.id === item.id);
-      if (index >= 0) {
-        state.index = index;
-        state.items[index].category = category === 'unseen' ? null : category;
+      if (state.category === 'review') await loadMedia();
+      else {
+        const index = state.items.findIndex((candidate) => candidate.id === item.id);
+        if (index >= 0) {
+          state.index = index;
+          state.items[index].category = category === 'unseen' ? null : category;
+        }
+        renderGrid();
       }
-      renderGrid();
     }
   } catch (error) {
     await animation;
@@ -1082,56 +1246,30 @@ function activateCategory(category) {
   for (const button of byId('filters').querySelectorAll('button')) {
     button.setAttribute('aria-pressed', String(button.dataset.category === category));
   }
+  if (category !== 'review' && state.collectionId) {
+    localStorage.setItem(`photo-sorter-browse-filter:${state.collectionId}`, category);
+  }
 }
 
 async function continueClassification() {
   if (!state.classificationPending || state.classificationTransitioning || state.busy
-    || !state.collectionId || !['unseen', 'unsure'].includes(state.category)) return;
+    || !state.collectionId || state.category !== 'review') return;
   state.classificationTransitioning = true;
   const collectionId = state.collectionId;
-  const startingCategory = state.category;
   try {
     const encodedCollectionId = encodeURIComponent(collectionId);
     const { scans } = await request(`/api/scans?collectionId=${encodedCollectionId}`);
     if (scans.some((scan) => ['queued', 'running'].includes(scan.status))) return;
-
-    const categories = ['unseen', 'unsure', 'all'];
-    const counts = await Promise.all(categories.map((category) => request(
-      `/api/media?collectionId=${encodedCollectionId}&category=${category}&sort=${state.sort}&offset=0&limit=1`,
-    )));
-    if (!state.classificationPending || state.collectionId !== collectionId
-      || state.category !== startingCategory) return;
-    const [unseen, unsure, all] = counts;
-    if (state.category === 'unseen' && unseen.total > 0) {
-      state.classificationPending = false;
-      return;
-    }
-    if (state.category === 'unsure' && unsure.total > 0) {
-      state.classificationPending = false;
-      return;
-    }
-    if (state.category === 'unseen') {
-      activateCategory('unsure');
-      await loadMedia();
-      if (!state.classificationPending || state.collectionId !== collectionId
-        || state.category !== 'unsure') return;
-    } else if (unseen.total > 0) {
-      activateCategory('unseen');
-      await loadMedia();
-      state.classificationPending = false;
-      return;
-    }
-
-    if (unseen.total === 0 && unsure.total === 0 && all.total > 0) {
-      state.classificationPending = false;
-      setFullscreenMode(false);
-      const choice = await showDialog('Classification complete', [
-        'All unseen and unsure items have been processed. Review and apply your categories now?',
-      ], { confirmLabel: 'Review and apply moves' });
-      if (choice.confirmed) await applyDecisions();
-      return;
-    }
+    const queue = await request(`/api/media?collectionId=${encodedCollectionId}&category=review&sort=${state.sort}&offset=0&limit=1`);
+    if (state.collectionId !== collectionId || state.category !== 'review') return;
     state.classificationPending = false;
+    if (queue.total) return;
+    if (state.view !== 'review') return;
+    const filter = localStorage.getItem(`photo-sorter-browse-filter:${collectionId}`) || 'all';
+    activateCategory(filter);
+    await loadMedia();
+    showView('browse');
+    setStatus('All unseen and unsure photos are resolved. Browse the collection or apply your decisions.');
   } catch (error) {
     setStatus(error.message, true);
   } finally {
@@ -1179,6 +1317,15 @@ async function applyDecisions() {
   }
 }
 
+async function refreshAudit() {
+  try {
+    const { events } = await request('/api/audit');
+    renderAuditEvents(events);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
 byId('theme').addEventListener('change', (event) => {
   localStorage.setItem('photo-sorter-theme', event.target.value);
   document.documentElement.dataset.theme = event.target.value;
@@ -1191,6 +1338,7 @@ byId('grid-columns').addEventListener('change', (event) => {
 });
 byId('language').addEventListener('change', (event) => {
   window.photoSorterI18n.setLanguage(event.target.value);
+  setSidebarCollapsed(byId('app-panel').classList.contains('sidebar-collapsed'));
 });
 byId('register-passkey').addEventListener('click', registerPasskey);
 byId('passkey-login').addEventListener('click', loginWithPasskey);
@@ -1216,9 +1364,50 @@ window.addEventListener('appinstalled', () => {
 byId('zoom-in').addEventListener('click', () => setZoom(state.zoomScale + 0.5));
 byId('zoom-out').addEventListener('click', () => setZoom(state.zoomScale - 0.5));
 byId('zoom-reset').addEventListener('click', resetZoom);
+byId('photo-info-toggle').addEventListener('click', () => {
+  const details = byId('photo-details');
+  const open = details.classList.contains('hidden');
+  details.classList.toggle('hidden', !open);
+  byId('photo-info-toggle').setAttribute('aria-expanded', String(open));
+});
+byId('pause-review').addEventListener('click', () => {
+  pauseReview().catch((error) => setStatus(error.message, true));
+});
+byId('menu-toggle').addEventListener('click', () => setDrawerOpen(!state.drawerOpen));
+byId('close-menu').addEventListener('click', () => setDrawerOpen(false));
+byId('drawer-backdrop').addEventListener('click', () => setDrawerOpen(false));
+setDrawerOpen(false);
+byId('collapse-menu').addEventListener('click', () => {
+  const collapsed = byId('app-panel').classList.toggle('sidebar-collapsed');
+  setSidebarCollapsed(collapsed);
+});
+setSidebarCollapsed(localStorage.getItem('photo-sorter-sidebar-collapsed') === 'true');
+byId('app-navigation').addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-view]');
+  if (!button) return;
+  const view = button.dataset.view;
+  try {
+    if (view === 'review') {
+      await openReview();
+      return;
+    }
+    state.classificationPending = false;
+    state.autoCategorizeCollectionId = '';
+    if (view === 'browse') {
+      activateCategory(localStorage.getItem(`photo-sorter-browse-filter:${state.collectionId}`) || 'all');
+      await loadMedia();
+    }
+    showView(view);
+    if (view === 'history') await refreshAudit();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
 
-byId('settings-form').addEventListener('submit', async (event) => {
-  event.preventDefault();
+async function saveSettings() {
+  const form = byId('settings-form');
+  if (!form.reportValidity()) return;
+  setStatus('Saving settings.');
   try {
     const previousDefault = state.defaultSort;
     const settings = await request('/api/settings', {
@@ -1238,6 +1427,27 @@ byId('settings-form').addEventListener('submit', async (event) => {
     }
     setStatus('Settings saved.');
   } catch (error) { setStatus(error.message, true); }
+}
+
+function queueSettingsSave() {
+  clearTimeout(settingsSaveTimer);
+  settingsSaveQueue = settingsSaveQueue.then(saveSettings, saveSettings);
+}
+
+byId('settings-form').addEventListener('change', (event) => {
+  if (event.target.id === 'default-sort' || event.target.id === 'preview-cache-limit') {
+    queueSettingsSave();
+  }
+});
+
+byId('preview-cache-limit').addEventListener('input', () => {
+  clearTimeout(settingsSaveTimer);
+  settingsSaveTimer = setTimeout(queueSettingsSave, 300);
+});
+
+byId('settings-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  queueSettingsSave();
 });
 
 byId('autostart').addEventListener('change', async (event) => {
@@ -1288,7 +1498,9 @@ byId('add-root').addEventListener('click', async () => {
     const result = await window.photoSorter.chooseRoot(state.collectionId);
     if (!result.canceled) {
       setStatus('Folder registered; scanning has started.');
+      state.autoCategorizeCollectionId = state.collectionId;
       await loadCollections(state.collectionId);
+      await maybeStartAutomaticCategorizing();
       refreshScans();
     }
   } catch (error) { setStatus(error.message, true); }
@@ -1299,21 +1511,16 @@ byId('filters').addEventListener('click', async (event) => {
   state.classificationPending = false;
   activateCategory(button.dataset.category);
   await loadMedia();
-  if (state.total === 0 && ['unseen', 'unsure'].includes(state.category)) {
-    state.classificationPending = true;
-    await continueClassification();
-  }
 });
 byId('previous').addEventListener('click', () => moveSelection(-1));
 byId('next').addEventListener('click', () => moveSelection(1));
-byId('fullscreen-toggle').addEventListener('click', () => {
-  setFullscreenMode(!state.fullscreen, true);
-});
 document.querySelectorAll('[data-decision]').forEach((button) => {
   button.addEventListener('click', () => decide(button.dataset.decision));
 });
 mediaViewport.addEventListener('scroll', handleGridScroll, { passive: true });
 window.addEventListener('resize', () => {
+  updateDrawerOffset();
+  setDrawerOpen(false);
   renderGrid();
   alignGridToSelection();
 });
@@ -1336,11 +1543,7 @@ byId('rescan').addEventListener('click', async () => {
 });
 byId('mark-unseen').addEventListener('click', () => decide('unseen'));
 byId('audit').addEventListener('click', async () => {
-  try {
-    const { events } = await request('/api/audit');
-    renderAuditEvents(events);
-    byId('audit-panel').classList.toggle('hidden');
-  } catch (error) { setStatus(error.message, true); }
+  await refreshAudit();
 });
 byId('export-audit').addEventListener('click', async () => {
   try {
@@ -1378,6 +1581,10 @@ byId('logout').addEventListener('click', async () => {
   queueEventRefreshTimer = null;
   await request('/api/logout', { method: 'POST', body: '{}' });
   byId('app-panel').classList.add('hidden');
+  document.body.classList.remove('app-active');
+  state.collectionId = '';
+  state.autoCategorizeCollectionId = '';
+  setDrawerOpen(false);
   clearInterval(scanPollTimer);
   scanPollTimer = null;
   clearInterval(queuePollTimer);
@@ -1397,11 +1604,16 @@ setInterval(async () => {
 }, 20_000);
 document.addEventListener('keydown', (event) => {
   if (byId('app-panel').classList.contains('hidden')) return;
-  if (event.key === 'Escape' && state.fullscreen) {
-    setFullscreenMode(false, true);
+  if (event.key === 'Escape' && state.drawerOpen) {
+    setDrawerOpen(false);
+    return;
+  }
+  if (event.key === 'Escape' && state.view === 'review') {
+    pauseReview().catch((error) => setStatus(error.message, true));
     return;
   }
   if (event.target.matches('input, textarea, select')) return;
+  if (state.view !== 'review') return;
   if (event.key === 'ArrowLeft') decide('delete');
   if (event.key === 'ArrowRight') decide('keep');
   if (event.key === 'ArrowDown') decide('unsure');

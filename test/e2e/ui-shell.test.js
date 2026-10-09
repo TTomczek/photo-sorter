@@ -22,15 +22,19 @@ test('serves PWA shell assets with installable manifest and safe worker scope', 
   assert.match(pageHtml, /\/i18n\.js/);
   assert.match(pageHtml, /id="media-viewport"/);
   assert.match(pageHtml, /id="zoom-controls"/);
-  const primaryPanelOrder = [
-    'class="toolbar panel"',
-    'class="review panel"',
-    'class="panel grid-section"',
-    'id="settings-panel"',
-  ].map((marker) => pageHtml.indexOf(marker));
-  assert.ok(primaryPanelOrder.every((position, index) => (
-    position >= 0 && (index === 0 || position > primaryPanelOrder[index - 1])
+  const navigationOrder = ['review', 'collections', 'browse', 'apply', 'history', 'help', 'settings']
+    .map((view) => pageHtml.indexOf(`data-view="${view}"`));
+  assert.ok(navigationOrder.every((position, index) => (
+    position >= 0 && (index === 0 || position > navigationOrder[index - 1])
   )));
+  const workspaceOrder = ['review-view', 'browse-view', 'collections-view', 'apply-view',
+    'history-view', 'help-view', 'settings-view'].map((id) => pageHtml.indexOf(`id="${id}"`));
+  assert.ok(workspaceOrder.every((position, index) => (
+    position >= 0 && (index === 0 || position > workspaceOrder[index - 1])
+  )));
+  assert.match(pageHtml, /id="menu-toggle"[^>]*aria-controls="side-sheet"/);
+  assert.match(pageHtml, /id="photo-info-toggle"/);
+  assert.match(pageHtml, /id="pause-review"/);
 
   const manifestResponse = await fetch(`${origin}/manifest.webmanifest`);
   assert.equal(manifestResponse.headers.get('content-type'), 'application/manifest+json; charset=utf-8');

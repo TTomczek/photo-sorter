@@ -98,7 +98,7 @@ async function closeFixture(current) {
   await fs.rm(current.temporary, { recursive: true, force: true });
 }
 
-async function setupAccount(page, { keepFullscreen = false, expectedCategory = 'Unseen items' } = {}) {
+async function setupAccount(page, { expectedCategory = 'Review' } = {}) {
   await page.goto(fixture.origin);
   await expect(page.locator('#auth-title')).toHaveText('Waiting for host setup');
   await expect(page.locator('#auth-form')).toBeHidden();
@@ -115,9 +115,6 @@ async function setupAccount(page, { keepFullscreen = false, expectedCategory = '
     "SELECT COUNT(*) AS count FROM scan_jobs WHERE status IN ('queued', 'running')",
   ).get().count).toBe(0);
   await expect(page.locator('#current-media img')).toHaveJSProperty('naturalWidth', 96);
-  if (!keepFullscreen && await page.locator('#fullscreen-toggle').getAttribute('aria-pressed') === 'true') {
-    await page.locator('#fullscreen-toggle').click();
-  }
 }
 
 async function api(page, route, options = {}) {
@@ -160,7 +157,7 @@ test.afterEach(async () => {
   delete process.env.PHOTO_SORTER_WEBAUTHN_RP_ID;
 });
 
-test('first-run setup, generated previews, clear-to-unseen, keyboard and safe apply/restore', async () => {
+test('first-run review focus, photo details, category browsing and safe apply/restore', async () => {
   const context = await browser.newContext();
   const page = await context.newPage();
   const pageErrors = [];
@@ -176,16 +173,40 @@ test('first-run setup, generated previews, clear-to-unseen, keyboard and safe ap
     await page.locator('#auth-submit').click();
 
     await expect(page.locator('#app-panel')).toBeVisible();
+    await expect(page.locator('#review-view')).toBeVisible();
+    await expect(page.locator('#previous')).toHaveAttribute('aria-label', 'Previous');
+    await expect(page.locator('#next')).toHaveAttribute('aria-label', 'Next');
+    const reviewNavigation = await page.evaluate(() => {
+      const bounds = (selector) => document.querySelector(selector).getBoundingClientRect();
+      const previous = bounds('#previous');
+      const next = bounds('#next');
+      const media = bounds('#current-media');
+      return {
+        previousCenterX: previous.left + previous.width / 2,
+        nextCenterX: next.left + next.width / 2,
+        mediaLeft: media.left,
+        mediaRight: media.right,
+        navigationCenterY: previous.top + previous.height / 2,
+        mediaCenterY: media.top + media.height / 2,
+      };
+    });
+    expect(reviewNavigation.previousCenterX).toBeLessThan(
+      reviewNavigation.mediaLeft + (reviewNavigation.mediaRight - reviewNavigation.mediaLeft) / 4,
+    );
+    expect(reviewNavigation.nextCenterX).toBeGreaterThan(
+      reviewNavigation.mediaLeft + (reviewNavigation.mediaRight - reviewNavigation.mediaLeft) * 3 / 4,
+    );
+    expect(Math.abs(reviewNavigation.navigationCenterY - reviewNavigation.mediaCenterY)).toBeLessThan(1);
     await expect.poll(() => fixture.app.db.prepare(
       "SELECT COUNT(*) AS count FROM scan_jobs WHERE status IN ('queued', 'running')",
     ).get().count).toBe(0);
-    await expect(page.locator('#add-root')).toBeEnabled();
-    await expect(page.locator('#filters [data-category="unseen"]')).toHaveAttribute('aria-pressed', 'true');
-    await expect(page.locator('#filters [data-category="unseen"]')).toHaveCSS('box-shadow', /inset/);
     await expect(page.locator('#current-media img')).toHaveAttribute('alt', '01-red.png');
     await expect(page.locator('#current-media img')).toHaveJSProperty('naturalWidth', 96);
-    await page.locator('#fullscreen-toggle').click();
-    await expect(page.locator('#redo-decision')).toHaveCount(0);
+    await page.locator('#photo-info-toggle').click();
+    await expect(page.locator('#photo-details')).toBeVisible();
+    await expect(page.locator('#photo-details')).toContainText('01-red.png');
+    await page.locator('#photo-info-toggle').click();
+    await expect(page.locator('#photo-details')).toBeHidden();
     await expect.poll(() => fixture.app.db.prepare('SELECT COUNT(*) AS count FROM preview_cache').get().count)
       .toBeGreaterThan(0);
 
@@ -219,35 +240,61 @@ test('first-run setup, generated previews, clear-to-unseen, keyboard and safe ap
 
     await page.keyboard.press('ArrowRight');
     await expect(page.locator('#current-media img')).toHaveAttribute('alt', '02-green.png');
+    await page.locator('.decision-actions [data-decision="delete"]').click();
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '03-blue.png');
+    await page.locator('.decision-actions [data-decision="unsure"]').click();
+    await expect(page.locator('#current-media video')).toBeVisible();
+    await page.locator('.decision-actions [data-decision="keep"]').click();
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '03-blue.png');
+    await expect(page.locator('.decision-actions [data-decision="keep"]')).toBeEnabled();
+    await page.locator('.decision-actions [data-decision="keep"]').click();
+    await expect(page.locator('#browse-view')).toBeVisible();
+    await expect(page.locator('#filters [data-category="all"]')).toHaveAttribute('aria-pressed', 'true');
+
+    await page.locator('#app-navigation [data-view="collections"]').click();
+    await expect(page.locator('#collections-view')).toBeVisible();
+    await expect(page.locator('#add-root')).toBeEnabled();
+    await page.locator('#app-navigation [data-view="browse"]').click();
+    await expect(page.locator('#browse-view')).toBeVisible();
+    await expect(page.locator('#media-grid')).toContainText('01-red.png');
+    await expect(page.locator('#media-grid')).toHaveCSS('grid-auto-rows', '250px');
+    const browseLayout = await page.evaluate(() => {
+      const bounds = (selector) => document.querySelector(selector).getBoundingClientRect();
+      const sortLabel = bounds('label[for="sort-order"]');
+      const sortSelect = bounds('#sort-order');
+      const heading = bounds('.grid-section .section-heading');
+      const toolbar = bounds('.grid-section .section-heading > div');
+      const photos = bounds('#media-viewport');
+      return {
+        labelCenter: sortLabel.top + sortLabel.height / 2,
+        selectCenter: sortSelect.top + sortSelect.height / 2,
+        headingBottom: heading.bottom,
+        photoGap: photos.top - toolbar.bottom,
+      };
+    });
+    expect(Math.abs(browseLayout.labelCenter - browseLayout.selectCenter)).toBeLessThan(1);
+    expect(browseLayout.photoGap).toBeGreaterThanOrEqual(12);
     await page.locator('#filters [data-category="keep"]').click();
     await expect(page.locator('#collection-title')).toHaveText('Keep items');
     await expect(page.locator('#filters [data-category="keep"]')).toHaveAttribute('aria-pressed', 'true');
-    await expect(page.locator('#filters [data-category="keep"]')).toHaveCSS('box-shadow', /inset/);
-    await expect(page.locator('#filters [data-category="unseen"]')).toHaveAttribute('aria-pressed', 'false');
     await expect(page.locator('#media-grid')).toContainText('01-red.png');
-
-    await expect(page.locator('#mark-unseen')).toHaveText('Unseen');
+    await page.locator('#filters [data-category="all"]').click();
+    const alphaCard = page.locator('#media-grid .media-card').filter({ hasText: '01-red.png' });
+    await alphaCard.locator('button.media-name').click();
     await page.locator('#mark-unseen').click();
     await expect.poll(() => fixture.app.db.prepare('SELECT category FROM media WHERE id = ?')
       .get(item.id)?.category).toBe(null);
     await expect(page.locator('#status')).toContainText('Saved unseen decision');
     await page.locator('#filters [data-category="unseen"]').click();
     await expect(page.locator('#media-grid')).toContainText('01-red.png');
-
-    await expect.poll(() => fixture.app.listMedia({
-      collectionId: fixture.collectionId, category: 'unseen', sort: 'filename',
-    }).items.some((candidate) => candidate.id === item.id)).toBe(true);
     const unseenItem = fixture.app.listMedia({
       collectionId: fixture.collectionId, category: 'unseen', sort: 'filename',
     }).items[0];
-    await page.locator('#filters [data-category="unseen"]').click();
-    await expect(page.locator('#collection-title')).toHaveText('Unseen items');
     await page.locator('#filters [data-category="all"]').click();
     await expect(page.locator('#collection-title')).toHaveText('All items');
     await expect(page.locator('#item-count')).toHaveText('1 of 4');
     await expect(page.locator('#media-grid .media-card')).toHaveCount(4);
     await expect(page.locator('#filters [data-category="all"]')).toHaveAttribute('aria-pressed', 'true');
-    await page.locator('#filters [data-category="unseen"]').click();
     expect((await api(page, `/api/media/${unseenItem.id}/lock`, { method: 'POST' })).status).toBe(200);
     expect((await api(page, `/api/media/${unseenItem.id}/decision`, {
       method: 'PUT', body: JSON.stringify({ category: 'unseen' }),
@@ -255,9 +302,6 @@ test('first-run setup, generated previews, clear-to-unseen, keyboard and safe ap
     await expect.poll(() => fixture.app.db.prepare('SELECT category FROM media WHERE id = ?')
       .get(unseenItem.id)?.category).toBe(null);
 
-    await page.locator('#filters [data-category="unseen"]').click();
-    await page.locator('.decision-actions [data-decision="delete"]').click();
-    await expect(page.locator('#status')).toContainText('Saved delete decision');
     await expect.poll(() => fixture.app.listMedia({
       collectionId: fixture.collectionId, category: 'delete', sort: 'filename',
     }).total).toBe(1);
@@ -266,6 +310,7 @@ test('first-run setup, generated previews, clear-to-unseen, keyboard and safe ap
     }).items[0];
     const deleteFilename = path.basename(deleteItem.relative_path);
     await expect(fs.stat(path.join(fixture.root, deleteFilename))).resolves.toBeTruthy();
+    await page.locator('#app-navigation [data-view="apply"]').click();
     await page.locator('#apply').click();
     await expect(page.locator('#confirm-dialog')).toBeVisible();
     await expect(page.locator('#dialog-content')).toContainText(deleteFilename);
@@ -286,35 +331,43 @@ test('first-run setup, generated previews, clear-to-unseen, keyboard and safe ap
   }
 });
 
-test('automatically opens fullscreen categorizing and supports manual entry and exit', async () => {
+test('opens directly into photo-first review with the side sheet beside it', async () => {
   const context = await browser.newContext();
   const page = await context.newPage();
   try {
-    await setupAccount(page, { keepFullscreen: true });
-    const review = page.locator('#review');
-    const toggle = page.locator('#fullscreen-toggle');
-    await expect(review).toHaveClass(/fullscreen-review/);
-    await expect(toggle).toHaveText('Exit fullscreen');
-    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
-    const reviewBox = await review.boundingBox();
+    await setupAccount(page);
+    await expect(page.locator('#review-view')).toBeVisible();
+    await expect(page.locator('#side-sheet')).toBeVisible();
+    await expect(page.locator('#menu-toggle')).toBeHidden();
+    const reviewBox = await page.locator('#current-media').boundingBox();
+    const workspaceBox = await page.locator('.workspace-main').boundingBox();
+    const sideSheetBox = await page.locator('#side-sheet').boundingBox();
     const viewport = page.viewportSize();
-    expect(reviewBox).toMatchObject({ x: 0, y: 0, width: viewport.width, height: viewport.height });
-    await expect(page.locator('#current-media img')).toHaveCSS('width', `${viewport.width}px`);
+    expect(sideSheetBox.x + sideSheetBox.width).toBeLessThanOrEqual(workspaceBox.x + 1);
+    expect(reviewBox.width).toBe(workspaceBox.width);
+    expect(reviewBox.height).toBeGreaterThan(viewport.height * 0.7);
+    await expect(page.locator('#current-media img')).toHaveCSS('width', `${reviewBox.width}px`);
 
-    await toggle.click();
-    await expect(review).not.toHaveClass(/fullscreen-review/);
-    await expect(toggle).toHaveText('Enter fullscreen');
-    await toggle.click();
-    await expect(review).toHaveClass(/fullscreen-review/);
+    await page.locator('#collapse-menu').click();
+    await expect(page.locator('#app-panel')).toHaveClass(/sidebar-collapsed/);
+    await expect(page.locator('#collapse-menu')).toHaveAttribute('aria-expanded', 'false');
+    await page.locator('#collapse-menu').click();
+    await expect(page.locator('#app-panel')).not.toHaveClass(/sidebar-collapsed/);
+    await page.locator('#next').click();
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '02-green.png');
+    await page.locator('#pause-review').click();
+    await expect(page.locator('#browse-view')).toBeVisible();
+    await page.locator('#app-navigation [data-view="review"]').click();
+    await expect(page.locator('#review-view')).toBeVisible();
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '02-green.png');
     await page.keyboard.press('Escape');
-    await expect(review).not.toHaveClass(/fullscreen-review/);
-    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await expect(page.locator('#browse-view')).toBeVisible();
   } finally {
     await context.close();
   }
 });
 
-test('automatically opens directly on unsure items when no unseen items remain', async () => {
+test('review queue opens on unsure items when no unseen items remain', async () => {
   await expect.poll(() => fixture.app.db.prepare(
     "SELECT COUNT(*) AS count FROM scan_jobs WHERE status IN ('queued', 'running')",
   ).get().count).toBe(0);
@@ -327,19 +380,18 @@ test('automatically opens directly on unsure items when no unseen items remain',
   const context = await browser.newContext();
   const page = await context.newPage();
   try {
-    await setupAccount(page, { keepFullscreen: true, expectedCategory: 'Unsure items' });
-    await expect(page.locator('#review')).toHaveClass(/fullscreen-review/);
+    await setupAccount(page);
     await expect(page.locator('#current-media img')).toHaveAttribute('alt', '01-red.png');
   } finally {
     await context.close();
   }
 });
 
-test('finishing unseen review advances to unsure and offers category application', async () => {
+test('unsure items return at the end of the review queue and resolved queue opens Browse', async () => {
   const context = await browser.newContext();
   const page = await context.newPage();
   try {
-    await setupAccount(page, { keepFullscreen: true });
+    await setupAccount(page);
     await expect.poll(() => fixture.app.db.prepare(
       "SELECT COUNT(*) AS count FROM scan_jobs WHERE status IN ('queued', 'running')",
     ).get().count).toBe(0);
@@ -349,20 +401,13 @@ test('finishing unseen review advances to unsure and offers category application
     await expect(page.locator('#current-media img')).toHaveAttribute('alt', '02-green.png');
     await page.locator('.decision-actions [data-decision="keep"]').click();
     await expect(page.locator('#current-media img')).toHaveAttribute('alt', '03-blue.png');
-    await page.locator('.decision-actions [data-decision="keep"]').click();
-    await expect(page.locator('#current-media video')).toBeVisible();
     await page.locator('.decision-actions [data-decision="unsure"]').click();
-
-    await expect(page.locator('#collection-title')).toHaveText('Unsure items');
     await expect(page.locator('#current-media video')).toBeVisible();
     await page.locator('.decision-actions [data-decision="keep"]').click();
-    await expect(page.locator('#confirm-dialog')).toBeVisible();
-    await expect(page.locator('#dialog-title')).toHaveText('Classification complete');
-    await expect(page.locator('#dialog-content')).toContainText('All unseen and unsure items have been processed');
-    await expect(page.locator('#dialog-confirm')).toHaveText('Review and apply moves');
-    await expect(page.locator('#review')).not.toHaveClass(/fullscreen-review/);
-
-    await page.locator('#confirm-dialog [value="cancel"]').click();
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '03-blue.png');
+    await page.locator('.decision-actions [data-decision="keep"]').click();
+    await expect(page.locator('#browse-view')).toBeVisible();
+    await expect(page.locator('#status')).toContainText('All unseen and unsure photos are resolved');
     await expect(fs.readFile(path.join(fixture.root, '99-unplayable.mp4'))).resolves.toBeTruthy();
     await expect(fs.stat(path.join(fixture.root, 'unsure', '99-unplayable.mp4')))
       .rejects.toMatchObject({ code: 'ENOENT' });
@@ -388,7 +433,7 @@ test('development reload keeps an authenticated session', async () => {
     await page.reload();
     await expect(page.locator('#app-panel')).toBeVisible();
     await expect(page.locator('#auth-panel')).toBeHidden();
-    await expect(page.locator('#collection-title')).toHaveText('Unseen items');
+    await expect(page.locator('#collection-title')).toHaveText('Review');
   } finally {
     await context.close();
   }
@@ -402,6 +447,7 @@ test('existing output folders need explicit approval and cancellation does not m
     await setupAccount(page);
     await page.locator('.decision-actions [data-decision="delete"]').click();
     await expect(page.locator('#status')).toContainText('Saved delete decision');
+    await page.locator('#app-navigation [data-view="apply"]').click();
     await page.locator('#apply').click();
     await expect(page.locator('#dialog-content')).toContainText('explicitly approve reusing');
     await expect(page.locator('#dialog-confirm')).toBeDisabled();
@@ -429,6 +475,13 @@ test('mobile layout preserves explicit actions and maps a right swipe to keep', 
   try {
     await setupAccount(page);
     await expect(page.locator('.decision-actions [data-decision="keep"]')).toBeVisible();
+    await expect(page.locator('#menu-toggle')).toBeVisible();
+    await expect(page.locator('#side-sheet')).not.toHaveClass(/is-open/);
+    await page.locator('#menu-toggle').click();
+    await expect(page.locator('#side-sheet')).toHaveClass(/is-open/);
+    await expect(page.locator('#drawer-backdrop')).toHaveClass(/is-visible/);
+    await page.locator('#drawer-backdrop').click({ position: { x: 380, y: 100 } });
+    await expect(page.locator('#side-sheet')).not.toHaveClass(/is-open/);
     expect(await page.evaluate(() => document.documentElement.scrollWidth))
       .toBeLessThanOrEqual(await page.evaluate(() => window.innerWidth));
     await page.locator('.decision-actions [data-decision="delete"]').click();
@@ -454,6 +507,47 @@ test('mobile layout preserves explicit actions and maps a right swipe to keep', 
     await expect.poll(() => fixture.app.db.prepare("SELECT COUNT(*) AS count FROM media WHERE category = 'keep'").get().count)
       .toBe(1);
     await expect(page.locator('#current-media img')).toHaveAttribute('alt', '03-blue.png');
+    await page.locator('#menu-toggle').click();
+    await page.locator('#app-navigation [data-view="browse"]').click();
+    await expect(page.locator('#browse-view')).toBeVisible();
+    const gridColumnCount = await page.locator('#media-grid').evaluate((element) => {
+      const columns = getComputedStyle(element).gridTemplateColumns;
+      const repeatCount = columns.match(/^repeat\((\d+),/);
+      return repeatCount ? Number(repeatCount[1]) : columns.split(/\s+/).length;
+    });
+    expect(gridColumnCount).toBe(2);
+    const browseLayout = await page.evaluate(() => {
+      const bounds = (selector) => document.querySelector(selector).getBoundingClientRect();
+      const sortLabel = bounds('label[for="sort-order"]');
+      const sortSelect = bounds('#sort-order');
+      const toolbar = bounds('.grid-section .section-heading > div');
+      return {
+        labelCenter: sortLabel.top + sortLabel.height / 2,
+        selectCenter: sortSelect.top + sortSelect.height / 2,
+        photoGap: bounds('#media-viewport').top - toolbar.bottom,
+      };
+    });
+    expect(Math.abs(browseLayout.labelCenter - browseLayout.selectCenter)).toBeLessThan(1);
+    expect(browseLayout.photoGap).toBeGreaterThanOrEqual(12);
+  } finally {
+    await context.close();
+  }
+});
+
+test('undecodable media stays sortable without a generic red preview error', async () => {
+  await expect.poll(() => fixture.app.db.prepare(
+    "SELECT COUNT(*) AS count FROM scan_jobs WHERE status IN ('queued', 'running')",
+  ).get().count).toBe(0);
+  await fs.writeFile(path.join(fixture.root, '99-broken.png'), 'not an image');
+  await fixture.app.scanRoot(fixture.rootId);
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await setupAccount(page);
+    await page.locator('#app-navigation [data-view="browse"]').click();
+    const brokenCard = page.locator('#media-grid .media-card').filter({ hasText: '99-broken.png' });
+    await expect(brokenCard.locator('.placeholder')).toContainText('Preview unavailable');
+    await expect(page.locator('#status')).not.toHaveClass(/error/);
   } finally {
     await context.close();
   }
@@ -473,9 +567,12 @@ test('settings, German localization, theme/grid preferences, device state, colle
   try {
     await setupAccount(page);
 
-    await page.locator('#settings-panel summary').click();
+    await page.locator('#app-navigation [data-view="settings"]').click();
     await page.locator('#theme').selectOption('dark');
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    await expect(page.locator('#side-sheet')).toHaveCSS('background-color', 'rgb(32, 38, 44)');
+    await expect(page.locator('#app-navigation [data-view="settings"]'))
+      .toHaveCSS('color', 'rgb(216, 232, 255)');
     await page.locator('#grid-columns').selectOption('4');
     await expect(page.locator('html')).toHaveAttribute('data-grid-columns', '4');
     await page.locator('#language').selectOption('de');
@@ -489,9 +586,14 @@ test('settings, German localization, theme/grid preferences, device state, colle
       .toHaveText('Erstelle eine Sammlung und wähle anschließend einen Ordner in der Desktop-App des Hosts aus.');
 
     await page.locator('#default-sort').selectOption('capture-desc');
-    await page.locator('#preview-cache-limit').fill('0');
-    await page.getByRole('button', { name: 'Einstellungen speichern' }).click();
+    await expect.poll(async () => (await api(page, '/api/settings')).body.defaultSort)
+      .toBe('capture-desc');
     await expect(page.locator('#status')).toContainText('Einstellungen gespeichert');
+    await page.locator('#preview-cache-limit').fill('0');
+    await expect.poll(async () => (await api(page, '/api/settings')).body.previewCacheLimitMb)
+      .toBe(0);
+    await expect(page.locator('#status')).toContainText('Einstellungen gespeichert');
+    await expect(page.locator('#settings-form button[type="submit"]')).toHaveCount(0);
     expect((await api(page, '/api/settings')).body).toEqual({
       defaultSort: 'capture-desc',
       previewCacheLimitMb: 0,
@@ -501,51 +603,51 @@ test('settings, German localization, theme/grid preferences, device state, colle
     await page.locator('#password').fill(PASSWORD);
     await page.locator('#auth-submit').click();
     await expect(page.locator('#app-panel')).toBeVisible();
-    if (await page.locator('#fullscreen-toggle').getAttribute('aria-pressed') === 'true') {
-      await page.locator('#fullscreen-toggle').click();
-    }
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
     await expect(page.locator('html')).toHaveAttribute('data-grid-columns', '4');
     await expect(page.locator('#language')).toHaveValue('de');
 
+    await page.locator('#app-navigation [data-view="collections"]').click();
     await page.locator('#new-collection-form input').fill('Second collection');
     await page.locator('#new-collection-form button').click();
     await expect(page.locator('#collection option')).toHaveCount(2);
+    await page.locator('#app-navigation [data-view="collections"]').click();
     await page.locator('#archive-collection').click();
     await expect(page.locator('#confirm-dialog')).toBeVisible();
     await page.locator('#dialog-confirm').click();
     await expect(page.locator('#collection option')).toHaveCount(1);
-    await expect(page.locator('#review')).toHaveClass(/fullscreen-review/);
-    await page.locator('#fullscreen-toggle').click();
+    await page.locator('#app-navigation [data-view="collections"]').click();
     await page.locator('#archived-collections summary').click();
     await expect(page.locator('#archived-list')).toContainText('Second collection');
     await page.locator('#archived-list button').click();
     await expect(page.locator('#collection option')).toHaveCount(2);
 
+    await page.locator('#app-navigation [data-view="collections"]').click();
     await page.locator('#collection').selectOption(fixture.collectionId);
-    await expect(page.locator('#review')).toHaveClass(/fullscreen-review/);
-    await page.locator('#fullscreen-toggle').click();
+    await expect(page.locator('#review-view')).toBeVisible();
     await expect(page.locator('.decision-actions [data-decision="keep"]')).toBeEnabled();
     await page.locator('.decision-actions [data-decision="keep"]').click();
     await expect.poll(() => fixture.app.db.prepare("SELECT COUNT(*) AS count FROM media WHERE category = 'keep'").get().count)
       .toBe(1);
+    await page.locator('#app-navigation [data-view="collections"]').click();
     await page.locator('#root-management summary').click();
     await page.locator('#root-list button').click();
     await expect(page.locator('#confirm-dialog')).toBeVisible();
     await page.locator('#dialog-confirm').click();
+    await page.locator('#app-navigation [data-view="collections"]').click();
     await expect(page.locator('#root-list')).toContainText('Ordner');
-    await expect(page.locator('#current-media')).toContainText('Keine Elemente');
+    await expect(page.locator('#current-media')).toContainText('Keine ungesehenen oder unsicheren Fotos');
     await fixture.app.addRoot(fixture.collectionId, fixture.root);
     await page.reload();
     await expect(page.locator('#auth-title')).toHaveText('Anmelden');
     await page.locator('#password').fill(PASSWORD);
     await page.locator('#auth-submit').click();
     await expect(page.locator('#app-panel')).toBeVisible();
-    await expect(page.locator('#review')).toHaveClass(/fullscreen-review/);
-    await page.locator('#fullscreen-toggle').click();
+    await page.locator('#app-navigation [data-view="collections"]').click();
     await expect(page.locator('#root-list')).toContainText(fixture.root);
+    await expect(page.locator('#root-list button')).toHaveAttribute('aria-label', 'Entfernen');
 
-    await page.locator('#audit').click();
+    await page.locator('#app-navigation [data-view="history"]').click();
     await expect(page.locator('#audit-panel')).toBeVisible();
     await expect(page.locator('#audit-list')).toContainText('Entscheidung geändert');
     const decisionAuditEntry = page.locator('#audit-list .audit-entry')
@@ -618,11 +720,13 @@ test('bounded grid pagination and real-time updates between browser devices', as
   try {
     await test.step('load the first bounded page', async () => {
       await setupAccount(firstPage);
+      await firstPage.locator('#app-navigation [data-view="browse"]').click();
     });
     await expect(firstPage.locator('#media-grid .media-card')).toHaveCount(60);
     await expect(firstPage.locator('#item-count')).toContainText('of 66');
 
     await test.step('connect a second device', async () => {
+      await firstPage.locator('#app-navigation [data-view="review"]').click();
       await firstPage.locator('#next').click();
       await expect(firstPage.locator('#current-media img')).toHaveAttribute('alt', '02-green.png');
       await secondPage.goto(fixture.origin);
@@ -636,7 +740,9 @@ test('bounded grid pagination and real-time updates between browser devices', as
     await test.step('receive a live queue update', async () => {
       await secondPage.locator('.decision-actions [data-decision="keep"]').click();
       await expect(firstPage.locator('#item-count')).toContainText('of 65');
-      await expect(firstPage.locator('#media-grid')).not.toContainText('01-red.png');
+      await firstPage.locator('#app-navigation [data-view="browse"]').click();
+      await expect(firstPage.locator('#media-grid .media-card').filter({ hasText: '01-red.png' }))
+        .toContainText('keep');
       expect((await api(firstPage, '/api/media?collectionId=' + fixture.collectionId + '&category=keep')).body.total).toBe(1);
     });
 
@@ -661,6 +767,7 @@ test('WebAuthn passkey registration, authentication and removal with a virtual a
   let cdp;
   try {
     await setupAccount(page);
+    await page.locator('#app-navigation [data-view="settings"]').click();
     cdp = await context.newCDPSession(page);
     await cdp.send('WebAuthn.enable');
     const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', {
@@ -683,6 +790,7 @@ test('WebAuthn passkey registration, authentication and removal with a virtual a
     await page.locator('#passkey-login').click();
     await expect(page.locator('#app-panel')).toBeVisible();
 
+    await page.locator('#app-navigation [data-view="settings"]').click();
     if (!await page.locator('#passkey-management').evaluate((element) => element.open)) {
       await page.locator('#passkey-management summary').click();
     }

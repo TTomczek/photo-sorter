@@ -18,10 +18,6 @@
         <h1>Photo Sorter</h1>
         <p class="subtitle">Your library stays on this computer.</p>
       </div>
-      <div class="header-actions">
-        <button id="install-app" class="hidden" type="button">Install app</button>
-        <button id="logout" class="quiet hidden" type="button">Log out</button>
-      </div>
     </header>
     <main>
       <aside id="network-warning" class="warning">
@@ -39,143 +35,194 @@
         <button id="passkey-login" class="hidden" type="button">Sign in with a passkey</button>
       </section>
       <section id="app-panel" class="hidden">
-        <div class="toolbar panel">
-          <label for="collection">Collection</label>
-          <select id="collection"></select>
-          <form id="new-collection-form">
-            <input id="collection-name" aria-label="New collection name" placeholder="New collection" maxlength="80" required>
-            <button type="submit">Create</button>
-          </form>
-          <label for="sort-order">Sort</label>
-          <select id="sort-order">
-            <option value="capture-asc">Capture date ↑</option>
-            <option value="capture-desc">Capture date ↓</option>
-            <option value="filename">Filename</option>
-          </select>
-          <button id="add-root" type="button" class="hidden" disabled>Choose folder</button>
-          <button id="archive-collection" type="button">Archive collection</button>
+        <div class="app-topbar">
+          <button id="menu-toggle" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="side-sheet">☰</button>
+          <strong id="active-collection-name" translate="no">Photo Sorter</strong>
+          <span id="review-progress"></span>
+          <div class="app-topbar-actions">
+            <button id="install-app" class="hidden" type="button">Install app</button>
+            <button id="logout" class="quiet hidden" type="button">Log out</button>
+          </div>
         </div>
-        <nav id="filters" class="filters" aria-label="Media category">
-          <button type="button" data-category="all" aria-pressed="false">All</button>
-          <button type="button" data-category="unseen" aria-pressed="true">Unseen</button>
-          <button type="button" data-category="keep" aria-pressed="false">Keep</button>
-          <button type="button" data-category="delete" aria-pressed="false">Delete</button>
-          <button type="button" data-category="unsure" aria-pressed="false">Unsure</button>
-        </nav>
-        <section id="review" class="review panel" aria-live="polite">
-          <div class="review-heading">
-            <h2 id="collection-title">Review</h2>
-            <span id="item-count"></span>
-            <button id="fullscreen-toggle" type="button" aria-pressed="false">Enter fullscreen</button>
-          </div>
-          <div id="current-media" class="current-media"></div>
-          <div id="zoom-controls" class="zoom-controls hidden" aria-label="Image zoom controls">
-            <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
-            <button id="zoom-reset" type="button">Reset zoom</button>
-            <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
-          </div>
-          <div class="decision-actions">
-            <button type="button" data-decision="delete" class="delete">← Delete</button>
-            <button type="button" data-decision="unsure" class="unsure">↓ Unsure</button>
-            <button type="button" data-decision="keep" class="keep">Keep →</button>
-          </div>
-          <div class="review-navigation">
-            <button type="button" id="previous">Previous</button>
-            <button type="button" id="next">Next</button>
-            <button type="button" id="mark-unseen">Unseen</button>
-          </div>
-        </section>
-        <section class="panel grid-section">
-          <div class="section-heading">
-            <h2>Collection grid</h2>
-            <div>
-              <button id="rescan" type="button">Rescan roots</button>
-              <button id="apply" type="button">Review and apply moves</button>
-              <button id="restore" type="button">Restore latest apply</button>
-              <button id="audit" type="button">Audit log</button>
+        <div class="app-workspace">
+          <aside id="side-sheet" class="side-sheet" aria-label="Main navigation">
+            <div class="side-sheet-heading">
+              <strong>Photo Sorter</strong>
+              <button id="collapse-menu" class="quiet" type="button" aria-label="Collapse navigation" aria-expanded="true">←</button>
+              <button id="close-menu" class="quiet" type="button" aria-label="Close menu">×</button>
             </div>
+            <nav id="app-navigation" aria-label="Application">
+              <button type="button" data-view="review" data-short-label="R" aria-current="page">Review</button>
+              <button type="button" data-view="collections" data-short-label="C">Collections</button>
+              <button type="button" data-view="browse" data-short-label="B">Browse</button>
+              <button type="button" data-view="apply" data-short-label="A">Apply / restore</button>
+              <button type="button" data-view="history" data-short-label="H">History</button>
+              <button type="button" data-view="help" data-short-label="?">Help</button>
+              <button type="button" data-view="settings" data-short-label="S">Settings</button>
+            </nav>
+          </aside>
+          <button id="drawer-backdrop" type="button" aria-label="Close menu"></button>
+          <div class="workspace-main">
+            <p id="status" role="status"></p>
+            <section id="review-view" class="app-view">
+              <section id="review" class="review" aria-live="polite">
+                <div class="review-heading">
+                  <h2 id="collection-title">Review</h2>
+                  <span id="item-count"></span>
+                  <button id="photo-info-toggle" type="button" aria-expanded="false">Photo info</button>
+                  <button id="pause-review" class="quiet" type="button">Pause review</button>
+                </div>
+                <div id="current-media" class="current-media"></div>
+                <dl id="photo-details" class="photo-details hidden"></dl>
+                <div id="zoom-controls" class="zoom-controls hidden" aria-label="Image zoom controls">
+                  <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+                  <button id="zoom-reset" type="button">Reset zoom</button>
+                  <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+                </div>
+                <div class="decision-actions">
+                  <button type="button" data-decision="delete" class="delete">← Delete</button>
+                  <button type="button" data-decision="unsure" class="unsure">↓ Unsure</button>
+                  <button type="button" data-decision="keep" class="keep">Keep →</button>
+                </div>
+                <div class="review-navigation">
+                  <button type="button" id="previous" aria-label="Previous" title="Previous"></button>
+                  <button type="button" id="next" aria-label="Next" title="Next"></button>
+                </div>
+              </section>
+            </section>
+            <section id="browse-view" class="app-view hidden">
+              <nav id="filters" class="filters" aria-label="Media category">
+                <button type="button" data-category="all" aria-pressed="true">All</button>
+                <button type="button" data-category="unseen" aria-pressed="false">Unseen</button>
+                <button type="button" data-category="keep" aria-pressed="false">Keep</button>
+                <button type="button" data-category="delete" aria-pressed="false">Delete</button>
+                <button type="button" data-category="unsure" aria-pressed="false">Unsure</button>
+              </nav>
+              <section class="panel grid-section">
+                <div class="section-heading">
+                  <h2>Collection grid</h2>
+                  <div>
+                    <label for="sort-order">Sort</label>
+                    <select id="sort-order">
+                      <option value="capture-asc">Capture date ↑</option>
+                      <option value="capture-desc">Capture date ↓</option>
+                      <option value="filename">Filename</option>
+                    </select>
+                    <button type="button" id="mark-unseen">Clear decision</button>
+                    <button id="rescan" type="button">Rescan roots</button>
+                  </div>
+                </div>
+                <div id="media-viewport" class="media-viewport">
+                  <div id="media-virtual-space" aria-hidden="true"></div>
+                  <div id="media-grid" class="media-grid"></div>
+                </div>
+              </section>
+            </section>
+            <section id="collections-view" class="app-view hidden">
+              <section class="panel">
+                <h2>Collections</h2>
+                <label for="collection">Active collection</label>
+                <select id="collection"></select>
+                <form id="new-collection-form">
+                  <label for="collection-name">New collection</label>
+                  <input id="collection-name" aria-label="New collection name" placeholder="New collection" maxlength="80" required>
+                  <button type="submit">Create</button>
+                </form>
+                <button id="add-root" type="button" class="hidden" disabled>Choose folder</button>
+                <button id="archive-collection" type="button">Archive collection</button>
+                <details id="root-management">
+                  <summary>Manage collection folders</summary>
+                  <ul id="root-list"></ul>
+                </details>
+                <details id="archived-collections">
+                  <summary>Archived collections</summary>
+                  <ul id="archived-list"></ul>
+                </details>
+              </section>
+            </section>
+            <section id="apply-view" class="app-view hidden">
+              <section class="panel">
+                <h2>Apply decisions</h2>
+                <p>Review the planned file operations and confirm before any files are moved. Originals are never permanently deleted or overwritten.</p>
+                <button id="apply" type="button">Review and apply moves</button>
+                <button id="restore" type="button">Restore latest apply</button>
+              </section>
+            </section>
+            <section id="history-view" class="app-view hidden">
+              <section id="audit-panel" class="panel">
+                <h2>Audit log</h2>
+                <button id="audit" type="button">Refresh history</button>
+                <button id="export-audit" type="button">Export audit log</button>
+                <button id="clear-audit" type="button">Clear audit log</button>
+                <ol id="audit-list"></ol>
+              </section>
+            </section>
+            <section id="help-view" class="app-view hidden">
+              <section class="panel help">
+                <h2>Quick help and safety</h2>
+                <ul>
+                  <li>Use ←/swipe left for Delete, →/swipe right for Keep, and ↓/swipe down for Unsure. These actions only save a decision; they never move or delete a file.</li>
+                  <li>Use the zoom controls or pinch on an image to zoom; drag a zoomed image to pan. Scroll the collection grid to browse large libraries. Press Escape to pause review.</li>
+                  <li>Apply shows a move summary first, then requires a separate confirmation. Delete-category files move into a <code>deleted</code> folder; nothing is permanently deleted.</li>
+                  <li>Restore moves the latest apply batch back when the original paths are free. Conflicts are never overwritten.</li>
+                  <li>Unsupported image/video previews can still be categorized. Video playback depends on codecs available in your operating system.</li>
+                  <li>Only use trusted local networks, or put the service behind your own HTTPS/VPN proxy. Do not expose it publicly.</li>
+                  <li>PWA installation and passkeys require a secure HTTPS origin; passkeys also need host configuration.</li>
+                  <li>App data contains your password hash, decisions, apply history, and audit log. There are no automatic backups. Uninstalling the application keeps app data; manually removing it deletes this history, not your original media.</li>
+                </ul>
+              </section>
+            </section>
+            <section id="settings-view" class="app-view hidden">
+              <div class="lan panel">
+                <strong>Connect a phone on this local network</strong>
+                <span id="lan-addresses">Loading local addresses…</span>
+              </div>
+              <details id="settings-panel" class="panel" open>
+                <summary>Settings</summary>
+                <form id="settings-form">
+                  <label for="default-sort">Default sort order</label>
+                  <select id="default-sort">
+                    <option value="capture-asc">Capture date ↑</option>
+                    <option value="capture-desc">Capture date ↓</option>
+                    <option value="filename">Filename</option>
+                  </select>
+                  <label for="preview-cache-limit">Preview cache limit (MB; 0 disables caching)</label>
+                  <input id="preview-cache-limit" type="number" min="0" max="102400" step="1" required>
+                  <label for="theme">Theme</label>
+                  <select id="theme">
+                    <option value="system">System</option>
+                    <option value="light">Light</option>
+                    <option value="dark">Dark</option>
+                  </select>
+                  <label for="grid-columns">Grid columns</label>
+                  <select id="grid-columns">
+                    <option value="auto">Automatic</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                    <option value="5">5</option>
+                    <option value="6">6</option>
+                  </select>
+                  <label for="language">Language</label>
+                  <select id="language">
+                    <option value="en">English</option>
+                    <option value="de">Deutsch</option>
+                  </select>
+                  <label id="autostart-setting" class="hidden">
+                    <input id="autostart" type="checkbox">
+                    Start Photo Sorter when I sign in
+                  </label>
+                </form>
+              </details>
+              <details id="passkey-management" class="panel hidden">
+                <summary>Passkeys</summary>
+                <p id="passkey-info"></p>
+                <button id="register-passkey" type="button">Add a passkey</button>
+                <ul id="passkey-list"></ul>
+              </details>
+            </section>
           </div>
-          <p id="status" role="status"></p>
-          <div id="media-viewport" class="media-viewport">
-            <div id="media-virtual-space" aria-hidden="true"></div>
-            <div id="media-grid" class="media-grid"></div>
-          </div>
-        </section>
-        <div class="lan panel">
-          <strong>Connect a phone on this local network</strong>
-          <span id="lan-addresses">Loading local addresses…</span>
         </div>
-        <details id="settings-panel" class="panel">
-          <summary>Settings</summary>
-          <form id="settings-form">
-            <label for="default-sort">Default sort order</label>
-            <select id="default-sort">
-              <option value="capture-asc">Capture date ↑</option>
-              <option value="capture-desc">Capture date ↓</option>
-              <option value="filename">Filename</option>
-            </select>
-            <label for="preview-cache-limit">Preview cache limit (MB; 0 disables caching)</label>
-            <input id="preview-cache-limit" type="number" min="0" max="102400" step="1" required>
-            <label for="theme">Theme</label>
-            <select id="theme">
-              <option value="system">System</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-            <label for="grid-columns">Grid columns</label>
-            <select id="grid-columns">
-              <option value="auto">Automatic</option>
-              <option value="2">2</option>
-              <option value="3">3</option>
-              <option value="4">4</option>
-              <option value="5">5</option>
-              <option value="6">6</option>
-            </select>
-            <label for="language">Language</label>
-            <select id="language">
-              <option value="en">English</option>
-              <option value="de">Deutsch</option>
-            </select>
-            <label id="autostart-setting" class="hidden">
-              <input id="autostart" type="checkbox">
-              Start Photo Sorter when I sign in
-            </label>
-            <button type="submit">Save settings</button>
-          </form>
-        </details>
-        <details id="passkey-management" class="panel hidden">
-          <summary>Passkeys</summary>
-          <p id="passkey-info"></p>
-          <button id="register-passkey" type="button">Add a passkey</button>
-          <ul id="passkey-list"></ul>
-        </details>
-        <details id="root-management" class="panel">
-          <summary>Manage collection folders</summary>
-          <ul id="root-list"></ul>
-        </details>
-        <details id="archived-collections" class="panel">
-          <summary>Archived collections</summary>
-          <ul id="archived-list"></ul>
-        </details>
-        <section id="audit-panel" class="panel hidden">
-          <h2>Audit log</h2>
-          <button id="export-audit" type="button">Export audit log</button>
-          <button id="clear-audit" type="button">Clear audit log</button>
-          <ol id="audit-list"></ol>
-        </section>
-        <details class="panel help">
-          <summary>Quick help and safety</summary>
-          <ul>
-            <li>Use ←/swipe left for Delete, →/swipe right for Keep, and ↓/swipe down for Unsure. These actions only save a decision; they never move or delete a file.</li>
-            <li>Use the zoom controls or pinch on an image to zoom; drag a zoomed image to pan. Scroll the collection grid to browse large libraries. Enter fullscreen to focus on categorizing; press Escape or use the close button to leave.</li>
-            <li>Apply shows a move summary first, then requires a separate confirmation. Delete-category files move into a <code>deleted</code> folder; nothing is permanently deleted.</li>
-            <li>Restore moves the latest apply batch back when the original paths are free. Conflicts are never overwritten.</li>
-            <li>Unsupported image/video previews can still be categorized. Video playback depends on codecs available in your operating system.</li>
-            <li>Only use trusted local networks, or put the service behind your own HTTPS/VPN proxy. Do not expose it publicly.</li>
-            <li>PWA installation and passkeys require a secure HTTPS origin; passkeys also need host configuration.</li>
-            <li>App data contains your password hash, decisions, apply history, and audit log. There are no automatic backups. Uninstalling the application keeps app data; manually removing it deletes this history, not your original media.</li>
-          </ul>
-        </details>
       </section>
     </main>
     <dialog id="confirm-dialog">

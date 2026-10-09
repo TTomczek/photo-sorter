@@ -67,6 +67,30 @@ test('collection/media queries honor capture fallback, filename order, category 
   assert.throws(() => app.listMedia({ collectionId, category: 'unseen', sort: 'random' }), /Invalid sort order/);
 });
 
+test('review queue orders unseen first and defers repeated unsure decisions to the pass tail', async (t) => {
+  const { app, collectionId } = await createSorter(t);
+  const items = app.listMedia({ collectionId, category: 'unseen', sort: 'filename' }).items;
+  const [alpha, bravo, charlie] = items;
+
+  app.claimMediaLock(alpha.id, 'device-a');
+  app.setDeviceDecision(alpha.id, 'unsure', 'device-a');
+  assert.deepEqual(app.listMedia({ collectionId, category: 'review', sort: 'filename' })
+    .items.map((item) => item.relative_path), ['bravo.png', 'charlie.mp4', 'alpha.jpg']);
+
+  app.claimMediaLock(bravo.id, 'device-a');
+  app.setDeviceDecision(bravo.id, 'unsure', 'device-a');
+  assert.deepEqual(app.listMedia({ collectionId, category: 'review', sort: 'filename' })
+    .items.map((item) => item.relative_path), ['charlie.mp4', 'alpha.jpg', 'bravo.png']);
+
+  app.claimMediaLock(alpha.id, 'device-a');
+  app.setDeviceDecision(alpha.id, 'unsure', 'device-a');
+  assert.deepEqual(app.listMedia({ collectionId, category: 'review', sort: 'filename' })
+    .items.map((item) => item.relative_path), ['charlie.mp4', 'bravo.png', 'alpha.jpg']);
+  assert.equal(app.saveDeviceState('device-a', collectionId, {
+    category: 'review', sort: 'filename', mediaId: charlie.id, offset: 0,
+  }).category, 'review');
+});
+
 test('device state, category decisions, history and expiring locks stay scoped and validated', async (t) => {
   const { app, collectionId } = await createSorter(t);
   const items = app.listMedia({ collectionId, category: 'unseen', sort: 'filename' }).items;

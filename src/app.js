@@ -18,7 +18,7 @@ const VIDEO_EXTENSIONS = new Set([
   '.mts', '.webm', '.wmv',
 ]);
 const CATEGORIES = new Set(['keep', 'delete', 'unsure', 'unseen']);
-const REVIEW_CATEGORIES = new Set([...CATEGORIES, 'all']);
+const REVIEW_CATEGORIES = new Set([...CATEGORIES, 'all', 'review']);
 const OUTPUT_MARKER = '.photo-sorter-output';
 const SORT_ORDERS = new Set(['capture-asc', 'capture-desc', 'filename', 'date-asc', 'date-desc']);
 
@@ -186,6 +186,7 @@ class PhotoSorter {
         size INTEGER NOT NULL,
         modified_at INTEGER NOT NULL,
         category TEXT,
+        unsure_reviewed_at INTEGER NOT NULL DEFAULT 0,
         capture_at TEXT,
         present INTEGER NOT NULL DEFAULT 1,
         last_seen_scan TEXT,
@@ -260,6 +261,9 @@ class PhotoSorter {
     if (!rootColumns.includes('active')) this.db.exec('ALTER TABLE roots ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
     const mediaColumns = this.db.prepare('PRAGMA table_info(media)').all().map((column) => column.name);
     if (!mediaColumns.includes('capture_at')) this.db.exec('ALTER TABLE media ADD COLUMN capture_at TEXT');
+    if (!mediaColumns.includes('unsure_reviewed_at')) {
+      this.db.exec('ALTER TABLE media ADD COLUMN unsure_reviewed_at INTEGER NOT NULL DEFAULT 0');
+    }
     if (!mediaColumns.includes('present')) this.db.exec('ALTER TABLE media ADD COLUMN present INTEGER NOT NULL DEFAULT 1');
     if (!mediaColumns.includes('last_seen_scan')) this.db.exec('ALTER TABLE media ADD COLUMN last_seen_scan TEXT');
     const operationColumns = this.db.prepare('PRAGMA table_info(apply_operations)').all().map((column) => column.name);
@@ -277,6 +281,8 @@ class PhotoSorter {
       ON media(root_id, category, modified_at, relative_path COLLATE NOCASE) WHERE present = 1;
       CREATE INDEX IF NOT EXISTS media_filename_order
       ON media(root_id, category, relative_path COLLATE NOCASE) WHERE present = 1;
+      CREATE INDEX IF NOT EXISTS media_review_order
+      ON media(root_id, category, unsure_reviewed_at) WHERE present = 1;
     `);
     this.db.prepare(`
       INSERT OR IGNORE INTO app_settings(setting_key, setting_value) VALUES ('default_sort', 'capture-asc')
@@ -1065,6 +1071,7 @@ class PhotoSorter {
     const filters = ['r.collection_id = ?', 'r.active = 1', 'c.active = 1', 'm.present = 1'];
     const values = [collectionId];
     if (category === 'unseen') filters.push('m.category IS NULL');
+    else if (category === 'review') filters.push("(m.category IS NULL OR m.category = 'unsure')");
     else if (CATEGORIES.has(category)) {
       filters.push('m.category = ?');
       values.push(category === 'unseen' ? null : category);
@@ -1077,8 +1084,11 @@ class PhotoSorter {
       filename: 'm.relative_path COLLATE NOCASE ASC',
     }[sort];
     if (!orderBy) throw new Error('Invalid sort order.');
+    const reviewOrder = category === 'review'
+      ? "CASE WHEN m.category IS NULL THEN 0 ELSE 1 END ASC, m.unsure_reviewed_at ASC, "
+      : '';
     const items = this.db.prepare(`
-      SELECT m.id, m.relative_path, m.size, m.modified_at, m.category,
+      SELECT m.id, m.relative_path, m.size, m.modified_at, m.capture_at, m.category,
         CASE WHEN lower(m.relative_path) GLOB '*.mp4' OR lower(m.relative_path) GLOB '*.mov'
           OR lower(m.relative_path) GLOB '*.m4v' OR lower(m.relative_path) GLOB '*.webm'
           OR lower(m.relative_path) GLOB '*.avi' OR lower(m.relative_path) GLOB '*.mkv'
@@ -1088,7 +1098,7 @@ class PhotoSorter {
         r.online, r.read_only
       FROM media m JOIN roots r ON r.id = m.root_id JOIN collections c ON c.id = r.collection_id
       WHERE ${filters.join(' AND ')}
-      ORDER BY ${orderBy}
+      ORDER BY ${reviewOrder}${orderBy}
       LIMIT ? OFFSET ?
     `).all(...values, limit, offset);
     const total = this.db.prepare(`
@@ -1096,6 +1106,17 @@ class PhotoSorter {
       WHERE ${filters.join(' AND ')}
     `).get(...values).count;
     return { items, total, offset, limit };
+  }
+
+  setMediaCategory(mediaId, category) {
+    const next = category === 'unseen' ? null : category;
+    this.db.prepare(`
+      UPDATE media SET category = ?,
+        unsure_reviewed_at = CASE WHEN ? = 'unsure'
+          THEN MAX(?, COALESCE((SELECT MAX(unsure_reviewed_at) FROM media WHERE category = 'unsure'), 0) + 1)
+          ELSE unsure_reviewed_at END
+      WHERE id = ?
+    `).run(next, category, Date.now(), mediaId);
   }
 
   setDecision(mediaId, category) {
@@ -1106,9 +1127,8 @@ class PhotoSorter {
       WHERE m.id = ? AND r.active = 1 AND c.active = 1 AND m.present = 1
     `).get(mediaId);
     if (!item) throw new Error('Media item not found.');
-    const next = category === 'unseen' ? null : category;
-    this.db.prepare('UPDATE media SET category = ? WHERE id = ?').run(next, mediaId);
-    this.log('decision_changed', { mediaId, previous: item.category, category: next, collectionId: item.collection_id });
+    this.setMediaCategory(mediaId, category);
+    this.log('decision_changed', { mediaId, previous: item.category, category, collectionId: item.collection_id });
   }
 
   getDeviceState(deviceId, collectionId) {
@@ -1192,13 +1212,19 @@ class PhotoSorter {
     `).get(mediaId);
     if (!item) throw new Error('Media item not found.');
     const next = category === 'unseen' ? null : category;
-    if (item.category === next) return;
+    if (item.category === next) {
+      if (category === 'unsure') {
+        this.setMediaCategory(mediaId, category);
+        this.publishQueueChange(item.collection_id);
+      }
+      return;
+    }
     this.db.prepare(`
       INSERT INTO decision_history(media_id, device_id, previous_category, next_category, created_at)
       VALUES (?, ?, ?, ?, ?)
     `).run(mediaId, deviceId, item.category, next, new Date().toISOString());
     this.db.prepare('DELETE FROM decision_history WHERE device_id = ? AND undone = 1').run(deviceId);
-    this.db.prepare('UPDATE media SET category = ? WHERE id = ?').run(next, mediaId);
+    this.setMediaCategory(mediaId, category);
     this.log('decision_changed', { mediaId, previous: item.category, category: next, collectionId: item.collection_id });
     this.publishQueueChange(item.collection_id);
   }
@@ -1220,7 +1246,7 @@ class PhotoSorter {
       throw Object.assign(new Error('This decision changed on another device; history was not altered.'), { status: 409 });
     }
     const category = direction === 'undo' ? null : entry.next_category;
-    this.db.prepare('UPDATE media SET category = ? WHERE id = ?').run(category, entry.media_id);
+    this.setMediaCategory(entry.media_id, category || 'unseen');
     if (direction === 'undo') {
       this.db.prepare('UPDATE decision_history SET undone = 1 WHERE media_id = ? AND device_id = ?')
         .run(entry.media_id, deviceId);
