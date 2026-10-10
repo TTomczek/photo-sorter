@@ -67,7 +67,8 @@ test('Photo Health finds exact and resized copies, flags blur, and exposes failu
 
   const findings = app.listPhotoHealthFindings(collectionId, { type: 'duplicate', limit: 100 });
   const exactGroup = findings.items.find((finding) => finding.reason === 'Exact file match'
-    && finding.memberCount === 2);
+    && app.listPhotoHealthGroup(collectionId, finding.groupId).items
+      .some((member) => member.relativePath === '01-exact-a.png'));
   const similarGroup = findings.items.find((finding) => finding.reason === 'Very similar image framing and content');
   assert.ok(exactGroup);
   assert.ok(similarGroup);
