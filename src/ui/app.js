@@ -33,6 +33,20 @@ const state = {
   lastScanStatusKey: '',
   lastScanUiKey: '',
   statusKind: 'user',
+  photoHealth: {
+    type: 'all',
+    handled: 'open',
+    offset: 0,
+    limit: 30,
+    openGroupId: '',
+    groupOffset: 0,
+    keepSelections: new Map(),
+    compareIds: [],
+    zoomScale: 1,
+    panX: 0,
+    panY: 0,
+    lastProcessed: null,
+  },
 };
 const byId = (id) => document.getElementById(id);
 const mediaGrid = byId('media-grid');
@@ -56,6 +70,8 @@ let scanPollTimer;
 let scanPollBusy = false;
 let queuePollTimer;
 let queuePollBusy = false;
+let photoHealthPollTimer;
+let photoHealthPollBusy = false;
 let queueEvents;
 let queueEventRefreshTimer;
 let pendingInstallPrompt;
@@ -608,6 +624,310 @@ function mediaUrl(item) {
   return `/api/media/${encodeURIComponent(item.id)}/content`;
 }
 
+function healthStatusText(status) {
+  if (!status.enabled) return 'Analysis is not enabled for this collection.';
+  if (status.paused) return `Analysis paused · ${status.processed} of ${status.total} items analyzed.`;
+  if (status.status === 'completed') {
+    return `Analysis complete · ${status.total} items checked · ${status.blurry} blur finding(s).`;
+  }
+  return `Analysis running · ${status.processed} of ${status.total} items analyzed · ${status.pending} pending.`;
+}
+
+async function loadPhotoHealth({ statusOnly = false } = {}) {
+  if (!state.collectionId) {
+    byId('photo-health-status').textContent = 'Choose a collection to use Photo Health.';
+    byId('photo-health-list').replaceChildren();
+    byId('photo-health-count').textContent = '';
+    byId('photo-health-progress').classList.add('hidden');
+    byId('photo-health-enable').classList.add('hidden');
+    byId('photo-health-pause').classList.add('hidden');
+    byId('photo-health-resume').classList.add('hidden');
+    return;
+  }
+  const collectionId = encodeURIComponent(state.collectionId);
+  const status = await request(`/api/photo-health/status?collectionId=${collectionId}`);
+  const photoHealth = state.photoHealth;
+  byId('photo-health-status').textContent = healthStatusText(status);
+  const progress = byId('photo-health-progress');
+  progress.classList.toggle('hidden', !status.enabled || status.total === 0);
+  progress.max = Math.max(1, status.total);
+  progress.value = status.processed;
+  byId('photo-health-enable').classList.toggle('hidden', status.enabled);
+  byId('photo-health-pause').classList.toggle('hidden', !status.enabled || status.paused || status.pending === 0);
+  byId('photo-health-resume').classList.toggle('hidden', !status.enabled || !status.paused);
+  const errors = byId('photo-health-errors');
+  errors.replaceChildren(...status.errors.map((entry) => {
+    const item = element('li', `${entry.path}: ${entry.status === 'unsupported'
+      ? 'This recognized file format could not be analyzed' : 'Analysis failed'}${entry.error ? ` — ${entry.error}` : ''}`);
+    return item;
+  }));
+  const previousProcessed = photoHealth.lastProcessed;
+  photoHealth.lastProcessed = status.processed;
+  if (statusOnly && previousProcessed === status.processed) return;
+
+  const params = new URLSearchParams({
+    collectionId: state.collectionId,
+    type: photoHealth.type,
+    handled: photoHealth.handled,
+    offset: String(photoHealth.offset),
+    limit: String(photoHealth.limit),
+  });
+  const findings = status.enabled
+    ? await request(`/api/photo-health/findings?${params}`)
+    : { items: [], total: 0 };
+  const list = byId('photo-health-list');
+  list.replaceChildren();
+  for (const finding of findings.items) {
+    const card = element('article', undefined, 'photo-health-finding');
+    if (finding.type === 'duplicate') {
+      const strength = finding.reason === 'Exact file match' ? 'Exact match'
+        : `Similarity strength ${Math.round(finding.strength * 100)}%`;
+      card.append(element('h3', `Duplicate group · ${finding.memberCount} photos`));
+      card.append(element('p', `${finding.reason} · ${strength}`));
+      const compare = element('button', photoHealth.openGroupId === finding.groupId ? 'Close comparison' : 'Compare and review');
+      compare.type = 'button';
+      compare.addEventListener('click', () => {
+        if (photoHealth.openGroupId === finding.groupId) {
+          photoHealth.openGroupId = '';
+          loadPhotoHealth().catch((error) => setStatus(error.message, true));
+        } else {
+          photoHealth.openGroupId = finding.groupId;
+          photoHealth.groupOffset = 0;
+          photoHealth.compareIds = [];
+          renderPhotoHealthGroup(card, finding.groupId).catch((error) => setStatus(error.message, true));
+        }
+      });
+      card.append(compare);
+      if (photoHealth.openGroupId === finding.groupId) {
+        card.dataset.groupId = finding.groupId;
+        renderPhotoHealthGroup(card, finding.groupId).catch((error) => setStatus(error.message, true));
+      }
+    } else {
+      card.append(element('h3', 'Clearly blurry photo'), element('p', `${finding.label} · ${finding.reason}`));
+      if (finding.category) card.append(element('p', `Current decision: ${finding.category}`));
+      const preview = element('img', undefined, 'photo-health-blur-preview');
+      preview.src = mediaUrl({ id: finding.mediaId });
+      preview.alt = finding.label;
+      preview.loading = 'lazy';
+      preview.onerror = () => preview.replaceWith(element('p', 'Preview unavailable; the decision is still available.'));
+      card.append(preview);
+      const actions = element('div', undefined, 'health-decision');
+      for (const [category, label, className] of [
+        ['keep', 'Keep', 'keep'], ['unsure', 'Unsure', 'unsure'], ['delete', 'Stage as Deleted', 'delete'],
+      ]) {
+        const button = element('button', label, className);
+        button.type = 'button';
+        button.addEventListener('click', () => decidePhotoHealthItem(finding.mediaId, category));
+        actions.append(button);
+      }
+      card.append(actions);
+    }
+    if (finding.handled) card.append(element('p', 'Handled · decision is shared with other views.'));
+    list.append(card);
+  }
+  if (!findings.items.length) {
+    list.append(element('p', status.enabled ? 'No findings match these filters.' : 'Enable analysis to discover findings.'));
+  }
+  byId('photo-health-count').textContent = status.enabled
+    ? `${findings.total} finding(s) · ${status.unsupported} unsupported · ${status.failed} analysis failure(s)`
+    : '';
+  const pageCount = Math.max(1, Math.ceil(findings.total / photoHealth.limit));
+  const currentPage = Math.floor(photoHealth.offset / photoHealth.limit) + 1;
+  byId('photo-health-page').textContent = `${currentPage} of ${pageCount}`;
+  byId('photo-health-previous').disabled = photoHealth.offset === 0;
+  byId('photo-health-next').disabled = photoHealth.offset + photoHealth.limit >= findings.total;
+}
+
+async function renderPhotoHealthGroup(card, groupId) {
+  const photoHealth = state.photoHealth;
+  const params = new URLSearchParams({
+    collectionId: state.collectionId,
+    offset: String(photoHealth.groupOffset),
+    limit: '100',
+  });
+  const result = await request(`/api/photo-health/groups/${encodeURIComponent(groupId)}?${params}`);
+  if (!card.isConnected || photoHealth.openGroupId !== groupId) return;
+  const members = result.items;
+  const existing = card.querySelector('.health-group-details');
+  existing?.remove();
+  const details = element('section', undefined, 'health-group-details');
+  details.append(element('p', 'Compare the files side by side, then choose one or more photos to keep. Every other group member will be staged as Deleted; no files are moved.'));
+  const selected = photoHealth.keepSelections.get(groupId) || new Set();
+  photoHealth.keepSelections.set(groupId, selected);
+  if (members.length) {
+    const visibleIds = new Set(members.map((member) => member.id));
+    const selectedCompareIds = photoHealth.compareIds.filter((id) => visibleIds.has(id));
+    photoHealth.compareIds = selectedCompareIds.length
+      ? selectedCompareIds : members.slice(0, 2).map((member) => member.id);
+    const compareControls = element('div', undefined, 'health-zoom-controls');
+    ['Left comparison', 'Right comparison'].forEach((label, index) => {
+      const select = element('select');
+      select.setAttribute('aria-label', label);
+      for (const member of members) {
+        const option = element('option', member.relativePath);
+        option.value = member.id;
+        option.selected = photoHealth.compareIds[index] === member.id;
+        select.append(option);
+      }
+      select.addEventListener('change', () => {
+        photoHealth.compareIds[index] = select.value;
+        updateHealthCompareImages(details, members);
+      });
+      compareControls.append(select);
+    });
+    for (const [delta, label] of [[-0.25, 'Zoom out'], [0.25, 'Zoom in']]) {
+      const button = element('button', label);
+      button.type = 'button';
+      button.addEventListener('click', () => {
+        photoHealth.zoomScale = Math.max(1, Math.min(4, photoHealth.zoomScale + delta));
+        updateHealthCompareImages(details, members);
+      });
+      compareControls.append(button);
+    }
+    const reset = element('button', 'Reset zoom');
+    reset.type = 'button';
+    reset.addEventListener('click', () => {
+      photoHealth.zoomScale = 1;
+      photoHealth.panX = 0;
+      photoHealth.panY = 0;
+      updateHealthCompareImages(details, members);
+    });
+    compareControls.append(reset);
+    details.append(compareControls);
+
+    const comparison = element('div', undefined, 'health-compare');
+    for (let index = 0; index < 2; index += 1) {
+      const figure = element('figure');
+      const viewport = element('div', undefined, 'health-compare-viewport');
+      const member = members.find((item) => item.id === photoHealth.compareIds[index]);
+      const preview = member?.kind === 'video' ? element('video') : element('img');
+      if (preview instanceof HTMLVideoElement) {
+        preview.controls = true;
+        preview.preload = 'metadata';
+      } else {
+        preview.alt = member?.relativePath || '';
+        preview.draggable = false;
+      }
+      viewport.append(preview);
+      figure.append(viewport, element('figcaption'));
+      comparison.append(figure);
+      viewport.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0 || photoHealth.zoomScale <= 1) return;
+        viewport.setPointerCapture(event.pointerId);
+        photoHealth.lastPointer = { x: event.clientX, y: event.clientY };
+      });
+      viewport.addEventListener('pointermove', (event) => {
+        if (!photoHealth.lastPointer || !viewport.hasPointerCapture(event.pointerId)) return;
+        photoHealth.panX += event.clientX - photoHealth.lastPointer.x;
+        photoHealth.panY += event.clientY - photoHealth.lastPointer.y;
+        photoHealth.lastPointer = { x: event.clientX, y: event.clientY };
+        updateHealthCompareImages(details, members);
+      });
+      viewport.addEventListener('pointerup', () => { photoHealth.lastPointer = null; });
+      viewport.addEventListener('pointercancel', () => { photoHealth.lastPointer = null; });
+    }
+    details.append(comparison);
+    updateHealthCompareImages(details, members);
+
+    const memberList = element('div', undefined, 'health-member-list');
+    for (const member of members) {
+      const label = element('label');
+      const checkbox = element('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = selected.has(member.id);
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) selected.add(member.id);
+        else selected.delete(member.id);
+        apply.disabled = selected.size === 0;
+      });
+      label.append(checkbox, element('span', `${member.relativePath} · ${member.category || 'Unseen'}`));
+      memberList.append(label);
+    }
+    details.append(memberList);
+    const controls = element('div', undefined, 'health-zoom-controls');
+    if (photoHealth.groupOffset > 0) {
+      const previous = element('button', 'Previous members');
+      previous.type = 'button';
+      previous.addEventListener('click', () => {
+        photoHealth.groupOffset = Math.max(0, photoHealth.groupOffset - 100);
+        renderPhotoHealthGroup(card, groupId).catch((error) => setStatus(error.message, true));
+      });
+      controls.append(previous);
+    }
+    if (photoHealth.groupOffset + result.items.length < result.total) {
+      const next = element('button', 'Next members');
+      next.type = 'button';
+      next.addEventListener('click', () => {
+        photoHealth.groupOffset += 100;
+        renderPhotoHealthGroup(card, groupId).catch((error) => setStatus(error.message, true));
+      });
+      controls.append(next);
+    }
+    controls.append(element('span', `Showing ${photoHealth.groupOffset + 1}–${photoHealth.groupOffset + members.length} of ${result.total}`));
+    details.append(controls);
+    const apply = element('button', 'Keep selected; stage the rest as Deleted', 'delete');
+    apply.type = 'button';
+    apply.disabled = selected.size === 0;
+    apply.addEventListener('click', () => decidePhotoHealthGroup(groupId, result.total, selected));
+    details.append(apply);
+  }
+  card.append(details);
+}
+
+function updateHealthCompareImages(container, members) {
+  const photoHealth = state.photoHealth;
+  const figures = container.querySelectorAll('.health-compare figure');
+  for (let index = 0; index < figures.length; index += 1) {
+    const member = members.find((item) => item.id === photoHealth.compareIds[index]);
+    const image = figures[index].querySelector('img, video');
+    const caption = figures[index].querySelector('figcaption');
+    if (!member) continue;
+    if (image.dataset.mediaId !== member.id) {
+      image.dataset.mediaId = member.id;
+      image.src = mediaUrl(member);
+      image.alt = member.relativePath;
+      caption.textContent = `${member.relativePath} · ${formatBytes(member.size)}`;
+    }
+    image.style.transform = `translate(${photoHealth.panX}px, ${photoHealth.panY}px) scale(${photoHealth.zoomScale})`;
+  }
+}
+
+async function decidePhotoHealthItem(mediaId, category) {
+  try {
+    await request(`/api/media/${encodeURIComponent(mediaId)}/lock`, { method: 'POST' });
+    await request(`/api/media/${encodeURIComponent(mediaId)}/decision`, {
+      method: 'PUT', body: JSON.stringify({ category }),
+    });
+    setStatus(`Saved ${category} decision. No files were moved.`);
+    await loadPhotoHealth();
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    request(`/api/media/${encodeURIComponent(mediaId)}/lock`, { method: 'DELETE' }).catch(() => {});
+  }
+}
+
+async function decidePhotoHealthGroup(groupId, total, selected) {
+  const keepIds = [...selected];
+  const choice = await showDialog('Save duplicate decisions', [
+    `Keep ${keepIds.length} selected photo(s) and stage ${total - keepIds.length} other group member(s) as Deleted?`,
+    'This only changes review decisions. No files will be moved or deleted.',
+  ], { confirmLabel: 'Save decisions' });
+  if (!choice.confirmed) return;
+  try {
+    const result = await request(`/api/photo-health/groups/${encodeURIComponent(groupId)}/decisions`, {
+      method: 'POST',
+      body: JSON.stringify({ collectionId: state.collectionId, keepIds }),
+    });
+    setStatus(`Saved duplicate decisions: ${result.keptCount} kept and ${result.deletedCount} staged as Deleted. No files were moved.`);
+    state.photoHealth.openGroupId = '';
+    state.photoHealth.keepSelections.delete(groupId);
+    await loadPhotoHealth();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
 function createPreview(item, controls = false, cached = false) {
   if (item.kind === 'video') {
     const video = element('video');
@@ -979,6 +1299,10 @@ async function loadCollections(preferredId) {
     state.classificationPending = false;
     state.autoCategorizeCollectionId = state.collectionId;
     state.lastScanStatusKey = '';
+    state.photoHealth.openGroupId = '';
+    state.photoHealth.groupOffset = 0;
+    state.photoHealth.keepSelections.clear();
+    state.photoHealth.lastProcessed = null;
   }
   state.offset = 0;
   state.index = 0;
@@ -1032,6 +1356,12 @@ function showApp() {
   refreshScans();
   if (!scanPollTimer) scanPollTimer = setInterval(refreshScans, 1500);
   if (!queuePollTimer) queuePollTimer = setInterval(refreshQueue, 5000);
+  if (!photoHealthPollTimer) photoHealthPollTimer = setInterval(async () => {
+    if (photoHealthPollBusy || state.view !== 'photo-health') return;
+    photoHealthPollBusy = true;
+    try { await loadPhotoHealth({ statusOnly: true }); } catch (error) { setStatus(error.message, true); }
+    finally { photoHealthPollBusy = false; }
+  }, 5000);
   if (!queueEvents && 'EventSource' in window) {
     queueEvents = new EventSource('/api/events');
     queueEvents.addEventListener('queue', (event) => {
@@ -1046,8 +1376,10 @@ function showApp() {
       queueEvents = null;
       clearInterval(scanPollTimer);
       clearInterval(queuePollTimer);
+      clearInterval(photoHealthPollTimer);
       scanPollTimer = null;
       queuePollTimer = null;
+      photoHealthPollTimer = null;
       state.collectionId = '';
       state.autoCategorizeCollectionId = '';
       byId('app-panel').classList.add('hidden');
@@ -1531,6 +1863,11 @@ byId('app-navigation').addEventListener('click', async (event) => {
     }
     state.classificationPending = false;
     state.autoCategorizeCollectionId = '';
+    if (view === 'photo-health') {
+      showView(view);
+      await loadPhotoHealth();
+      return;
+    }
     if (view === 'browse') {
       activateCategory(localStorage.getItem(`photo-sorter-browse-filter:${state.collectionId}`) || 'all');
       await loadMedia();
@@ -1540,6 +1877,43 @@ byId('app-navigation').addEventListener('click', async (event) => {
   } catch (error) {
     setStatus(error.message, true);
   }
+});
+
+byId('photo-health-enable').addEventListener('click', async () => {
+  try {
+    await request('/api/photo-health/state', {
+      method: 'POST',
+      body: JSON.stringify({ collectionId: state.collectionId, action: 'enable' }),
+    });
+    setStatus('Photo Health analysis enabled for this collection.');
+    await loadPhotoHealth();
+  } catch (error) { setStatus(error.message, true); }
+});
+for (const [buttonId, action] of [['photo-health-pause', 'pause'], ['photo-health-resume', 'resume']]) {
+  byId(buttonId).addEventListener('click', async () => {
+    try {
+      await request('/api/photo-health/state', {
+        method: 'POST',
+        body: JSON.stringify({ collectionId: state.collectionId, action }),
+      });
+      await loadPhotoHealth();
+    } catch (error) { setStatus(error.message, true); }
+  });
+}
+for (const [controlId, key] of [['photo-health-type', 'type'], ['photo-health-handled', 'handled']]) {
+  byId(controlId).addEventListener('change', async (event) => {
+    state.photoHealth[key] = event.target.value;
+    state.photoHealth.offset = 0;
+    try { await loadPhotoHealth(); } catch (error) { setStatus(error.message, true); }
+  });
+}
+byId('photo-health-previous').addEventListener('click', async () => {
+  state.photoHealth.offset = Math.max(0, state.photoHealth.offset - state.photoHealth.limit);
+  try { await loadPhotoHealth(); } catch (error) { setStatus(error.message, true); }
+});
+byId('photo-health-next').addEventListener('click', async () => {
+  state.photoHealth.offset += state.photoHealth.limit;
+  try { await loadPhotoHealth(); } catch (error) { setStatus(error.message, true); }
 });
 
 async function saveSettings() {

@@ -96,6 +96,41 @@ button.keep { background: #1d7542; }
 .scan-status-root strong, .scan-status-root small { overflow-wrap: anywhere; }
 .scan-status-errors { margin: 0; padding: .6rem .75rem .6rem 2rem; border-radius: .45rem; background: #fdeaea; color: #a51e1e; }
 .scan-status-warning { margin: 0; padding: .55rem .7rem; border-radius: .45rem; background: #fff1cb; color: #704b00; overflow-wrap: anywhere; }
+.photo-health-panel { max-width: 75rem; margin: 0 auto; }
+.photo-health-panel > .section-heading { align-items: flex-start; }
+.photo-health-panel h2 { margin-bottom: .35rem; }
+.photo-health-panel .section-heading p { margin-bottom: .5rem; }
+.photo-health-actions, .photo-health-filters, .photo-health-pagination, .health-zoom-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .5rem;
+}
+#photo-health-progress { display: block; width: 100%; height: .8rem; margin: .5rem 0; }
+.photo-health-errors { max-height: 10rem; overflow: auto; padding-left: 1.5rem; color: #a51e1e; }
+.photo-health-filters { margin: .75rem 0; }
+.photo-health-filters label { display: grid; gap: .25rem; font-weight: 650; }
+.photo-health-list { display: grid; gap: .75rem; }
+.photo-health-finding { min-width: 0; padding: .8rem; border: 1px solid #d7dce1; border-radius: .65rem; }
+.photo-health-finding h3 { margin: 0 0 .4rem; font-size: 1rem; }
+.photo-health-finding p { margin: .35rem 0; overflow-wrap: anywhere; }
+.health-decision { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .5rem; }
+.health-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; margin: .6rem 0; }
+.health-compare figure { min-width: 0; margin: 0; }
+.health-compare-viewport { height: 15rem; overflow: hidden; display: grid; place-items: center; border-radius: .45rem; background: #101418; touch-action: none; }
+.health-compare-viewport img, .health-compare-viewport video {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+}
+.health-compare figcaption { margin-top: .25rem; overflow-wrap: anywhere; font-size: .82rem; }
+.health-member-list { display: grid; gap: .35rem; max-height: 14rem; overflow: auto; padding: .4rem; border: 1px solid #d7dce1; border-radius: .45rem; }
+.health-member-list label { display: flex; align-items: center; gap: .5rem; min-width: 0; overflow-wrap: anywhere; }
+.health-member-list input { flex: none; }
+.health-zoom-controls { margin: .35rem 0; }
+.photo-health-pagination { justify-content: center; margin-top: .8rem; }
+.photo-health-blur-preview { width: min(100%, 24rem); max-height: 18rem; object-fit: contain; background: #101418; }
 .review { text-align: center; }
 .review-heading { text-align: left; }
 .current-media { min-height: 230px; max-height: min(60vh, 620px); display: grid; place-items: center; overflow: hidden; background: #101418; color: white; border-radius: .55rem; }
@@ -158,6 +193,9 @@ code { overflow-wrap: anywhere; }
   .media-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .audit-fields { grid-template-columns: 1fr; gap: .1rem; }
   .audit-fields dd { margin-bottom: .35rem; }
+  .photo-health-panel > .section-heading { display: grid; }
+  .health-compare { gap: .35rem; }
+  .health-compare-viewport { height: 11rem; }
 }
 :root[data-grid-columns="auto"] .media-grid { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
 :root[data-grid-columns="2"] .media-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -183,6 +221,8 @@ code { overflow-wrap: anywhere; }
   :root[data-theme="system"] .scan-status-warning { background: #40361f; color: #ffe09a; }
   :root[data-theme="system"] .lan { background: #1c3047; }
   :root[data-theme="system"] .media-card { border-color: #414a53; }
+  :root[data-theme="system"] .photo-health-finding,
+  :root[data-theme="system"] .health-member-list { border-color: #414a53; }
   :root[data-theme="system"] .audit-entry { border-color: #414a53; }
   :root[data-theme="system"] .audit-fields dt { color: #b3bdc7; }
 }
@@ -207,6 +247,8 @@ code { overflow-wrap: anywhere; }
 :root[data-theme="dark"] .scan-status-warning { background: #40361f; color: #ffe09a; }
 :root[data-theme="dark"] .lan { background: #1c3047; }
 :root[data-theme="dark"] .media-card { border-color: #414a53; }
+:root[data-theme="dark"] .photo-health-finding,
+:root[data-theme="dark"] .health-member-list { border-color: #414a53; }
 :root[data-theme="dark"] .audit-entry { border-color: #414a53; }
 :root[data-theme="dark"] .audit-fields dt { color: #b3bdc7; }
 
@@ -417,7 +459,7 @@ body.app-active #network-warning {
 .grid-section { display: flex; flex-direction: column; height: 100%; border: 0; border-radius: 0; }
 .grid-section .section-heading { flex: none; margin-bottom: .75rem; }
 .media-viewport { flex: 1; min-height: 200px; height: auto; max-height: none; }
-#collections-view, #apply-view, #history-view, #help-view, #settings-view { overflow: auto; padding: 1rem; }
+#collections-view, #apply-view, #history-view, #help-view, #settings-view, #photo-health-view { overflow: auto; padding: 1rem; }
 #collections-view > .panel, #apply-view > .panel, #history-view > .panel,
 #help-view > .panel, #settings-view > .panel { max-width: 65rem; margin: 0 auto 1rem; }
 #collections-view select { display: block; width: 100%; margin: .4rem 0 1rem; }

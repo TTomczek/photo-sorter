@@ -55,6 +55,7 @@
               <button type="button" data-view="review" data-short-label="R" aria-current="page">Review</button>
               <button type="button" data-view="collections" data-short-label="C">Collections</button>
               <button type="button" data-view="browse" data-short-label="B">Browse</button>
+              <button type="button" data-view="photo-health" data-short-label="PH">Photo Health</button>
               <button type="button" data-view="apply" data-short-label="A">Apply / restore</button>
               <button type="button" data-view="history" data-short-label="H">History</button>
               <button type="button" data-view="help" data-short-label="?">Help</button>
@@ -154,6 +155,47 @@
                 </div>
               </section>
             </section>
+            <section id="photo-health-view" class="app-view hidden">
+              <section class="panel photo-health-panel">
+                <div class="section-heading">
+                  <div>
+                    <h2>Photo Health</h2>
+                    <p>Find exact duplicates, very similar photo copies, and clearly blurry photos. Reviewing findings only changes decisions; it never moves files.</p>
+                  </div>
+                  <div class="photo-health-actions">
+                    <button id="photo-health-enable" type="button">Enable analysis</button>
+                    <button id="photo-health-pause" class="quiet hidden" type="button">Pause analysis</button>
+                    <button id="photo-health-resume" class="hidden" type="button">Resume analysis</button>
+                  </div>
+                </div>
+                <p id="photo-health-status" role="status">Analysis is not enabled.</p>
+                <progress id="photo-health-progress" class="hidden" max="1" value="0" aria-label="Photo Health analysis progress"></progress>
+                <ul id="photo-health-errors" class="photo-health-errors"></ul>
+                <div class="photo-health-filters">
+                  <label>Finding type
+                    <select id="photo-health-type">
+                      <option value="all">Duplicates and blur</option>
+                      <option value="duplicate">Duplicates</option>
+                      <option value="blur">Blur</option>
+                    </select>
+                  </label>
+                  <label>Review state
+                    <select id="photo-health-handled">
+                      <option value="open">Needs review</option>
+                      <option value="handled">Handled, including Unsure</option>
+                      <option value="all">All findings</option>
+                    </select>
+                  </label>
+                </div>
+                <p id="photo-health-count"></p>
+                <div id="photo-health-list" class="photo-health-list" aria-live="polite"></div>
+                <div class="photo-health-pagination">
+                  <button id="photo-health-previous" class="quiet" type="button">Previous</button>
+                  <span id="photo-health-page"></span>
+                  <button id="photo-health-next" class="quiet" type="button">Next</button>
+                </div>
+              </section>
+            </section>
             <section id="collections-view" class="app-view hidden">
               <section class="panel">
                 <h2>Collections</h2>
@@ -201,6 +243,7 @@
                   <li>Use the zoom controls or pinch on an image to zoom; drag a zoomed image to pan. Scroll the collection grid to browse large libraries. Press Escape to pause review.</li>
                   <li>Apply shows a move summary first, then requires a separate confirmation. Delete-category files move into a <code>deleted</code> folder; nothing is permanently deleted.</li>
                   <li>Restore moves the latest apply batch back when the original paths are free. Conflicts are never overwritten.</li>
+                  <li>Photo Health can find exact duplicates, near-identical photo copies, and clearly blurry photos. Analysis can be paused across devices; its review decisions never move files.</li>
                   <li>Unsupported image/video previews can still be categorized. Video playback depends on codecs available in your operating system.</li>
                   <li>Only use trusted local networks, or put the service behind your own HTTPS/VPN proxy. Do not expose it publicly.</li>
                   <li>PWA installation and passkeys require a secure HTTPS origin; passkeys also need host configuration.</li>

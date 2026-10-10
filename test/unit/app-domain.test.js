@@ -14,6 +14,7 @@ async function createSorter(t) {
   await fs.writeFile(path.join(root, 'bravo.png'), 'bravo');
   await fs.writeFile(path.join(root, 'charlie.mp4'), 'charlie');
   const app = await new PhotoSorter({ dataDirectory: path.join(temporary, 'data') }).initialize();
+  await new Promise((resolve) => setImmediate(resolve));
   t.after(async () => {
     await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
@@ -153,7 +154,7 @@ test('legacy SQLite data is upgraded with versioned migrations and remains usabl
   t.after(async () => fs.rm(temporary, { recursive: true, force: true }));
 
   const app = await new PhotoSorter({ dataDirectory: temporary }).initialize();
-  assert.equal(app.db.prepare('PRAGMA user_version').get().user_version, 3);
+  assert.equal(app.db.prepare('PRAGMA user_version').get().user_version, 4);
   assert.deepEqual(
     { ...app.db.prepare('SELECT id, active FROM roots WHERE id = ?').get('legacy-root') },
     { id: 'legacy-root', active: 1 },
@@ -162,10 +163,11 @@ test('legacy SQLite data is upgraded with versioned migrations and remains usabl
     { ...app.db.prepare('SELECT id, category, kind, present FROM media WHERE id = ?').get('legacy-video') },
     { id: 'legacy-video', category: 'keep', kind: 'video', present: 1 },
   );
+  assert.ok(app.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'photo_health_items'").get());
   await app.close();
 
   const reopened = await new PhotoSorter({ dataDirectory: temporary }).initialize();
-  assert.equal(reopened.db.prepare('PRAGMA user_version').get().user_version, 3);
+  assert.equal(reopened.db.prepare('PRAGMA user_version').get().user_version, 4);
   assert.equal(reopened.db.prepare('SELECT COUNT(*) AS count FROM media').get().count, 1);
   await reopened.close();
 });
@@ -206,7 +208,8 @@ test('unsupported recursive watching switches to periodic scan recovery', async 
 
 test('failed root scans retain a visible error and can be retried only in their collection', async (t) => {
   const { app, collectionId, root } = await createSorter(t);
-  const rootId = app.listRoots(collectionId)[0].id;
+  const [registeredRoot] = app.listRoots(collectionId);
+  const rootId = registeredRoot.id;
   await fs.rm(root, { recursive: true });
   await assert.rejects(app.scanRoot(rootId));
 
@@ -214,7 +217,7 @@ test('failed root scans retain a visible error and can be retried only in their 
   assert.equal(scan.status, 'failed');
   assert.equal(scan.online, 0);
   assert.equal(scan.errorCount, 1);
-  assert.equal(scan.errors[0].path, root);
+  assert.equal(scan.errors[0].path, registeredRoot.path);
   assert.match(scan.errors[0].message, /ENOENT/);
   assert.throws(() => app.startRootScan('different-collection', rootId), /Root not found in this collection/);
   assert.deepEqual(app.startRootScan(collectionId, rootId), { started: true, rootId });
@@ -229,11 +232,12 @@ test('partial scans report individual unreadable folders and retain incomplete p
   await fs.writeFile(path.join(blocked, 'hidden.jpg'), 'hidden');
   const denied = Object.assign(new Error('Permission denied by test fixture'), { code: 'EACCES' });
   let denyDirectory = false;
+  let blockedPath = blocked;
   const scanFs = {
     realpath: fs.realpath.bind(fs),
     lstat: fs.lstat.bind(fs),
     readdir: async (directory, options) => {
-      if (denyDirectory && directory === blocked) throw denied;
+      if (denyDirectory && directory === blockedPath) throw denied;
       return fs.readdir(directory, options);
     },
   };
@@ -241,19 +245,22 @@ test('partial scans report individual unreadable folders and retain incomplete p
     dataDirectory: path.join(temporary, 'data'),
     scanFs,
   }).initialize();
+  await new Promise((resolve) => setImmediate(resolve));
   t.after(async () => {
     await app.close();
     await fs.rm(temporary, { recursive: true, force: true });
   });
   const collectionId = app.createCollection('Partial scan');
   const rootId = await app.addRoot(collectionId, root);
+  const registeredRoot = app.listRoots(collectionId)[0].path;
+  blockedPath = path.join(registeredRoot, 'unreadable');
   denyDirectory = true;
   await app.scanRoot(rootId);
 
   const [scan] = app.listScanStatus(collectionId);
   assert.equal(scan.status, 'completed');
   assert.equal(scan.errorCount, 1);
-  assert.deepEqual(scan.errors.map((issue) => issue.path), [blocked]);
+  assert.deepEqual(scan.errors.map((issue) => issue.path), [path.join(registeredRoot, 'unreadable')]);
   assert.equal(scan.errors[0].message, denied.message);
   assert.equal(app.listMedia({ collectionId, category: 'all' }).total, 2);
 });
