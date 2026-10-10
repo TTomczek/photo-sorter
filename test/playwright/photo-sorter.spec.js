@@ -670,6 +670,7 @@ test('200,000-item browser browsing keeps pages and rendered cards bounded', asy
     const startedAt = performance.now();
     await page.locator('#media-viewport').evaluate((viewport) => {
       viewport.scrollTop = document.querySelector('#media-virtual-space').getBoundingClientRect().height * 0.75;
+      viewport.dispatchEvent(new Event('scroll'));
     });
     const response = await pageResponse;
     const responseDurationMs = performance.now() - startedAt;
