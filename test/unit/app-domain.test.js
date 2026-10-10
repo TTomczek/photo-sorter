@@ -232,11 +232,12 @@ test('partial scans report individual unreadable folders and retain incomplete p
   await fs.writeFile(path.join(blocked, 'hidden.jpg'), 'hidden');
   const denied = Object.assign(new Error('Permission denied by test fixture'), { code: 'EACCES' });
   let denyDirectory = false;
+  let blockedPath = blocked;
   const scanFs = {
     realpath: fs.realpath.bind(fs),
     lstat: fs.lstat.bind(fs),
     readdir: async (directory, options) => {
-      if (denyDirectory && directory === blocked) throw denied;
+      if (denyDirectory && directory === blockedPath) throw denied;
       return fs.readdir(directory, options);
     },
   };
@@ -252,6 +253,7 @@ test('partial scans report individual unreadable folders and retain incomplete p
   const collectionId = app.createCollection('Partial scan');
   const rootId = await app.addRoot(collectionId, root);
   const registeredRoot = app.listRoots(collectionId)[0].path;
+  blockedPath = path.join(registeredRoot, 'unreadable');
   denyDirectory = true;
   await app.scanRoot(rootId);
 
