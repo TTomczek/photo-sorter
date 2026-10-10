@@ -9,6 +9,10 @@ const PHASH_MAX_DISTANCE = 2;
 const SIMILARITY_PIXEL_DIFFERENCE_LIMIT = 3;
 const BLUR_LAPLACIAN_VARIANCE_LIMIT = 5;
 const BLUR_MIN_CONTRAST = 18;
+const BLUR_EDGE_SHARPNESS_LIMIT = 0.33;
+const BLUR_EDGE_SAMPLE_STRIDE = 8;
+const BLUR_EDGE_WINDOW_RADIUS = 4;
+const BLUR_EDGE_MIN_RANGE = 24;
 const HASH_COSINES = Array.from({ length: HASH_FREQUENCIES }, (_, frequency) => (
   Array.from({ length: HASH_SIZE }, (_, sample) => Math.cos(((2 * sample + 1) * frequency * Math.PI) / (2 * HASH_SIZE)))
 ));
@@ -106,6 +110,50 @@ function laplacianVariance(pixels, width, height) {
   return { variance: sumSquares / count - (sum / count) ** 2, contrast };
 }
 
+function edgeSharpness(pixels, width, height) {
+  const sharpnessHistogram = new Uint32Array(101);
+  let sampleCount = 0;
+  const radius = BLUR_EDGE_WINDOW_RADIUS;
+  for (let y = radius; y < height - radius; y += BLUR_EDGE_SAMPLE_STRIDE) {
+    for (let x = radius; x < width - radius; x += BLUR_EDGE_SAMPLE_STRIDE) {
+      for (let direction = 0; direction < 2; direction += 1) {
+        const vertical = direction === 1;
+        let minimum = 255;
+        let maximum = 0;
+        let totalVariation = 0;
+        let maximumStep = 0;
+        let previous;
+        for (let offset = -radius; offset <= radius; offset += 1) {
+          const index = vertical ? (y + offset) * width + x : y * width + x + offset;
+          const value = pixels[index];
+          minimum = Math.min(minimum, value);
+          maximum = Math.max(maximum, value);
+          if (offset === -radius) {
+            previous = value;
+            continue;
+          }
+          const step = Math.abs(value - previous);
+          totalVariation += step;
+          maximumStep = Math.max(maximumStep, step);
+          previous = value;
+        }
+        const range = maximum - minimum;
+        if (range < BLUR_EDGE_MIN_RANGE || totalVariation > range * 1.6) continue;
+        sharpnessHistogram[Math.round((maximumStep / totalVariation) * 100)] += 1;
+        sampleCount += 1;
+      }
+    }
+  }
+  if (sampleCount < 16) return null;
+  const medianPosition = Math.floor(sampleCount / 2);
+  let cumulative = 0;
+  for (let index = 0; index < sharpnessHistogram.length; index += 1) {
+    cumulative += sharpnessHistogram[index];
+    if (cumulative > medianPosition) return index / 100;
+  }
+  return null;
+}
+
 function hashDistance(left, right) {
   let difference = BigInt(`0x${left}`) ^ BigInt(`0x${right}`);
   let distance = 0;
@@ -145,6 +193,7 @@ async function analyzeImage(filename) {
       .toBuffer({ resolveWithObject: true }),
   ]);
   const { variance, contrast } = laplacianVariance(decoded.data, decoded.info.width, decoded.info.height);
+  const edgeSharpnessScore = edgeSharpness(decoded.data, decoded.info.width, decoded.info.height);
   const signature = normalizedImageSignature(decoded.data);
   return {
     sha256,
@@ -153,7 +202,10 @@ async function analyzeImage(filename) {
     width: dimensions.width,
     height: dimensions.height,
     blurScore: Math.round(variance * 100) / 100,
-    isBlurry: contrast >= BLUR_MIN_CONTRAST && variance < BLUR_LAPLACIAN_VARIANCE_LIMIT,
+    isBlurry: contrast >= BLUR_MIN_CONTRAST && (
+      variance < BLUR_LAPLACIAN_VARIANCE_LIMIT
+      || (edgeSharpnessScore !== null && edgeSharpnessScore < BLUR_EDGE_SHARPNESS_LIMIT)
+    ),
   };
 }
 

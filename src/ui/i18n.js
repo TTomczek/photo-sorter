@@ -5,6 +5,8 @@
     'Log out': 'Abmelden',
     'Local-network HTTP is not encrypted. Use only on a trusted LAN; never expose this service directly to the internet.':
       'HTTP im lokalen Netzwerk ist nicht verschlüsselt. Nur in einem vertrauenswürdigen LAN verwenden und niemals direkt dem Internet aussetzen.',
+    'Dismiss network warning': 'Netzwerk-Warnung ausblenden',
+    'Dismiss': 'Ausblenden',
     'Password': 'Passwort',
     'Change password': 'Passwort ändern',
     'Current password': 'Aktuelles Passwort',

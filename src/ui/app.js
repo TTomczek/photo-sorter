@@ -90,6 +90,16 @@ function applyVisualPreferences() {
   byId('grid-columns').value = validColumns;
 }
 
+function applyNetworkWarningPreference() {
+  const warning = byId('network-warning');
+  warning.classList.toggle('hidden', localStorage.getItem('photo-sorter-network-warning-dismissed') === 'true');
+  byId('dismiss-network-warning').addEventListener('click', () => {
+    localStorage.setItem('photo-sorter-network-warning-dismissed', 'true');
+    warning.classList.add('hidden');
+    updateDrawerOffset();
+  });
+}
+
 function setDrawerOpen(open) {
   state.drawerOpen = open;
   const sideSheet = byId('side-sheet');
@@ -2277,6 +2287,7 @@ initializeApp().catch((error) => {
 });
 
 applyVisualPreferences();
+applyNetworkWarningPreference();
 if (!developmentMode && window.isSecureContext && 'serviceWorker' in navigator) {
   navigator.serviceWorker.register('/service-worker.js')
     .catch((error) => setStatus(`Offline install support unavailable: ${error.message}`, true));

@@ -24,7 +24,8 @@ h2 { font-size: 1.2rem; }
 main { display: grid; gap: 1rem; }
 #app-panel:not(.hidden) { display: grid; gap: 1rem; }
 .panel { padding: 1rem; border: 1px solid #d7dce1; border-radius: .8rem; background: #fff; }
-.warning { padding: .8rem 1rem; background: #fff1cb; color: #624900; border-radius: .7rem; }
+.warning { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .8rem 1rem; background: #fff1cb; color: #624900; border-radius: .7rem; }
+.warning-dismiss { flex: none; }
 .toolbar { flex-wrap: wrap; }
 .toolbar label { font-weight: 650; }
 #new-collection-form { display: flex; gap: .4rem; }
@@ -268,6 +269,7 @@ body.app-active #network-warning {
   border-radius: 0;
   font-size: .82rem;
 }
+body.app-active #network-warning .warning-dismiss { padding: .35rem .55rem; }
 #app-panel:not(.hidden) {
   display: flex;
   flex: 1;

@@ -366,6 +366,13 @@ function migrateDatabase(db) {
           ON photo_health_hash_buckets(media_id);
       `),
     },
+    {
+      version: 5,
+      apply: () => db.exec(`
+        UPDATE photo_health_items SET status = 'pending'
+        WHERE kind = 'image' AND status = 'analyzed';
+      `),
+    },
   ];
   if (currentVersion > migrations.at(-1).version) {
     throw new Error(`Database schema version ${currentVersion} is newer than this application supports.`);

@@ -157,6 +157,28 @@ test.afterEach(async () => {
   delete process.env.PHOTO_SORTER_WEBAUTHN_RP_ID;
 });
 
+test('network security warning can be dismissed and stays dismissed after reload', async () => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const page = await context.newPage();
+  try {
+    await setupAccount(page);
+    const warning = page.locator('#network-warning');
+    await expect(warning).toBeVisible();
+    await page.getByRole('button', { name: 'Dismiss network warning' }).click();
+    await expect(warning).toBeHidden();
+    await page.locator('#menu-toggle').click();
+    const drawerOffset = await page.evaluate(() => (
+      document.querySelector('#side-sheet').getBoundingClientRect().top
+      - document.querySelector('.app-topbar').getBoundingClientRect().bottom
+    ));
+    expect(drawerOffset).toBe(0);
+    await page.reload();
+    await expect(warning).toBeHidden();
+  } finally {
+    await context.close();
+  }
+});
+
 test('first-run review focus, photo details, category browsing and safe apply/restore', async () => {
   const context = await browser.newContext();
   const page = await context.newPage();

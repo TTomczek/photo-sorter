@@ -32,7 +32,7 @@ To enable passkeys behind an operator-managed HTTPS reverse proxy, set both `PHO
 
 ## Network warning
 
-The service accepts connections only on loopback and detected private IPv4 interfaces. The LAN site uses HTTP: passwords, sessions, and media are not encrypted in transit. Use a trusted LAN, or configure an HTTPS/VPN reverse proxy yourself. Never expose the service directly to the public internet. The app does not configure firewall or router rules.
+The service accepts connections only on loopback and detected private IPv4 interfaces. The LAN site uses HTTP: passwords, sessions, and media are not encrypted in transit. Use a trusted LAN, or configure an HTTPS/VPN reverse proxy yourself. Never expose the service directly to the public internet. The app does not configure firewall or router rules. The in-app warning can be dismissed in that browser and remains dismissed after reloads.
 
 ## File-operation semantics
 

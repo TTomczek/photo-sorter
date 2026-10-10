@@ -154,7 +154,7 @@ test('legacy SQLite data is upgraded with versioned migrations and remains usabl
   t.after(async () => fs.rm(temporary, { recursive: true, force: true }));
 
   const app = await new PhotoSorter({ dataDirectory: temporary }).initialize();
-  assert.equal(app.db.prepare('PRAGMA user_version').get().user_version, 4);
+  assert.equal(app.db.prepare('PRAGMA user_version').get().user_version, 5);
   assert.deepEqual(
     { ...app.db.prepare('SELECT id, active FROM roots WHERE id = ?').get('legacy-root') },
     { id: 'legacy-root', active: 1 },
@@ -167,7 +167,7 @@ test('legacy SQLite data is upgraded with versioned migrations and remains usabl
   await app.close();
 
   const reopened = await new PhotoSorter({ dataDirectory: temporary }).initialize();
-  assert.equal(reopened.db.prepare('PRAGMA user_version').get().user_version, 4);
+  assert.equal(reopened.db.prepare('PRAGMA user_version').get().user_version, 5);
   assert.equal(reopened.db.prepare('SELECT COUNT(*) AS count FROM media').get().count, 1);
   await reopened.close();
 });

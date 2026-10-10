@@ -123,6 +123,10 @@ Implement the application from scratch using this handoff as the product source 
 - Browser regression coverage loads a 200,000-item fixture, navigates a virtualized page, records the observed page response and browser DOM/heap metrics, and verifies the UI continues to render only one bounded page.
 - SQLite schema changes run through numbered `PRAGMA user_version` migrations. CI exercises the Electron host folder-picker IPC contract and produces native packages on Windows, macOS, and Linux.
 
+### Confirmed UI behavior (2026-10-10)
+
+- The local-network HTTP warning can be dismissed per browser and stays dismissed across page reloads.
+
 ## Authoritative safety and behavior invariants
 
 1. Never permanently delete or overwrite an original media file.

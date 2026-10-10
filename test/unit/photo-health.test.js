@@ -149,3 +149,56 @@ test('image analysis distinguishes a resized recompressed copy from a blurred im
   assert.equal(originalResult.isBlurry, false);
   assert.equal(blurredResult.isBlurry, true);
 });
+
+test('image analysis flags motion-softened high-contrast scenes', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-health-motion-'));
+  t.after(() => fs.rm(temporary, { recursive: true, force: true }));
+  const source = path.join(temporary, 'source.png');
+  const blurred = path.join(temporary, 'motion-blurred.png');
+  const shapes = [];
+  for (let y = 12; y < 250; y += 16) {
+    shapes.push(`<path d="M 8 ${y} H ${60 + (y % 50)}" stroke="#fff" stroke-width="2"/>`);
+    shapes.push(`<path d="M ${90 + (y % 35)} ${y + 2} H 240" stroke="#03e9ff" stroke-width="1"/>`);
+  }
+  for (let x = 24; x < 250; x += 22) {
+    shapes.push(`<rect x="${x}" y="${(x * 3) % 200}" width="9" height="40" fill="#ffb020"/>`);
+  }
+  const sceneWithBrightDetails = Buffer.from(`<svg width="256" height="256">
+    <rect width="256" height="256" fill="#20202a"/>${shapes.join('')}
+  </svg>`);
+  await sharp(sceneWithBrightDetails).png().toFile(source);
+  await sharp(sceneWithBrightDetails).blur(2).png().toFile(blurred);
+
+  assert.equal((await analyzeImage(source)).isBlurry, false);
+  assert.equal((await analyzeImage(blurred)).isBlurry, true);
+});
+
+test('Photo Health reanalyzes stored images when the blur detector is upgraded', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-health-upgrade-'));
+  const root = path.join(temporary, 'library');
+  await fs.mkdir(root);
+  const dataDirectory = path.join(temporary, 'data');
+  await sharp(scene()).blur(8).png().toFile(path.join(root, 'blurred.png'));
+
+  let app = await new PhotoSorter({ dataDirectory }).initialize();
+  t.after(async () => {
+    await app.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+  const collectionId = app.createCollection('Health upgrade');
+  await app.addRoot(collectionId, root);
+  app.setPhotoHealthState(collectionId, 'enable');
+  assert.equal((await waitForHealth(app, collectionId)).blurry, 1);
+
+  const mediaId = app.db.prepare(`
+    SELECT m.id FROM media m JOIN roots r ON r.id = m.root_id
+    WHERE r.collection_id = ? AND m.relative_path = 'blurred.png'
+  `).get(collectionId).id;
+  app.db.prepare("UPDATE photo_health_items SET is_blurry = 0 WHERE media_id = ?").run(mediaId);
+  app.db.exec('PRAGMA user_version = 4');
+  await app.close();
+
+  app = await new PhotoSorter({ dataDirectory }).initialize();
+  await waitForHealth(app, collectionId);
+  assert.equal(app.listPhotoHealthFindings(collectionId, { type: 'blur' }).total, 1);
+});
