@@ -84,6 +84,7 @@
                 <div class="decision-actions">
                   <button type="button" data-decision="delete" class="delete">← Delete</button>
                   <button type="button" data-decision="unsure" class="unsure">↓ Unsure</button>
+                  <button type="button" id="choose-category" aria-label="Choose a custom category" title="Choose a custom category (ArrowUp)">↑ Category</button>
                   <button type="button" data-decision="keep" class="keep">Keep →</button>
                 </div>
                 <div class="review-navigation">
@@ -99,6 +100,13 @@
                 <button type="button" data-category="keep" aria-pressed="false">Keep</button>
                 <button type="button" data-category="delete" aria-pressed="false">Delete</button>
                 <button type="button" data-category="unsure" aria-pressed="false">Unsure</button>
+                <label class="custom-category-filter" for="custom-category-filter">
+                  Custom category
+                  <select id="custom-category-filter">
+                    <option value="">Choose category…</option>
+                  </select>
+                </label>
+                <button type="button" id="manage-categories" class="quiet">Manage categories</button>
               </nav>
               <form id="media-search-form" class="media-search panel">
                 <div class="media-filter-field media-filter-search">
@@ -240,9 +248,9 @@
               <section class="panel help">
                 <h2>Quick help and safety</h2>
                 <ul>
-                  <li>Use ←/swipe left for Delete, →/swipe right for Keep, and ↓/swipe down for Unsure. These actions only save a decision; they never move or delete a file.</li>
+                  <li>Use ←/swipe left for Delete, →/swipe right for Keep, ↓/swipe down for Unsure, and ↑/swipe up for a custom category. Press 1–9 or choose a category; selection saves and advances. Decisions never move files until you explicitly Apply.</li>
                   <li>Use the zoom controls or pinch on an image to zoom; drag a zoomed image to pan. Scroll the collection grid to browse large libraries. Press Escape to pause review.</li>
-                  <li>Apply shows a move summary first, then requires a separate confirmation. Delete-category files move into a <code>deleted</code> folder; nothing is permanently deleted.</li>
+                  <li>Create, rename, and delete custom categories in Browse. Apply shows a move summary first, then requires a separate confirmation; category files move to category-named folders while preserving subfolders. Nothing is permanently deleted.</li>
                   <li>Restore moves the latest apply batch back when the original paths are free. Conflicts are never overwritten.</li>
                   <li>Photo Health can find exact duplicates, near-identical photo copies, and clearly blurry photos. Analysis can be paused across devices; its review decisions never move files.</li>
                   <li>Unsupported image/video previews can still be categorized. Video playback depends on codecs available in your operating system.</li>
@@ -327,6 +335,41 @@
         <menu>
           <button value="cancel">Cancel</button>
           <button id="dialog-confirm" value="confirm" class="danger">Confirm move</button>
+        </menu>
+      </form>
+    </dialog>
+    <dialog id="category-picker-dialog" aria-labelledby="category-picker-title">
+      <h2 id="category-picker-title">Choose a category</h2>
+      <p id="category-picker-empty" class="hidden">No custom categories yet. Create one to categorize this photo.</p>
+      <div id="category-picker-options" class="category-picker-options"></div>
+      <menu>
+        <button type="button" id="category-picker-create" class="quiet">Create category</button>
+        <button type="button" id="category-picker-cancel" value="cancel">Cancel</button>
+      </menu>
+    </dialog>
+    <dialog id="category-manager-dialog" aria-labelledby="category-manager-title">
+      <h2 id="category-manager-title">Manage categories</h2>
+      <form id="category-create-form" class="category-create-form">
+        <label for="new-category-name">New category</label>
+        <input id="new-category-name" maxlength="80" required>
+        <button type="submit">Create</button>
+      </form>
+      <p id="category-manager-error" class="error" role="alert"></p>
+      <ul id="category-manager-list" class="category-manager-list"></ul>
+      <menu>
+        <button type="button" id="category-manager-close">Done</button>
+      </menu>
+    </dialog>
+    <dialog id="category-name-dialog" aria-labelledby="category-name-title">
+      <form id="category-name-form">
+        <h2 id="category-name-title">Create category</h2>
+        <label for="category-name-input">Category name</label>
+        <input id="category-name-input" maxlength="80" required>
+        <small>Use up to 80 characters. Names must be unique and cannot contain path separators or reserved folder names.</small>
+        <p id="category-name-error" class="error" role="alert"></p>
+        <menu>
+          <button type="button" id="category-name-cancel" class="quiet">Cancel</button>
+          <button type="submit" id="category-name-save">Save category</button>
         </menu>
       </form>
     </dialog>

@@ -100,6 +100,94 @@
     'Connect a phone on this local network': 'Telefon mit diesem lokalen Netzwerk verbinden',
     'Loading local addresses…': 'Lokale Adressen werden geladen…',
     'Media category': 'Medienkategorie',
+    'Custom category': 'Benutzerdefinierte Kategorie',
+    'Choose category…': 'Kategorie auswählen…',
+    'Manage categories': 'Kategorien verwalten',
+    '↑ Category': '↑ Kategorie',
+    'Choose a custom category': 'Benutzerdefinierte Kategorie auswählen',
+    'Choose a custom category (ArrowUp)': 'Benutzerdefinierte Kategorie auswählen (Pfeil nach oben)',
+    'Choose a category': 'Kategorie auswählen',
+    'No custom categories yet. Create one to categorize this photo.':
+      'Noch keine benutzerdefinierten Kategorien. Erstelle eine Kategorie, um dieses Foto einzuordnen.',
+    'Create category': 'Kategorie erstellen',
+    'New category': 'Neue Kategorie',
+    'Category name': 'Kategoriename',
+    'Use up to 80 characters. Names must be unique and cannot contain path separators or reserved folder names.':
+      'Bis zu 80 Zeichen. Namen müssen eindeutig sein und dürfen keine Pfadtrenner oder reservierten Ordnernamen enthalten.',
+    'Save category': 'Kategorie speichern',
+    'Save changes': 'Änderungen speichern',
+    'Rename category': 'Kategorie umbenennen',
+    'Rename': 'Umbenennen',
+    'No custom categories yet.': 'Noch keine benutzerdefinierten Kategorien.',
+    'Done': 'Fertig',
+    'Reassign assigned photos to': 'Zugewiesene Fotos neu zuordnen zu',
+    'Choose a destination…': 'Ziel auswählen…',
+    'Unseen (clear decision)': 'Nicht gesichtet (Entscheidung zurücksetzen)',
+    'Delete category': 'Kategorie löschen',
+    'Reassign and delete': 'Neu zuordnen und löschen',
+    'Any file moves remain staged until you review and confirm Apply.':
+      'Dateiverschiebungen bleiben vorgemerkt, bis du sie prüfst und das Anwenden bestätigst.',
+    'Photo Health': 'Fotoanalyse',
+    'Photo Health analysis progress': 'Fortschritt der Fotoanalyse',
+    'Find exact duplicates, very similar photo copies, and clearly blurry photos. Reviewing findings only changes decisions; it never moves files.':
+      'Finde exakte Duplikate, sehr ähnliche Fotokopien und deutlich unscharfe Fotos. Die Prüfung ändert nur Entscheidungen und verschiebt keine Dateien.',
+    'Enable analysis': 'Analyse aktivieren',
+    'Pause analysis': 'Analyse pausieren',
+    'Resume analysis': 'Analyse fortsetzen',
+    'Analysis is not enabled.': 'Die Analyse ist nicht aktiviert.',
+    'Analysis is not enabled for this collection.': 'Die Analyse ist für diese Sammlung nicht aktiviert.',
+    'Choose a collection to use Photo Health.': 'Wähle eine Sammlung für die Fotoanalyse aus.',
+    'This recognized file format could not be analyzed': 'Dieses erkannte Dateiformat konnte nicht analysiert werden',
+    'Analysis failed': 'Analyse fehlgeschlagen',
+    'Finding type': 'Fundtyp',
+    'Duplicates and blur': 'Duplikate und Unschärfe',
+    'Duplicates': 'Duplikate',
+    'Blur': 'Unschärfe',
+    'Review state': 'Prüfstatus',
+    'Needs review': 'Zu prüfen',
+    'Handled, including Unsure': 'Erledigt, einschließlich „Unsicher“',
+    'All findings': 'Alle Funde',
+    'Exact file match': 'Exakte Dateiübereinstimmung',
+    'Exact match': 'Exakte Übereinstimmung',
+    'Exact file match · Exact match': 'Exakte Dateiübereinstimmung · Exakte Übereinstimmung',
+    'Very similar image framing and content': 'Sehr ähnlicher Bildausschnitt und Bildinhalt',
+    'Close comparison': 'Vergleich schließen',
+    'Compare and review': 'Vergleichen und prüfen',
+    'Compare the files side by side, then choose one or more photos to keep. Every other group member will be staged as Deleted; no files are moved.':
+      'Vergleiche die Dateien nebeneinander und wähle anschließend ein oder mehrere Fotos zum Behalten aus. Alle übrigen Gruppenmitglieder werden als gelöscht vorgemerkt; Dateien werden nicht verschoben.',
+    'Clearly blurry photo': 'Deutlich unscharfes Foto',
+    'Preview unavailable; the decision is still available.':
+      'Vorschau nicht verfügbar; die Entscheidung ist weiterhin möglich.',
+    'Stage as Deleted': 'Als gelöscht vormerken',
+    'Handled · decision is shared with other views.':
+      'Erledigt · die Entscheidung wird mit anderen Ansichten geteilt.',
+    'No findings match these filters.': 'Keine Funde entsprechen diesen Filtern.',
+    'Enable analysis to discover findings.': 'Aktiviere die Analyse, um Funde zu entdecken.',
+    'Previous members': 'Vorherige Elemente',
+    'Next members': 'Nächste Elemente',
+    'Keep selected; stage the rest as Deleted': 'Ausgewählte behalten; übrige als gelöscht vormerken',
+    'Save duplicate decisions': 'Duplikatentscheidungen speichern',
+    'This only changes review decisions. No files will be moved or deleted.':
+      'Dies ändert nur die Prüfentscheidungen. Es werden keine Dateien verschoben oder gelöscht.',
+    'Save decisions': 'Entscheidungen speichern',
+    'Left comparison': 'Linker Vergleich',
+    'Right comparison': 'Rechter Vergleich',
+    'photo_health_state_changed': 'Fotoanalyse-Status geändert',
+    'photo_health_group_decided': 'Duplikatentscheidungen gespeichert',
+    'Invalid Photo Health action.': 'Ungültige Aktion für die Fotoanalyse.',
+    'Invalid Photo Health finding type.': 'Ungültiger Fundtyp für die Fotoanalyse.',
+    'Invalid handled filter.': 'Ungültiger Prüfstatusfilter.',
+    'Invalid Photo Health page.': 'Ungültige Seite der Fotoanalyse.',
+    'Duplicate group not found in this collection.': 'Duplikatgruppe in dieser Sammlung nicht gefunden.',
+    'Choose between one and 100 photos to keep.': 'Wähle zwischen einem und 100 Fotos zum Behalten aus.',
+    'Every selected photo must belong to this duplicate group.':
+      'Jedes ausgewählte Foto muss zu dieser Duplikatgruppe gehören.',
+    'A photo in this duplicate group is being reviewed on another device.':
+      'Ein Foto dieser Duplikatgruppe wird gerade auf einem anderen Gerät überprüft.',
+    'File changed before analysis. Rescan the collection to update its index.':
+      'Die Datei wurde vor der Analyse geändert. Scanne die Sammlung erneut, um den Index zu aktualisieren.',
+    'File changed during analysis. Rescan the collection to update its index.':
+      'Die Datei wurde während der Analyse geändert. Scanne die Sammlung erneut, um den Index zu aktualisieren.',
     'All': 'Alle',
     'Unseen': 'Nicht gesichtet',
     'Keep': 'Behalten',
@@ -144,8 +232,12 @@
     'Confirm': 'Bestätigen',
     'Cancel': 'Abbrechen',
     'Confirm move': 'Verschiebung bestätigen',
-    'Use ←/swipe left for Delete, →/swipe right for Keep, and ↓/swipe down for Unsure. These actions only save a decision; they never move or delete a file.':
-      '←/nach links wischen bedeutet Löschen, →/nach rechts wischen bedeutet Behalten und ↓/nach unten wischen bedeutet Unsicher. Diese Aktionen speichern nur eine Entscheidung und verschieben oder löschen keine Datei.',
+    'Use ←/swipe left for Delete, →/swipe right for Keep, ↓/swipe down for Unsure, and ↑/swipe up for a custom category. Press 1–9 or choose a category; selection saves and advances. Decisions never move files until you explicitly Apply.':
+      '←/nach links wischen bedeutet Löschen, →/nach rechts wischen bedeutet Behalten, ↓/nach unten wischen bedeutet Unsicher und ↑/nach oben wischen öffnet eine benutzerdefinierte Kategorie. Drücke 1–9 oder wähle eine Kategorie; die Auswahl wird gespeichert und fährt fort. Entscheidungen verschieben Dateien erst, wenn du sie ausdrücklich anwendest.',
+    'Create, rename, and delete custom categories in Browse. Apply shows a move summary first, then requires a separate confirmation; category files move to category-named folders while preserving subfolders. Nothing is permanently deleted.':
+      'Erstelle, benenne um und lösche benutzerdefinierte Kategorien unter „Durchsuchen“. Beim Anwenden wird zuerst eine Verschiebungsübersicht angezeigt und eine separate Bestätigung verlangt. Dateien werden in Ordner mit dem jeweiligen Kategorienamen verschoben; Unterordner bleiben erhalten. Nichts wird endgültig gelöscht.',
+    'Photo Health can find exact duplicates, near-identical photo copies, and clearly blurry photos. Analysis can be paused across devices; its review decisions never move files.':
+      'Die Fotoanalyse findet exakte Duplikate, nahezu identische Fotokopien und deutlich unscharfe Fotos. Die Analyse kann auf allen Geräten pausiert werden; Prüfentscheidungen verschieben keine Dateien.',
     'Use the zoom controls or pinch on an image to zoom; drag a zoomed image to pan. Scroll the collection grid to browse large libraries.':
       'Verwende die Zoom-Steuerung oder ziehe zwei Finger auf einem Bild auseinander, um es zu vergrößern. Ziehe ein vergrößertes Bild zum Verschieben. Scrolle im Sammlungsraster, um große Bibliotheken zu durchsuchen.',
     'Use the zoom controls or pinch on an image to zoom; drag a zoomed image to pan. Scroll the collection grid to browse large libraries. Enter fullscreen to focus on categorizing; press Escape or use the close button to leave.':
@@ -186,6 +278,18 @@
     'Media item not found.': 'Medienelement nicht gefunden.',
     'Invalid settings.': 'Ungültige Einstellungen.',
     'Invalid category.': 'Ungültige Kategorie.',
+    'Category name must be text.': 'Der Kategoriename muss Text sein.',
+    'Choose a unique category name that is also a safe folder name.':
+      'Wähle einen eindeutigen Kategorienamen, der auch als sicherer Ordnername geeignet ist.',
+    'A category with that name already exists in this collection.':
+      'In dieser Sammlung gibt es bereits eine Kategorie mit diesem Namen.',
+    'Category not found.': 'Kategorie nicht gefunden.',
+    'Deleting a category requires explicit confirmation.':
+      'Zum Löschen einer Kategorie ist eine ausdrückliche Bestätigung erforderlich.',
+    'Choose a different category or Unseen for the assigned photos.':
+      'Wähle für die zugewiesenen Fotos eine andere Kategorie oder „Nicht gesichtet“.',
+    'A photo in this category is being reviewed on another device. Try again after that review finishes.':
+      'Ein Foto dieser Kategorie wird gerade auf einem anderen Gerät überprüft. Versuche es erneut, wenn die Überprüfung abgeschlossen ist.',
     'Invalid review position.': 'Ungültige Position in der Überprüfung.',
     'This item is being reviewed on another device.': 'Dieses Element wird auf einem anderen Gerät überprüft.',
     'Apply requires explicit confirmation.': 'Zum Anwenden ist eine ausdrückliche Bestätigung erforderlich.',
@@ -208,6 +312,9 @@
     'decision_changed': 'Entscheidung geändert',
     'decision_undone': 'Entscheidung rückgängig gemacht',
     'decision_redone': 'Entscheidung wiederholt',
+    'category_created': 'Kategorie erstellt',
+    'category_renamed': 'Kategorie umbenannt',
+    'category_deleted': 'Kategorie gelöscht',
     'apply_completed': 'Anwendung abgeschlossen',
     'apply_failed': 'Anwendung fehlgeschlagen',
     'apply_recovered': 'Anwendung wiederhergestellt',
@@ -246,6 +353,10 @@
     'Folder registered; scanning has started.': 'Ordner registriert; der Scan wurde gestartet.',
     'Confirm reuse of the existing deleted/unsure folders before applying.':
       'Bestätige vor dem Anwenden die Wiederverwendung der vorhandenen Ordner „deleted“/„unsure“.',
+    'Confirm reuse of the existing category folders before applying.':
+      'Bestätige vor dem Anwenden die Wiederverwendung der vorhandenen Kategorieordner.',
+    'Apply plan is outdated because a category changed; create a new summary.':
+      'Der Anwendungsplan ist veraltet, weil eine Kategorie geändert wurde. Erstelle eine neue Zusammenfassung.',
     'Apply these moves': 'Diese Dateien verschieben',
     'Review file moves': 'Dateiverschiebungen prüfen',
     'Archive this collection? Its decisions and indexed history will be kept. Its folders can then be registered by another active collection.':
@@ -359,6 +470,64 @@
         (_, category) => `Entscheidung wiederholt: ${translate(category)}.`)
       .replace(/Saved (keep|delete|unsure|unseen) decision\./,
         (_, category) => `Entscheidung „${translate(category)}“ gespeichert.`)
+      .replace(/^Saved (.*) decision\.$/,
+        (_, category) => `Entscheidung „${category}“ gespeichert.`)
+      .replace(/^Created category (.*)\.$/,
+        (_, category) => `Kategorie „${category}“ erstellt.`)
+      .replace(/^Renamed category to (.*)\.$/,
+        (_, category) => `Kategorie in „${category}“ umbenannt.`)
+      .replace(/^Deleted category (.*)\.$/,
+        (_, category) => `Kategorie „${category}“ gelöscht.`)
+      .replace(/^This will reassign (\d+) photo\(s\) before deleting (.*)\. This action cannot be undone\.$/,
+        (_, count, category) =>
+          `Vor dem Löschen von „${category}“ werden ${count} Foto(s) neu zugeordnet. Diese Aktion kann nicht rückgängig gemacht werden.`)
+      .replace(/^Delete (.*)\? This action cannot be undone\.$/,
+        (_, category) => `Kategorie „${category}“ löschen? Diese Aktion kann nicht rückgängig gemacht werden.`)
+      .replace(/^(.*) · (\d+) photo\(s\)$/,
+        (_, category, count) => `${category} · ${count} Foto(s)`)
+      .replace(/^Analysis paused · (\d+) of (\d+) items analyzed\.$/,
+        (_, processed, total) => `Analyse pausiert · ${processed} von ${total} Elementen analysiert.`)
+      .replace(/^Analysis complete · (\d+) items checked · (\d+) blur finding\(s\)\.$/,
+        (_, total, blurry) => `Analyse abgeschlossen · ${total} Elemente geprüft · ${blurry} unscharfe Fotos gefunden.`)
+      .replace(/^Analysis running · (\d+) of (\d+) items analyzed · (\d+) pending\.$/,
+        (_, processed, total, pending) =>
+          `Analyse läuft · ${processed} von ${total} Elementen analysiert · ${pending} ausstehend.`)
+      .replace(/^Analysis failed — (.*)$/,
+        (_, message) => `Analyse fehlgeschlagen — ${message}`)
+      .replace(/: This recognized file format could not be analyzed/,
+        ': Dieses erkannte Dateiformat konnte nicht analysiert werden')
+      .replace(/: Analysis failed/,
+        ': Analyse fehlgeschlagen')
+      .replace(/^Duplicate group · (\d+) photos$/,
+        (_, count) => `Duplikatgruppe · ${count} Fotos`)
+      .replace(/^Exact file match · Exact match$/,
+        'Exakte Dateiübereinstimmung · Exakte Übereinstimmung')
+      .replace(/^Very similar image framing and content · Similarity strength (\d+)%$/,
+        (_, strength) => `Sehr ähnlicher Bildausschnitt und Bildinhalt · Ähnlichkeit: ${strength}%`)
+      .replace(/ · Low edge sharpness \(score ([^)]+)\)$/,
+        (_, score) => ` · Geringe Kantenschärfe (Wert ${score})`)
+      .replace(/^Current decision: (keep|delete|unsure|unseen)$/,
+        (_, category) => `Aktuelle Entscheidung: ${translate(category)}`)
+      .replace(/^(\d+) finding\(s\) · (\d+) unsupported · (\d+) analysis failure\(s\)$/,
+        (_, findings, unsupported, failed) =>
+          `${findings} Ergebnisse · ${unsupported} nicht unterstützte Dateien · ${failed} Analysefehler`)
+      .replace(/^(\d+) of (\d+)$/,
+        (_, current, total) => `${current} von ${total}`)
+      .replace(/^Showing (\d+)–(\d+) of (\d+)$/,
+        (_, start, end, total) => `${start}–${end} von ${total} werden angezeigt`)
+      .replace(/^Keep (\d+) selected photo\(s\) and stage (\d+) other group member\(s\) as Deleted\?$/,
+        (_, kept, staged) => {
+          const keptPhotos = kept === '1' ? '1 ausgewähltes Foto' : `${kept} ausgewählte Fotos`;
+          const stagedPhotos = staged === '1' ? '1 weiteres Foto' : `${staged} weitere Fotos`;
+          return `${keptPhotos} behalten und ${stagedPhotos} der Gruppe als gelöscht vormerken?`;
+        })
+      .replace(/^Saved (keep|delete|unsure|unseen) decision\. No files were moved\.$/,
+        (_, category) => `Entscheidung „${translate(category)}“ gespeichert. Es wurden keine Dateien verschoben.`)
+      .replace(/^Saved duplicate decisions: (\d+) kept and (\d+) staged as Deleted\. No files were moved\.$/,
+        (_, kept, deleted) =>
+          `Duplikatentscheidungen gespeichert: ${kept} behalten und ${deleted} als gelöscht vorgemerkt. Es wurden keine Dateien verschoben.`)
+      .replace(/^Photo Health analysis enabled for this collection\.$/,
+        'Fotoanalyse für diese Sammlung aktiviert.')
       .replace(/(\d+) root\(s\) are currently offline\./,
         (_, count) => `${count} Ordner sind derzeit offline.`)
       .replace(/Unable to start installation: (.*)/,

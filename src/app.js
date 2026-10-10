@@ -29,6 +29,9 @@ const VIDEO_EXTENSIONS = new Set([
 const CATEGORIES = new Set(['keep', 'delete', 'unsure', 'unseen']);
 const REVIEW_CATEGORIES = new Set([...CATEGORIES, 'all', 'review']);
 const OUTPUT_MARKER = '.photo-sorter-output';
+const RESERVED_CATEGORY_NAMES = new Set([
+  'all', 'delete', 'deleted', 'keep', 'review', 'unseen', 'unsure',
+]);
 const SORT_ORDERS = new Set(['capture-asc', 'capture-desc', 'filename', 'date-asc', 'date-desc']);
 const MAX_STORED_SCAN_ERRORS = 500;
 const RECURSIVE_WATCH_UNSUPPORTED = new Set([
@@ -48,9 +51,20 @@ function normalizeCaptureDate(metadata) {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
-function isOutputRelativePath(relativePath) {
-  const normalized = relativePath.split(path.sep).join('/');
-  return normalized.startsWith('deleted/') || normalized.startsWith('unsure/');
+function normalizeCategoryName(value) {
+  if (typeof value !== 'string') throw new Error('Category name must be text.');
+  const name = value.trim().normalize('NFC');
+  const windowsReserved = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
+  if (!name || name.length > 80 || /[<>:"/\\|?*\[\]\u0000-\u001f]/.test(name)
+    || /[. ]$/.test(name) || name === '.' || name === '..'
+    || windowsReserved.test(name) || RESERVED_CATEGORY_NAMES.has(name.toLowerCase())) {
+    throw new Error('Choose a unique category name that is also a safe folder name.');
+  }
+  return name;
+}
+
+function categoryNameKey(name) {
+  return name.toLowerCase();
 }
 
 async function readCaptureDate(filename) {
@@ -371,6 +385,24 @@ function migrateDatabase(db) {
       apply: () => db.exec(`
         UPDATE photo_health_items SET status = 'pending'
         WHERE kind = 'image' AND status = 'analyzed';
+      `),
+    },
+    {
+      version: 6,
+      apply: () => db.exec(`
+        CREATE TABLE IF NOT EXISTS custom_categories (
+          id TEXT PRIMARY KEY,
+          collection_id TEXT NOT NULL REFERENCES collections(id),
+          name TEXT NOT NULL,
+          name_key TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(collection_id, name_key)
+        );
+        CREATE TABLE IF NOT EXISTS managed_output_folders (
+          root_id TEXT NOT NULL REFERENCES roots(id),
+          name TEXT NOT NULL,
+          PRIMARY KEY(root_id, name COLLATE NOCASE)
+        );
       `),
     },
   ];
@@ -843,6 +875,143 @@ class PhotoSorter {
     return this.db.prepare(`
       SELECT id, name, created_at FROM collections WHERE active = 0 ORDER BY created_at
     `).all();
+  }
+
+  listCategories(collectionId) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    return this.db.prepare(`
+      SELECT cc.id, cc.name, cc.created_at, COALESCE(counts.assigned_count, 0) AS assignedCount
+      FROM custom_categories cc
+      LEFT JOIN (
+        SELECT m.category, COUNT(*) AS assigned_count
+        FROM media m JOIN roots r ON r.id = m.root_id
+        WHERE r.collection_id = ? AND m.category IS NOT NULL
+        GROUP BY m.category
+      ) counts ON counts.category = cc.id
+      WHERE cc.collection_id = ?
+      ORDER BY assignedCount DESC, cc.name COLLATE NOCASE ASC
+    `).all(collectionId, collectionId);
+  }
+
+  getCustomCategory(collectionId, categoryId) {
+    return this.db.prepare(`
+      SELECT id, collection_id, name, created_at
+      FROM custom_categories WHERE id = ? AND collection_id = ?
+    `).get(categoryId, collectionId) || null;
+  }
+
+  isValidDecisionCategory(collectionId, category) {
+    return CATEGORIES.has(category) || Boolean(this.getCustomCategory(collectionId, category));
+  }
+
+  getOutputFolderName(collectionId, category) {
+    if (category === 'delete') return 'deleted';
+    if (category === 'unsure') return 'unsure';
+    return this.getCustomCategory(collectionId, category)?.name || null;
+  }
+
+  getCategoryDisplayName(collectionId, category) {
+    const normalized = category || 'unseen';
+    const labels = { delete: 'Delete', keep: 'Keep', unseen: 'Unseen', unsure: 'Unsure' };
+    return labels[normalized] || this.getCustomCategory(collectionId, normalized)?.name || normalized;
+  }
+
+  createCategory(collectionId, value) {
+    if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
+      throw new Error('Collection not found.');
+    }
+    const name = normalizeCategoryName(value);
+    if (this.db.prepare(`
+      SELECT 1 FROM custom_categories WHERE collection_id = ? AND name_key = ?
+    `).get(collectionId, categoryNameKey(name))) {
+      throw new Error('A category with that name already exists in this collection.');
+    }
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO custom_categories(id, collection_id, name, name_key, created_at) VALUES (?, ?, ?, ?, ?)
+    `).run(id, collectionId, name, categoryNameKey(name), createdAt);
+    this.log('category_created', { collectionId, categoryId: id, name });
+    return { id, name, created_at: createdAt, assignedCount: 0 };
+  }
+
+  renameCategory(categoryId, value) {
+    const category = this.db.prepare(`
+      SELECT cc.id, cc.collection_id AS collectionId, cc.name
+      FROM custom_categories cc JOIN collections c ON c.id = cc.collection_id
+      WHERE cc.id = ? AND c.active = 1
+    `).get(categoryId);
+    if (!category) throw new Error('Category not found.');
+    const name = normalizeCategoryName(value);
+    if (this.db.prepare(`
+      SELECT 1 FROM custom_categories WHERE collection_id = ? AND name_key = ? AND id != ?
+    `).get(category.collectionId, categoryNameKey(name), categoryId)) {
+      throw new Error('A category with that name already exists in this collection.');
+    }
+    this.db.prepare('UPDATE custom_categories SET name = ?, name_key = ? WHERE id = ?')
+      .run(name, categoryNameKey(name), categoryId);
+    this.log('category_renamed', {
+      collectionId: category.collectionId, categoryId, previousName: category.name, name,
+    });
+    return { id: categoryId, name };
+  }
+
+  deleteCategory(categoryId, replacementCategory, confirmed, deviceId = '') {
+    const category = this.db.prepare(`
+      SELECT cc.id, cc.collection_id AS collectionId, cc.name
+      FROM custom_categories cc JOIN collections c ON c.id = cc.collection_id
+      WHERE cc.id = ? AND c.active = 1
+    `).get(categoryId);
+    if (!category) throw new Error('Category not found.');
+    if (confirmed !== true) throw new Error('Deleting a category requires explicit confirmation.');
+    const assignedCount = this.db.prepare('SELECT COUNT(*) AS count FROM media WHERE category = ?')
+      .get(categoryId).count;
+    if (assignedCount && (typeof replacementCategory !== 'string'
+      || replacementCategory === categoryId
+      || !this.isValidDecisionCategory(category.collectionId, replacementCategory))) {
+      throw new Error('Choose a different category or Unseen for the assigned photos.');
+    }
+    const conflictingLock = this.db.prepare(`
+      SELECT 1 FROM media_locks l JOIN media m ON m.id = l.media_id
+      WHERE m.category = ? AND l.device_id != ? AND l.expires_at > ? LIMIT 1
+    `).get(categoryId, deviceId, Date.now());
+    if (conflictingLock) {
+      throw Object.assign(new Error('A photo in this category is being reviewed on another device. Try again after that review finishes.'), { status: 409 });
+    }
+    const replacement = assignedCount ? replacementCategory : 'unseen';
+    const next = replacement === 'unseen' ? null : replacement;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (assignedCount) {
+        this.db.prepare(`
+          UPDATE media SET category = ?,
+            unsure_reviewed_at = CASE WHEN ? = 'unsure'
+              THEN MAX(?, COALESCE((SELECT MAX(unsure_reviewed_at) FROM media WHERE category = 'unsure'), 0) + 1)
+              ELSE unsure_reviewed_at END
+          WHERE category = ?
+        `).run(next, replacement, Date.now(), categoryId);
+      }
+      this.db.prepare(`
+        DELETE FROM decision_history WHERE previous_category = ? OR next_category = ?
+      `).run(categoryId, categoryId);
+      this.db.prepare('DELETE FROM custom_categories WHERE id = ?').run(categoryId);
+      this.log('category_deleted', {
+        collectionId: category.collectionId,
+        categoryId,
+        name: category.name,
+        reassignedCount: assignedCount,
+        replacementCategory: replacement,
+        replacementCategoryName: this.getCategoryDisplayName(category.collectionId, replacement),
+      });
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    this.publishQueueChange(category.collectionId);
+    return { deleted: true, reassignedCount: assignedCount, replacementCategory: replacement };
   }
 
   getLastCollection(deviceId) {
@@ -1626,6 +1795,13 @@ class PhotoSorter {
       base = await this.scanFs.realpath(root.path);
       if (!comparePaths(base, root.path)) throw new Error('Registered root no longer resolves to its original directory.');
       const directories = [base];
+      const outputDirectoryKey = (name) => process.platform === 'win32' ? name.toLowerCase() : name;
+      const outputDirectories = new Set([
+        'deleted',
+        'unsure',
+        ...this.db.prepare('SELECT name FROM managed_output_folders WHERE root_id = ?')
+          .all(rootId).map((entry) => entry.name),
+      ].map(outputDirectoryKey));
       const upsert = this.db.prepare(`
         INSERT INTO media(id, root_id, relative_path, size, modified_at, category, capture_at, present, last_seen_scan, kind)
         VALUES (?, ?, ?, ?, ?, NULL, ?, 1, ?, ?)
@@ -1703,7 +1879,7 @@ class PhotoSorter {
           }
           if (entry.isSymbolicLink()) continue;
           const fullPath = path.join(directory, entry.name);
-          if (directory === base && (entry.name === 'deleted' || entry.name === 'unsure')) continue;
+          if (directory === base && outputDirectories.has(outputDirectoryKey(entry.name))) continue;
           if (entry.isDirectory()) {
             directories.push(fullPath);
             continue;
@@ -1739,6 +1915,13 @@ class PhotoSorter {
             WHEN last_seen_scan = ?
               OR relative_path GLOB 'deleted/*' OR relative_path GLOB 'deleted\\*'
               OR relative_path GLOB 'unsure/*' OR relative_path GLOB 'unsure\\*'
+              OR EXISTS (
+                SELECT 1 FROM managed_output_folders f
+                WHERE f.root_id = media.root_id AND (
+                  replace(media.relative_path, char(92), '/') = f.name
+                  OR substr(replace(media.relative_path, char(92), '/'), 1, length(f.name) + 1) = f.name || '/'
+                )
+              )
             THEN 1 ELSE 0 END
           WHERE root_id = ?
         `).run(scanId, rootId);
@@ -1787,6 +1970,9 @@ class PhotoSorter {
     kind = '',
     rootId = '',
   }) {
+    if (!REVIEW_CATEGORIES.has(category) && !this.getCustomCategory(collectionId, category)) {
+      throw new Error('Invalid category.');
+    }
     const filters = ['r.collection_id = ?', 'r.active = 1', 'c.active = 1', 'm.present = 1'];
     const values = [collectionId];
     if (typeof search !== 'string' || search.length > 160) throw new Error('Invalid search query.');
@@ -1838,6 +2024,9 @@ class PhotoSorter {
     else if (CATEGORIES.has(category)) {
       filters.push('m.category = ?');
       values.push(category === 'unseen' ? null : category);
+    } else if (!['all', 'review'].includes(category)) {
+      filters.push('m.category = ?');
+      values.push(category);
     }
     const orderBy = {
       'capture-asc': 'COALESCE(julianday(m.capture_at), m.modified_at / 86400000.0 + 2440587.5) ASC, m.modified_at ASC, m.relative_path COLLATE NOCASE ASC',
@@ -1851,9 +2040,14 @@ class PhotoSorter {
       ? "CASE WHEN m.category IS NULL THEN 0 ELSE 1 END ASC, m.unsure_reviewed_at ASC, "
       : '';
     const items = this.db.prepare(`
-      SELECT m.id, m.relative_path, m.size, m.modified_at, m.capture_at, m.category, m.kind,
+      SELECT m.id, m.relative_path, m.size, m.modified_at, m.capture_at, m.category,
+        COALESCE(cc.name, CASE m.category
+        WHEN 'keep' THEN 'keep' WHEN 'delete' THEN 'delete' WHEN 'unsure' THEN 'unsure'
+          ELSE NULL END) AS categoryName,
+        m.kind,
         r.online, r.read_only
       FROM media m JOIN roots r ON r.id = m.root_id JOIN collections c ON c.id = r.collection_id
+        LEFT JOIN custom_categories cc ON cc.id = m.category AND cc.collection_id = r.collection_id
       WHERE ${filters.join(' AND ')}
       ORDER BY ${reviewOrder}${orderBy}
       LIMIT ? OFFSET ?
@@ -1877,15 +2071,22 @@ class PhotoSorter {
   }
 
   setDecision(mediaId, category) {
-    if (!CATEGORIES.has(category)) throw new Error('Invalid category.');
     const item = this.db.prepare(`
       SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id
       JOIN collections c ON c.id = r.collection_id
       WHERE m.id = ? AND r.active = 1 AND c.active = 1 AND m.present = 1
     `).get(mediaId);
     if (!item) throw new Error('Media item not found.');
+    if (!this.isValidDecisionCategory(item.collection_id, category)) throw new Error('Invalid category.');
     this.setMediaCategory(mediaId, category);
-    this.log('decision_changed', { mediaId, previous: item.category, category, collectionId: item.collection_id });
+    this.log('decision_changed', {
+      mediaId,
+      previous: item.category,
+      previousCategoryName: this.getCategoryDisplayName(item.collection_id, item.category),
+      category,
+      categoryName: this.getCategoryDisplayName(item.collection_id, category),
+      collectionId: item.collection_id,
+    });
   }
 
   getDeviceState(deviceId, collectionId) {
@@ -1908,7 +2109,7 @@ class PhotoSorter {
     const sort = state.sort === 'date-asc' ? 'capture-asc'
       : state.sort === 'date-desc' ? 'capture-desc' : state.sort;
     const offset = state.offset;
-    if (!REVIEW_CATEGORIES.has(category)
+    if ((!REVIEW_CATEGORIES.has(category) && !this.getCustomCategory(collectionId, category))
       || !SORT_ORDERS.has(sort)
       || !Number.isSafeInteger(offset) || offset < 0 || offset > 2_000_000) {
       throw new Error('Invalid review position.');
@@ -1961,13 +2162,13 @@ class PhotoSorter {
     if (!lock || lock.device_id !== deviceId || lock.expires_at <= Date.now()) {
       throw Object.assign(new Error('The review lock expired or belongs to another device. Reopen this item to continue.'), { status: 409 });
     }
-    if (!CATEGORIES.has(category)) throw new Error('Invalid category.');
     const item = this.db.prepare(`
       SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id
       JOIN collections c ON c.id = r.collection_id
       WHERE m.id = ? AND r.active = 1 AND c.active = 1 AND m.present = 1
     `).get(mediaId);
     if (!item) throw new Error('Media item not found.');
+    if (!this.isValidDecisionCategory(item.collection_id, category)) throw new Error('Invalid category.');
     const next = category === 'unseen' ? null : category;
     if (item.category === next) {
       if (category === 'unsure') {
@@ -1982,36 +2183,45 @@ class PhotoSorter {
     `).run(mediaId, deviceId, item.category, next, new Date().toISOString());
     this.db.prepare('DELETE FROM decision_history WHERE device_id = ? AND undone = 1').run(deviceId);
     this.setMediaCategory(mediaId, category);
-    this.log('decision_changed', { mediaId, previous: item.category, category: next, collectionId: item.collection_id });
+    this.log('decision_changed', {
+      mediaId,
+      previous: item.category,
+      previousCategoryName: this.getCategoryDisplayName(item.collection_id, item.category),
+      category: next,
+      categoryName: this.getCategoryDisplayName(item.collection_id, next),
+      collectionId: item.collection_id,
+    });
     this.publishQueueChange(item.collection_id);
   }
 
   async changeDecisionHistory(deviceId, direction) {
     const undone = direction === 'redo' ? 1 : 0;
+    const order = direction === 'redo' ? 'ASC' : 'DESC';
     const entry = this.db.prepare(`
       SELECT h.* FROM decision_history h
       WHERE h.device_id = ? AND h.undone = ?
-      ORDER BY h.id DESC LIMIT 1
+      ORDER BY h.id ${order} LIMIT 1
     `).get(deviceId, undone);
     if (!entry) return { changed: false, message: `There is no decision to ${direction}.` };
     this.claimMediaLock(entry.media_id, deviceId);
     const item = this.db.prepare(`
       SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id WHERE m.id = ?
     `).get(entry.media_id);
-    const expected = direction === 'undo' ? entry.next_category : null;
+    const expected = direction === 'undo' ? entry.next_category : entry.previous_category;
     if (!item || item.category !== expected) {
       throw Object.assign(new Error('This decision changed on another device; history was not altered.'), { status: 409 });
     }
-    const category = direction === 'undo' ? null : entry.next_category;
+    const category = direction === 'undo' ? entry.previous_category : entry.next_category;
     this.setMediaCategory(entry.media_id, category || 'unseen');
     if (direction === 'undo') {
-      this.db.prepare('UPDATE decision_history SET undone = 1 WHERE media_id = ? AND device_id = ?')
-        .run(entry.media_id, deviceId);
+      this.db.prepare('UPDATE decision_history SET undone = 1 WHERE id = ?').run(entry.id);
     } else {
       this.db.prepare('UPDATE decision_history SET undone = 0 WHERE id = ?').run(entry.id);
     }
     this.log(direction === 'undo' ? 'decision_undone' : 'decision_redone', {
-      mediaId: entry.media_id, category,
+      mediaId: entry.media_id,
+      category,
+      categoryName: this.getCategoryDisplayName(item.collection_id, category),
     });
     this.publishQueueChange(item.collection_id);
     return { changed: true, mediaId: entry.media_id, category: category || 'unseen' };
@@ -2058,15 +2268,13 @@ class PhotoSorter {
           ORDER BY o.id DESC LIMIT 1) AS latest_from,
         (SELECT o.to_path FROM apply_operations o
           WHERE o.media_id = m.id AND o.operation_type = 'move' AND o.status = 'completed'
-          ORDER BY o.id DESC LIMIT 1) AS latest_to,
-        (SELECT o.category FROM apply_operations o
-          WHERE o.media_id = m.id AND o.operation_type = 'move' AND o.status = 'completed'
-          ORDER BY o.id DESC LIMIT 1) AS latest_category
+          ORDER BY o.id DESC LIMIT 1) AS latest_to
       FROM media m JOIN roots r ON r.id = m.root_id
+      LEFT JOIN custom_categories cc ON cc.id = m.category AND cc.collection_id = r.collection_id
       WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1
-        AND (m.category IN ('delete', 'unsure')
-          OR m.relative_path GLOB 'deleted/*' OR m.relative_path GLOB 'deleted\\*'
-          OR m.relative_path GLOB 'unsure/*' OR m.relative_path GLOB 'unsure\\*')
+        AND (m.category IN ('delete', 'unsure') OR cc.id IS NOT NULL
+          OR EXISTS (SELECT 1 FROM apply_operations o
+            WHERE o.media_id = m.id AND o.operation_type = 'move' AND o.status = 'completed'))
       ORDER BY m.relative_path
     `).all(collectionId);
     const operations = [];
@@ -2078,60 +2286,56 @@ class PhotoSorter {
         readOnlySkipped += 1;
         continue;
       }
-      const isInOutput = isOutputRelativePath(item.relative_path);
-      const wasApplied = isInOutput && item.latest_to && comparePaths(source, item.latest_to);
+      const wasApplied = item.latest_to && comparePaths(source, item.latest_to);
       let type;
       let targetCategory;
       let relativePath;
       let destination;
+      let categoryFolder;
       if (wasApplied) {
-        if (item.category === item.latest_category) continue;
-        if (item.category === 'delete' || item.category === 'unsure') {
+        const original = this.db.prepare(`
+          SELECT from_path FROM apply_operations
+          WHERE media_id = ? AND root_id = ? AND operation_type = 'move'
+            AND status IN ('completed', 'restored')
+          ORDER BY id ASC LIMIT 1
+        `).get(item.id, item.root_id)?.from_path || item.latest_from;
+        if (!original || !isWithin(item.path, original)) {
+          throw new Error(`Could not determine the original path for ${item.relative_path}.`);
+        }
+        relativePath = path.relative(item.path, original);
+        categoryFolder = this.getOutputFolderName(collectionId, item.category);
+        if (categoryFolder) {
           type = 'recategorize';
           targetCategory = item.category;
-          const completedOperations = this.db.prepare(`
-            SELECT from_path FROM apply_operations
-            WHERE media_id = ? AND operation_type = 'move' AND status IN ('completed', 'restored') ORDER BY id
-          `).all(item.id);
-          const original = completedOperations.find((entry) => isWithin(item.path, entry.from_path)
-            && !isWithin(path.join(item.path, 'deleted'), entry.from_path)
-            && !isWithin(path.join(item.path, 'unsure'), entry.from_path));
-          relativePath = original ? path.relative(item.path, original.from_path)
-            : path.relative(path.join(item.path, item.latest_category), item.latest_from);
-          destination = path.join(item.path, targetCategory === 'delete' ? 'deleted' : 'unsure', relativePath);
+          destination = path.join(item.path, categoryFolder, relativePath);
         } else {
           type = 'restore';
           targetCategory = item.category || 'unseen';
-          const completedOperations = this.db.prepare(`
-            SELECT from_path FROM apply_operations
-            WHERE media_id = ? AND operation_type = 'move' AND status IN ('completed', 'restored') ORDER BY id
-          `).all(item.id);
-          const original = completedOperations.find((entry) => isWithin(item.path, entry.from_path)
-            && !isWithin(path.join(item.path, 'deleted'), entry.from_path)
-            && !isWithin(path.join(item.path, 'unsure'), entry.from_path));
-          destination = original?.from_path || path.resolve(item.path, item.latest_from);
-          relativePath = path.relative(item.path, destination);
+          categoryFolder = null;
+          destination = original;
         }
       } else {
-        if (isInOutput) continue;
-        if (item.category !== 'delete' && item.category !== 'unsure') continue;
+        categoryFolder = this.getOutputFolderName(collectionId, item.category);
+        if (!categoryFolder) continue;
         type = 'move';
         targetCategory = item.category;
         relativePath = item.relative_path;
-        destination = path.join(item.path, targetCategory === 'delete' ? 'deleted' : 'unsure', relativePath);
+        destination = path.join(item.path, categoryFolder, relativePath);
       }
       if (!isWithin(item.path, destination) || comparePaths(source, destination)) continue;
-      const targetIsOutput = targetCategory === 'delete' || targetCategory === 'unsure';
-      const categoryDirectory = targetIsOutput
-        ? path.join(item.path, targetCategory === 'delete' ? 'deleted' : 'unsure') : null;
-      let existingOutput = false;
-      if (categoryDirectory) existingOutput = await pathExists(categoryDirectory);
+      const categoryDirectory = categoryFolder ? path.join(item.path, categoryFolder) : null;
+      const existingOutput = categoryDirectory ? await pathExists(categoryDirectory) : false;
       let owned = false;
       if (existingOutput && categoryDirectory) {
         try {
           const marker = await fs.readFile(path.join(categoryDirectory, OUTPUT_MARKER), 'utf8');
+          if (marker !== 'photo-sorter-output-v1\n') {
+            throw new Error('Output folder marker is invalid.');
+          }
           owned = marker === 'photo-sorter-output-v1\n';
-        } catch {}
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
       }
       operations.push({
         type,
@@ -2140,6 +2344,8 @@ class PhotoSorter {
         root: item.path,
         relativePath,
         category: targetCategory,
+        targetCategory,
+        categoryFolder,
         source,
         destination,
         needsReuseConfirmation: Boolean(categoryDirectory && existingOutput && !owned),
@@ -2166,7 +2372,17 @@ class PhotoSorter {
     if (!plan || Date.now() - plan.createdAt > 10 * 60 * 1000) throw new Error('Apply plan expired; create a new summary.');
     if (confirm !== true) throw new Error('Apply requires explicit confirmation.');
     if (plan.operations.some((item) => item.needsReuseConfirmation) && reuseOutputFolders !== true) {
-      throw new Error('Confirm reuse of the existing deleted/unsure folders before applying.');
+      throw new Error('Confirm reuse of the existing category folders before applying.');
+    }
+    for (const operation of plan.operations) {
+      const current = this.db.prepare('SELECT category FROM media WHERE id = ?').get(operation.mediaId);
+      if (!current || (current.category || 'unseen') !== operation.targetCategory) {
+        throw new Error('Apply plan is outdated because a decision changed; create a new summary.');
+      }
+      if (operation.categoryFolder
+        && this.getOutputFolderName(plan.collectionId, operation.category) !== operation.categoryFolder) {
+        throw new Error('Apply plan is outdated because a category changed; create a new summary.');
+      }
     }
     const batchId = crypto.randomUUID();
     this.db.prepare('INSERT INTO apply_batches(id, created_at) VALUES (?, ?)').run(batchId, new Date().toISOString());
@@ -2188,9 +2404,8 @@ class PhotoSorter {
         }
         const stat = await fs.lstat(operation.source);
         if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Source is not a regular file.');
-        const targetIsOutput = operation.category === 'delete' || operation.category === 'unsure';
-        if (targetIsOutput) {
-          const output = path.join(operation.root, operation.category === 'delete' ? 'deleted' : 'unsure');
+        if (operation.categoryFolder) {
+          const output = path.join(operation.root, operation.categoryFolder);
           const outputExisted = await pathExists(output);
           await fs.mkdir(output, { recursive: true });
           const outputStat = await fs.lstat(output);
@@ -2210,6 +2425,11 @@ class PhotoSorter {
           }
           if (!outputOwned) {
             await fs.writeFile(markerPath, 'photo-sorter-output-v1\n', { flag: 'wx', mode: 0o600 });
+          }
+          if (!['deleted', 'unsure'].includes(operation.categoryFolder)) {
+            this.db.prepare(`
+              INSERT OR IGNORE INTO managed_output_folders(root_id, name) VALUES (?, ?)
+            `).run(operation.rootId, operation.categoryFolder);
           }
         }
         const parent = path.dirname(operation.destination);
@@ -2617,6 +2837,27 @@ class PhotoSorter {
           ? this.archiveCollection(collectionId) : this.restoreCollection(collectionId);
         return this.sendJson(response, 200, result);
       }
+      const collectionCategories = url.pathname.match(/^\/api\/collections\/([0-9a-f-]+)\/categories$/i);
+      if (request.method === 'GET' && collectionCategories) {
+        return this.sendJson(response, 200, { categories: this.listCategories(collectionCategories[1]) });
+      }
+      if (request.method === 'POST' && collectionCategories) {
+        const { name } = await this.readJson(request);
+        return this.sendJson(response, 201, {
+          category: this.createCategory(collectionCategories[1], name),
+        });
+      }
+      const categoryAction = url.pathname.match(/^\/api\/categories\/([0-9a-f-]+)$/i);
+      if (request.method === 'PUT' && categoryAction) {
+        const { name } = await this.readJson(request);
+        return this.sendJson(response, 200, { category: this.renameCategory(categoryAction[1], name) });
+      }
+      if (request.method === 'DELETE' && categoryAction) {
+        const { replacementCategory, confirm } = await this.readJson(request);
+        return this.sendJson(response, 200, this.deleteCategory(
+          categoryAction[1], replacementCategory, confirm, session.deviceId,
+        ));
+      }
       const collectionRoots = url.pathname.match(/^\/api\/collections\/([0-9a-f-]+)\/roots$/i);
       if (request.method === 'GET' && collectionRoots) {
         return this.sendJson(response, 200, { roots: this.listRoots(collectionRoots[1]) });
@@ -2687,7 +2928,6 @@ class PhotoSorter {
         const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
         const category = url.searchParams.get('category') || 'unseen';
         const sort = url.searchParams.get('sort') || 'capture-asc';
-        if (!REVIEW_CATEGORIES.has(category)) throw new Error('Invalid category.');
         const result = this.listMedia({
           collectionId: url.searchParams.get('collectionId'),
           category,

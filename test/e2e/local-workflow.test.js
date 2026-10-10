@@ -286,6 +286,40 @@ test('a symlinked output directory cannot redirect an apply outside its register
   assert.equal(await fs.readFile(path.join(externalOutput, 'keep-safe.jpg'), 'utf8'), 'outside-original');
 });
 
+test('a custom-category folder symlink cannot redirect a move outside its registered root', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-custom-symlink-'));
+  const root = path.join(temporary, 'photos');
+  const externalOutput = path.join(temporary, 'external-output');
+  await fs.mkdir(root);
+  await fs.mkdir(externalOutput);
+  const source = path.join(root, 'photo.jpg');
+  await fs.writeFile(source, 'original');
+  await fs.writeFile(path.join(externalOutput, 'sentinel.txt'), 'outside-original');
+  try {
+    await fs.symlink(externalOutput, path.join(root, 'Trips'), 'dir');
+  } catch {
+    await fs.rm(temporary, { recursive: true, force: true });
+    return t.skip('Directory symlinks are unavailable.');
+  }
+  const app = await new PhotoSorter({ dataDirectory: path.join(temporary, 'data') }).initialize();
+  t.after(async () => {
+    await app.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+  const collectionId = app.createCollection('Custom symlink safety');
+  await app.addRoot(collectionId, root);
+  const item = app.listMedia({ collectionId, category: 'unseen' }).items[0];
+  const category = app.createCategory(collectionId, 'Trips');
+  app.setDecision(item.id, category.id);
+  const plan = await app.planApply(collectionId);
+  const result = await app.confirmApply(plan.id, { confirm: true, reuseOutputFolders: true });
+  assert.equal(result.stoppedOnFailure, true);
+  assert.equal(result.results[0].status, 'failed');
+  assert.match(result.results[0].error, /real directory/);
+  assert.equal(await fs.readFile(source, 'utf8'), 'original');
+  assert.equal(await fs.readFile(path.join(externalOutput, 'sentinel.txt'), 'utf8'), 'outside-original');
+});
+
 test('replacing a registered root with a symlink cannot expose its new target', async (t) => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-root-symlink-'));
   const dataDirectory = path.join(temporary, 'data');
@@ -706,6 +740,141 @@ test('an unlink error reported after the source was removed never deletes the fi
   assert.equal(await fs.access(source).then(() => true, () => false), false);
   assert.equal(await fs.readFile(destination, 'utf8'), 'must-survive');
   assert.equal(app.db.prepare('SELECT status FROM apply_operations').get().status, 'completed');
+});
+
+test('custom-category Apply preserves existing files, scans output folders safely, and restores renamed decisions', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-custom-category-'));
+  const root = path.join(temporary, 'photos');
+  await fs.mkdir(path.join(root, 'trip'), { recursive: true });
+  await fs.mkdir(path.join(root, 'Trips', 'trip'), { recursive: true });
+  await fs.writeFile(path.join(root, 'trip', 'photo.jpg'), 'original-photo');
+  await fs.writeFile(path.join(root, 'Trips', 'trip', 'photo.jpg'), 'pre-existing-photo');
+  const app = await new PhotoSorter({ dataDirectory: path.join(temporary, 'data') }).initialize();
+  t.after(async () => {
+    await app.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+  const collectionId = app.createCollection('Custom categories');
+  const rootId = await app.addRoot(collectionId, root);
+  app.closeRootWatcher(rootId);
+  const item = app.listMedia({ collectionId, category: 'unseen', sort: 'filename' })
+    .items.find((entry) => entry.relative_path === path.join('trip', 'photo.jpg'));
+  const category = app.createCategory(collectionId, 'Trips');
+  app.setDecision(item.id, category.id);
+
+  const initialPlan = await app.planApply(collectionId);
+  assert.equal(initialPlan.moveCount, 1);
+  assert.equal(initialPlan.requiresOutputFolderConsent, true);
+  await assert.rejects(app.confirmApply(initialPlan.id, { confirm: true }), /Confirm reuse/);
+  const confirmedPlan = await app.planApply(collectionId);
+  const applied = await app.confirmApply(confirmedPlan.id, { confirm: true, reuseOutputFolders: true });
+  assert.equal(applied.results[0].status, 'moved');
+  assert.equal(await fs.readFile(path.join(root, 'Trips', 'trip', 'photo.jpg'), 'utf8'), 'pre-existing-photo');
+  const categorizedFile = path.join(root, 'Trips', 'trip', 'photo (1).jpg');
+  assert.equal(await fs.readFile(categorizedFile, 'utf8'), 'original-photo');
+  assert.equal(app.db.prepare('SELECT COUNT(*) AS count FROM managed_output_folders WHERE root_id = ?')
+    .get(rootId).count, 1);
+
+  await app.performScanRoot(rootId);
+  assert.equal(app.listMedia({ collectionId, category: category.id }).total, 1);
+  app.renameCategory(category.id, 'Journeys');
+  const renamePlan = await app.planApply(collectionId);
+  assert.equal(renamePlan.recategorizeCount, 1);
+  const renamed = await app.confirmApply(renamePlan.id, { confirm: true });
+  assert.equal(renamed.results[0].status, 'recategorized');
+  const renamedFile = path.join(root, 'Journeys', 'trip', 'photo.jpg');
+  assert.equal(await fs.readFile(renamedFile, 'utf8'), 'original-photo');
+
+  app.setDecision(item.id, 'keep');
+  const restorePlan = await app.planApply(collectionId);
+  assert.equal(restorePlan.restoreCount, 1);
+  const restored = await app.confirmApply(restorePlan.id, { confirm: true });
+  assert.equal(restored.results[0].status, 'restored');
+  assert.equal(await fs.readFile(path.join(root, 'trip', 'photo.jpg'), 'utf8'), 'original-photo');
+  assert.equal(await fs.readFile(path.join(root, 'Trips', 'trip', 'photo.jpg'), 'utf8'), 'pre-existing-photo');
+});
+
+test('authenticated category API creates, filters, renames, decides, and bulk reassigns categories', async (t) => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-sorter-category-api-'));
+  const root = path.join(temporary, 'photos');
+  await fs.mkdir(root);
+  await fs.writeFile(path.join(root, 'photo.jpg'), 'photo');
+  const app = await new PhotoSorter({ dataDirectory: path.join(temporary, 'data') }).initialize();
+  t.after(async () => {
+    await app.close();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+  await app.createPassword('A secure test password! 42');
+  const collectionId = app.createCollection('API categories');
+  await app.addRoot(collectionId, root);
+  const item = app.listMedia({ collectionId, category: 'unseen' }).items[0];
+  const port = await app.listen(0);
+  const baseUrl = `http://127.0.0.1:${port}`;
+  let cookie = '';
+  const api = async (route, options = {}) => {
+    const response = await fetch(`${baseUrl}${route}`, {
+      ...options,
+      headers: {
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(cookie ? { Cookie: cookie } : {}),
+        ...options.headers,
+      },
+    });
+    const setCookies = response.headers.getSetCookie?.() || [response.headers.get('set-cookie')].filter(Boolean);
+    if (setCookies.length) cookie = setCookies.map((value) => value.split(';')[0]).join('; ');
+    return {
+      response,
+      body: response.headers.get('content-type')?.includes('application/json')
+        ? await response.json() : await response.text(),
+    };
+  };
+  await api('/api/login', {
+    method: 'POST',
+    body: JSON.stringify({ password: 'A secure test password! 42' }),
+  });
+
+  const created = await api(`/api/collections/${collectionId}/categories`, {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Places' }),
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.category.name, 'Places');
+  const categoryId = created.body.category.id;
+  assert.equal((await api(`/api/collections/${collectionId}/categories`)).body.categories[0].id, categoryId);
+  assert.equal((await api(`/api/collections/${collectionId}/categories`, {
+    method: 'POST',
+    body: JSON.stringify({ name: 'places' }),
+  })).response.status, 400);
+
+  await api(`/api/media/${item.id}/lock`, { method: 'POST' });
+  assert.equal((await api(`/api/media/${item.id}/decision`, {
+    method: 'PUT',
+    body: JSON.stringify({ category: categoryId }),
+  })).response.status, 200);
+  const categorized = await api(`/api/media?collectionId=${collectionId}&category=${categoryId}`);
+  assert.equal(categorized.body.total, 1);
+  assert.equal(categorized.body.items[0].categoryName, 'Places');
+  assert.equal((await api('/api/device-state', {
+    method: 'PUT',
+    body: JSON.stringify({
+      collectionId, category: categoryId, sort: 'filename', mediaId: item.id, offset: 0,
+    }),
+  })).body.state.category, categoryId);
+
+  assert.equal((await api(`/api/categories/${categoryId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ name: 'Cities' }),
+  })).body.category.name, 'Cities');
+  assert.equal((await api(`/api/media?collectionId=${collectionId}&category=${categoryId}`))
+    .body.items[0].categoryName, 'Cities');
+  const deleted = await api(`/api/categories/${categoryId}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ replacementCategory: 'delete', confirm: true }),
+  });
+  assert.deepEqual(deleted.body, {
+    deleted: true, reassignedCount: 1, replacementCategory: 'delete',
+  });
+  assert.equal((await api(`/api/media?collectionId=${collectionId}&category=delete`)).body.total, 1);
 });
 
 test('filesystem watcher retries after a transient setup failure', async (t) => {

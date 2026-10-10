@@ -108,4 +108,19 @@ test('large-library listing returns a bounded page near the end of 200,000 index
   assert.equal(groupPage.total, 2);
   assert.equal(groupPage.items.length, 1);
   t.diagnostic(`Photo Health page over 200,000 indexed items returned 30 of 100 groups in ${elapsed.toFixed(1)} ms.`);
+
+  const popularCategory = app.createCategory(collectionId, 'Popular');
+  const lessUsedCategory = app.createCategory(collectionId, 'Less used');
+  app.db.prepare('UPDATE media SET category = ? WHERE root_id = ? AND id < ?')
+    .run(popularCategory.id, rootId, 'media-150000');
+  app.db.prepare('UPDATE media SET category = ? WHERE root_id = ? AND id >= ?')
+    .run(lessUsedCategory.id, rootId, 'media-150000');
+  const categoriesStartedAt = performance.now();
+  const categories = app.listCategories(collectionId);
+  const categoriesElapsed = performance.now() - categoriesStartedAt;
+  assert.deepEqual(categories.map(({ id, assignedCount }) => [id, assignedCount]), [
+    [popularCategory.id, 150_000],
+    [lessUsedCategory.id, 50_000],
+  ]);
+  t.diagnostic(`Category ordering over 200,000 assignments returned ${categories.length} categories in ${categoriesElapsed.toFixed(1)} ms.`);
 });

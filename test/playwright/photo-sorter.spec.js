@@ -519,6 +519,112 @@ test('existing output folders need explicit approval and cancellation does not m
   }
 });
 
+test('review category picker supports create, number shortcuts, cancel, browse filters, and bulk deletion', async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await setupAccount(page);
+    await page.keyboard.press('ArrowUp');
+    await expect(page.locator('#category-picker-dialog')).toBeVisible();
+    await expect(page.locator('#category-picker-empty')).toBeVisible();
+    await page.locator('#category-picker-create').click();
+    await page.locator('#category-name-input').fill('Travel');
+    await page.locator('#category-name-save').click();
+    await expect(page.locator('#category-picker-dialog')).toBeVisible();
+    await expect(page.locator('#category-picker-options button')).toHaveText('1 · Travel');
+    await page.keyboard.press('1');
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '02-green.png');
+    await expect(page.locator('#choose-category')).toBeEnabled();
+
+    const categoryId = fixture.app.listCategories(fixture.collectionId)[0].id;
+    await page.keyboard.press('ArrowUp');
+    await expect(page.locator('#category-picker-dialog')).toBeVisible();
+    await page.locator('#category-picker-cancel').click();
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '02-green.png');
+    expect(fixture.app.listMedia({ collectionId: fixture.collectionId, category: categoryId }).total).toBe(1);
+    await expect(page.locator('#choose-category')).toBeEnabled();
+    await page.keyboard.press('ArrowUp');
+    await expect(page.locator('#category-picker-dialog')).toBeVisible();
+    await page.keyboard.press('1');
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '03-blue.png');
+    expect(fixture.app.listCategories(fixture.collectionId)[0].assignedCount).toBe(2);
+
+    await page.locator('#app-navigation [data-view="browse"]').click();
+    await page.locator('#custom-category-filter').selectOption(categoryId);
+    await expect(page.locator('#media-grid .media-card')).toHaveCount(2);
+    await page.locator('#manage-categories').click();
+    await page.getByRole('button', { name: 'Rename' }).click();
+    await expect(page.locator('#category-name-dialog')).toBeVisible();
+    await page.locator('#category-name-input').fill('Trips');
+    await page.locator('#category-name-save').click();
+    await expect(page.locator('#category-manager-dialog')).toBeVisible();
+    await expect(page.locator('#category-manager-list')).toContainText('Trips · 2 photo(s)');
+    await page.locator('#category-manager-close').click();
+
+    await page.locator('#manage-categories').click();
+    await page.locator('#category-manager-list').getByRole('button', { name: 'Delete' }).click();
+    await page.locator('#dialog-content select').selectOption('unseen');
+    await page.locator('#dialog-confirm').click();
+    await expect(page.locator('#status')).toContainText('Deleted category Trips');
+    await expect(page.locator('#category-manager-list')).toContainText('No custom categories yet.');
+    expect(fixture.app.listMedia({ collectionId: fixture.collectionId, category: 'unseen' }).total).toBe(4);
+  } finally {
+    await context.close();
+  }
+});
+
+test('custom-category controls, dialogs, and decisions are translated into German', async () => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await setupAccount(page);
+    await page.locator('#app-navigation [data-view="settings"]').click();
+    await page.locator('#language').selectOption('de');
+    await expect(page.locator('html')).toHaveAttribute('lang', 'de');
+    await page.locator('#app-navigation [data-view="review"]').click();
+    await expect(page.locator('#choose-category')).toHaveText('↑ Kategorie');
+    await expect(page.locator('#choose-category')).toHaveAttribute(
+      'aria-label', 'Benutzerdefinierte Kategorie auswählen',
+    );
+    await page.locator('#choose-category').click();
+    await expect(page.locator('#category-picker-dialog')).toBeVisible();
+    await expect(page.locator('#category-picker-title')).toHaveText('Kategorie auswählen');
+    await expect(page.locator('#category-picker-empty'))
+      .toHaveText('Noch keine benutzerdefinierten Kategorien. Erstelle eine Kategorie, um dieses Foto einzuordnen.');
+    await page.locator('#category-picker-create').click();
+    await expect(page.locator('#category-name-title')).toHaveText('Kategorie erstellen');
+    await expect(page.locator('#category-name-form small'))
+      .toContainText('Bis zu 80 Zeichen');
+    await page.locator('#category-name-input').fill('Travel');
+    await page.locator('#category-name-save').click();
+    await expect(page.locator('#category-picker-options button')).toHaveText('1 · Travel');
+    await page.keyboard.press('1');
+    await expect(page.locator('#status')).toContainText('Entscheidung „Travel“ gespeichert.');
+
+    await page.locator('#app-navigation [data-view="browse"]').click();
+    await expect(page.locator('#manage-categories')).toHaveText('Kategorien verwalten');
+    await page.locator('#manage-categories').click();
+    await expect(page.locator('#category-manager-title')).toHaveText('Kategorien verwalten');
+    await expect(page.locator('#category-manager-list')).toContainText('Travel · 1 Foto(s)');
+    await page.locator('#category-manager-list').getByRole('button', { name: 'Umbenennen' }).click();
+    await expect(page.locator('#category-name-title')).toHaveText('Kategorie umbenennen');
+    await expect(page.locator('#category-name-save')).toHaveText('Änderungen speichern');
+    await page.locator('#category-name-input').fill('Trips');
+    await page.locator('#category-name-save').click();
+    await expect(page.locator('#status')).toContainText('Kategorie in „Trips“ umbenannt.');
+    await expect(page.locator('#category-manager-list')).toContainText('Trips · 1 Foto(s)');
+    await page.locator('#category-manager-list').getByRole('button', { name: 'Löschen' }).click();
+    await expect(page.locator('#dialog-title')).toHaveText('Kategorie löschen');
+    await expect(page.locator('#dialog-content'))
+      .toContainText('Vor dem Löschen von „Trips“ werden 1 Foto(s) neu zugeordnet.');
+    await page.locator('#dialog-content select').selectOption('unseen');
+    await page.getByRole('button', { name: 'Neu zuordnen und löschen' }).click();
+    await expect(page.locator('#status')).toContainText('Kategorie „Trips“ gelöscht.');
+  } finally {
+    await context.close();
+  }
+});
+
 test('mobile layout preserves explicit actions and maps a right swipe to keep', async () => {
   const context = await browser.newContext({
     viewport: { width: 390, height: 844 },
@@ -579,10 +685,57 @@ test('mobile layout preserves explicit actions and maps a right swipe to keep', 
         labelCenter: sortLabel.top + sortLabel.height / 2,
         selectCenter: sortSelect.top + sortSelect.height / 2,
         photoGap: bounds('#media-viewport').top - toolbar.bottom,
-      };
+      }
     });
+
     expect(Math.abs(browseLayout.labelCenter - browseLayout.selectCenter)).toBeLessThan(1);
     expect(browseLayout.photoGap).toBeGreaterThanOrEqual(12);
+  } finally {
+    await context.close();
+  }
+});
+
+test('mobile swipe up opens the custom-category picker', async () => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+  });
+  const page = await context.newPage();
+  try {
+    await setupAccount(page);
+    await page.locator('#menu-toggle').click();
+    await page.locator('#app-navigation [data-view="browse"]').click();
+    await page.locator('#manage-categories').click();
+    await page.locator('#new-category-name').fill('Favorites');
+    await page.locator('#category-create-form button[type="submit"]').click();
+    await page.locator('#category-manager-close').click();
+    await page.locator('#menu-toggle').click();
+    await page.locator('#app-navigation [data-view="review"]').click();
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '01-red.png');
+    await page.evaluate(() => {
+      const target = document.getElementById('current-media');
+      const touch = (clientY) => new Touch({
+        identifier: 3,
+        target,
+        clientX: 180,
+        clientY,
+        radiusX: 2,
+        radiusY: 2,
+        rotationAngle: 0,
+        force: 1,
+      });
+      target.dispatchEvent(new TouchEvent('touchstart', {
+        bubbles: true, changedTouches: [touch(300)], touches: [touch(300)],
+      }));
+      target.dispatchEvent(new TouchEvent('touchend', {
+        bubbles: true, changedTouches: [touch(200)], touches: [],
+      }));
+    });
+    await expect(page.locator('#category-picker-dialog')).toBeVisible();
+    await page.locator('#category-picker-options button').click();
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '02-green.png');
+    expect(fixture.app.listCategories(fixture.collectionId)[0].assignedCount).toBe(1);
   } finally {
     await context.close();
   }
@@ -966,6 +1119,55 @@ test('Photo Health progress, duplicate comparison, and safe group review work in
     expect((await fs.readFile(path.join(fixture.root, '01-red.png'))).equals(
       await fs.readFile(copyPath),
     )).toBe(true);
+  } finally {
+    await context.close();
+  }
+});
+
+test('Photo Health screens, progress, findings, and duplicate review are translated into German', async () => {
+  const copyPath = path.join(fixture.root, '04-copy.png');
+  await fs.copyFile(path.join(fixture.root, '01-red.png'), copyPath);
+  await fixture.app.rescanCollection(fixture.collectionId);
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await setupAccount(page);
+    await page.locator('#app-navigation [data-view="settings"]').click();
+    await page.locator('#language').selectOption('de');
+    await page.locator('#app-navigation [data-view="photo-health"]').click();
+    await expect(page.locator('#photo-health-view h2')).toHaveText('Fotoanalyse');
+    await expect(page.locator('#photo-health-view > .photo-health-panel > .section-heading p'))
+      .toContainText('Finde exakte Duplikate');
+    await expect(page.locator('#photo-health-enable')).toHaveText('Analyse aktivieren');
+    await expect(page.locator('#photo-health-type option[value="all"]'))
+      .toHaveText('Duplikate und Unschärfe');
+    await expect(page.locator('#photo-health-handled option[value="handled"]'))
+      .toHaveText('Erledigt, einschließlich „Unsicher“');
+
+    await page.locator('#photo-health-enable').click();
+    await expect(page.locator('#photo-health-status')).toContainText('Analyse abgeschlossen ·');
+    await expect(page.locator('.photo-health-finding h3').first())
+      .toHaveText('Duplikatgruppe · 2 Fotos');
+    await page.getByRole('button', { name: 'Vergleichen und prüfen' }).click();
+    await expect(page.locator('.health-group-details > p')).toHaveText(
+      'Vergleiche die Dateien nebeneinander und wähle anschließend ein oder mehrere Fotos zum Behalten aus. Alle übrigen Gruppenmitglieder werden als gelöscht vorgemerkt; Dateien werden nicht verschoben.',
+    );
+    await expect(page.locator('.health-zoom-controls select').first())
+      .toHaveAttribute('aria-label', 'Linker Vergleich');
+    await page.locator('.health-member-list input[type="checkbox"]').first().check();
+    await page.getByRole('button', {
+      name: 'Ausgewählte behalten; übrige als gelöscht vormerken',
+    }).click();
+    await expect(page.locator('#dialog-title')).toHaveText('Duplikatentscheidungen speichern');
+    await expect(page.locator('#dialog-content')).toContainText(
+      '1 ausgewähltes Foto behalten und 1 weiteres Foto der Gruppe als gelöscht vormerken?',
+    );
+    await page.getByRole('button', { name: 'Entscheidungen speichern' }).click();
+    await expect(page.locator('#status')).toContainText(
+      'Duplikatentscheidungen gespeichert: 1 behalten und 1 als gelöscht vorgemerkt.',
+    );
+    await expect(page.locator('#photo-health-list'))
+      .toContainText('Keine Funde entsprechen diesen Filtern.');
   } finally {
     await context.close();
   }

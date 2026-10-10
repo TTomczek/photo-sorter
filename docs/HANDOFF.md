@@ -62,7 +62,7 @@ Implement the application from scratch using this handoff as the product source 
 | 36 | What if two devices open the same photo? | Prevent simultaneous edits with an item lock. Expire the lock automatically after a short idle timeout. |
 | 37 | What happens when a review decision changes category? | Remove the photo from the current category queue immediately and advance. In the combined review queue, keep/delete removes it; unsure remains pending and moves to the end of the unsure pass. |
 | 38 | Can a decision be cleared? | Yes, provide a clear-to-unseen action. |
-| 39 | What controls categorize a photo? | Left arrow/swipe = delete; right arrow/swipe = keep; down arrow/swipe = unsure. Also show explicit action buttons on phones. |
+| 39 | What controls categorize a photo? | Left arrow/swipe = delete; right arrow/swipe = keep; down arrow/swipe = unsure; up arrow/swipe opens the custom-category picker. Also show explicit action buttons on phones. |
 | 40 | Undo/redo? | Provide undo; redo too if practical. |
 | 41 | Should photos zoom? | Yes, support zoom and pan on desktop and phone. |
 | 42 | Grid navigation for large libraries? | Virtualized scrolling and category filters only. No filename/date/folder search in the agreed MVP. |
@@ -126,6 +126,15 @@ Implement the application from scratch using this handoff as the product source 
 ### Confirmed UI behavior (2026-10-10)
 
 - The local-network HTTP warning can be dismissed per browser and stays dismissed across page reloads.
+
+### Confirmed custom categories (2026-10-10)
+
+- Each collection has its own flat custom-category list, shared across devices and retained when the collection is archived. Custom categories and Keep/Delete/Unsure are mutually exclusive decisions; the picker offers custom categories only.
+- In Review, ArrowUp, swipe-up, and an explicit button open the picker. Choosing a category saves the decision and advances; dismissing without a choice changes nothing. An empty picker can create a category, then returns for explicit selection.
+- There is no category-count cap. The picker orders categories by assignment count descending, then name alphabetically; it displays matching `1`–`9` shortcuts for the first nine and allows direct selection of the rest.
+- Browse provides a compact custom-category filter and collection-scoped category management. Names are also output-folder names and must be unique case-insensitively, safe single path segments, and not reserved folder names.
+- Renaming preserves assignments and stages any required output-folder change until Apply. Deleting a category shows the affected count, requires a replacement (another custom category, Keep/Delete/Unsure, or Unseen), and is not undoable; it is recorded in History.
+- Applying a custom category moves files into a same-named folder under the file's registered root, preserving source-relative subfolders. Moves remain behind the existing preflight, explicit confirmations, root-boundary checks, no-overwrite/numbered-name handling, reuse consent, and restore/audit protections.
 
 ## Authoritative safety and behavior invariants
 

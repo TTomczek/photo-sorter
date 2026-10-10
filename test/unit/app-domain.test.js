@@ -86,6 +86,51 @@ test('collection/media queries honor capture fallback, filename order, category 
   assert.throws(() => app.listMedia({ collectionId, category: 'unseen', sort: 'random' }), /Invalid sort order/);
 });
 
+test('custom categories are collection-scoped, safe, rename-stable, ranked, and audited on deletion', async (t) => {
+  const { app, collectionId } = await createSorter(t);
+  const otherCollectionId = app.createCollection('Other collection');
+  const travel = app.createCategory(collectionId, ' Travel ');
+  const animals = app.createCategory(collectionId, 'Animals');
+  assert.equal(app.createCategory(otherCollectionId, 'Travel').name, 'Travel');
+  assert.throws(() => app.createCategory(collectionId, 'travel'), /already exists/i);
+  assert.throws(() => app.createCategory(collectionId, '../outside'), /safe folder name/i);
+  assert.throws(() => app.createCategory(collectionId, 'CON.txt'), /safe folder name/i);
+  assert.deepEqual(app.listCategories(collectionId).map((category) => category.name), ['Animals', 'Travel']);
+  assert.throws(() => app.listMedia({ collectionId: otherCollectionId, category: travel.id }), /Invalid category/);
+
+  const item = app.listMedia({ collectionId, category: 'unseen', sort: 'filename' }).items[0];
+  app.claimMediaLock(item.id, 'device-a');
+  app.setDeviceDecision(item.id, travel.id, 'device-a');
+  assert.equal(app.listMedia({ collectionId, category: travel.id }).items[0].categoryName, 'Travel');
+  assert.deepEqual(app.listCategories(collectionId).map(({ id }) => id), [travel.id, animals.id]);
+  const savedState = app.saveDeviceState('device-a', collectionId, {
+    category: travel.id, sort: 'filename', mediaId: item.id, offset: 0,
+  });
+  assert.equal(savedState.category, travel.id);
+
+  app.renameCategory(travel.id, 'Journeys');
+  assert.equal(app.listMedia({ collectionId, category: travel.id }).items[0].categoryName, 'Journeys');
+  assert.equal(app.listCategories(collectionId)[0].name, 'Journeys');
+  assert.equal((await app.changeDecisionHistory('device-a', 'undo')).category, 'unseen');
+  assert.equal((await app.changeDecisionHistory('device-a', 'redo')).category, travel.id);
+
+  app.releaseMediaLock(item.id, 'device-a');
+  app.claimMediaLock(item.id, 'device-b');
+  assert.throws(() => app.deleteCategory(travel.id, 'delete', true, 'device-a'), { status: 409 });
+  app.releaseMediaLock(item.id, 'device-b');
+  app.claimMediaLock(item.id, 'device-a');
+  assert.throws(() => app.deleteCategory(travel.id, 'delete', false), /explicit confirmation/i);
+  const deleted = app.deleteCategory(travel.id, 'delete', true, 'device-a');
+  assert.deepEqual(deleted, { deleted: true, reassignedCount: 1, replacementCategory: 'delete' });
+  assert.equal(app.db.prepare('SELECT category FROM media WHERE id = ?').get(item.id).category, 'delete');
+  assert.equal(app.getCustomCategory(collectionId, travel.id), null);
+  assert.equal(app.db.prepare(`
+    SELECT COUNT(*) AS count FROM decision_history WHERE previous_category = ? OR next_category = ?
+  `).get(travel.id, travel.id).count, 0);
+  assert.ok(app.listAudit().some((event) => event.action === 'category_deleted'
+    && event.details.reassignedCount === 1));
+});
+
 test('library filters search path prefixes and bound type, root, and date results', async (t) => {
   const { app, collectionId } = await createSorter(t);
   const roots = app.listRoots(collectionId);
@@ -154,7 +199,7 @@ test('legacy SQLite data is upgraded with versioned migrations and remains usabl
   t.after(async () => fs.rm(temporary, { recursive: true, force: true }));
 
   const app = await new PhotoSorter({ dataDirectory: temporary }).initialize();
-  assert.equal(app.db.prepare('PRAGMA user_version').get().user_version, 5);
+  assert.equal(app.db.prepare('PRAGMA user_version').get().user_version, 6);
   assert.deepEqual(
     { ...app.db.prepare('SELECT id, active FROM roots WHERE id = ?').get('legacy-root') },
     { id: 'legacy-root', active: 1 },
@@ -167,7 +212,7 @@ test('legacy SQLite data is upgraded with versioned migrations and remains usabl
   await app.close();
 
   const reopened = await new PhotoSorter({ dataDirectory: temporary }).initialize();
-  assert.equal(reopened.db.prepare('PRAGMA user_version').get().user_version, 5);
+  assert.equal(reopened.db.prepare('PRAGMA user_version').get().user_version, 6);
   assert.equal(reopened.db.prepare('SELECT COUNT(*) AS count FROM media').get().count, 1);
   await reopened.close();
 });
@@ -321,9 +366,13 @@ test('device state, category decisions, history and expiring locks stay scoped a
   assert.equal(allItems.items.find((candidate) => candidate.id === item.id).category, 'keep');
   app.setDeviceDecision(item.id, 'delete', 'device-a');
   assert.equal(app.listMedia({ collectionId, category: 'delete' }).total, 1);
+  assert.equal((await app.changeDecisionHistory('device-a', 'undo')).category, 'keep');
+  assert.equal(app.db.prepare('SELECT category FROM media WHERE id = ?').get(item.id).category, 'keep');
   assert.equal((await app.changeDecisionHistory('device-a', 'undo')).category, 'unseen');
   assert.equal(app.db.prepare('SELECT category FROM media WHERE id = ?').get(item.id).category, null);
-  assert.equal((await app.changeDecisionHistory('device-a', 'undo')).changed, false);
+  assert.equal((await app.changeDecisionHistory('device-a', 'redo')).category, 'keep');
+  assert.equal((await app.changeDecisionHistory('device-a', 'redo')).category, 'delete');
+  assert.equal(app.db.prepare('SELECT category FROM media WHERE id = ?').get(item.id).category, 'delete');
 
   app.db.prepare('UPDATE media_locks SET expires_at = ? WHERE media_id = ?').run(Date.now() - 1, item.id);
   assert.throws(() => app.setDeviceDecision(item.id, 'delete', 'device-a'), { status: 409 });

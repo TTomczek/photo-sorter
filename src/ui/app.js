@@ -6,6 +6,7 @@ const state = {
   collectionId: '',
   collectionItemCount: 0,
   items: [],
+  customCategories: [],
   index: 0,
   offset: 0,
   total: 0,
@@ -28,6 +29,11 @@ const state = {
   mediaRequestId: 0,
   classificationPending: false,
   classificationTransitioning: false,
+  categoryPickerSelection: '',
+  categoryPickerCreateRequested: false,
+  categoryNameAction: null,
+  categoryNameResolver: null,
+  categoryNameSaving: false,
   autoCategorizeCollectionId: '',
   drawerOpen: false,
   lastScanStatusKey: '',
@@ -293,6 +299,7 @@ function setDecisionButtons(enabled) {
   for (const button of document.querySelectorAll('[data-decision]')) {
     button.disabled = !enabled || state.busy;
   }
+  byId('choose-category').disabled = !enabled || state.busy;
 }
 
 async function refreshScans() {
@@ -558,6 +565,18 @@ function element(tag, text, className) {
   if (text !== undefined) node.textContent = text;
   if (className) node.className = className;
   return node;
+}
+
+function categoryLabel(category) {
+  const builtinLabels = {
+    delete: 'Delete',
+    keep: 'Keep',
+    unseen: 'Unseen',
+    unsure: 'Unsure',
+  };
+  return builtinLabels[category]
+    || state.customCategories.find((item) => item.id === category)?.name
+    || category;
 }
 
 function auditFieldLabel(key) {
@@ -1033,7 +1052,7 @@ function renderCurrent() {
   saveDeviceState();
 }
 
-function animateDecision(category) {
+function animateDecision(category, label = categoryLabel(category)) {
   const photo = byId('current-media').querySelector('.current-photo');
   if (!photo) return Promise.resolve();
 
@@ -1043,10 +1062,10 @@ function animateDecision(category) {
     unsure: [0, 1],
     unseen: [0, 0],
   };
-  const labels = { delete: 'Delete', keep: 'Keep', unsure: 'Unsure', unseen: 'Unseen' };
-  const [x, y] = directions[category] || directions.unseen;
-  const flash = element('div', labels[category] || category, 'decision-flash');
-  flash.dataset.category = category;
+  const isCustom = !['delete', 'keep', 'unsure', 'unseen'].includes(category);
+  const [x, y] = directions[category] || [0, -1];
+  const flash = element('div', label, 'decision-flash');
+  flash.dataset.category = isCustom ? 'custom' : category;
   photo.append(flash);
   photo.dataset.decision = category;
 
@@ -1091,7 +1110,8 @@ function renderGrid() {
     if (mediaGrid.childElementCount === 0 && state.offset % columns) {
       card.style.gridColumnStart = String(state.offset % columns + 1);
     }
-    card.append(createPreview(item, false, item.kind === 'image'), select, element('small', `${item.kind} · ${formatBytes(item.size)}${item.category ? ` · ${item.category}` : ''}`, 'media-name'));
+    card.append(createPreview(item, false, item.kind === 'image'), select,
+      element('small', `${item.kind} · ${formatBytes(item.size)}${item.categoryName ? ` · ${item.categoryName}` : ''}`, 'media-name'));
     mediaGrid.append(card);
   }
   if (state.restoreGridScroll) {
@@ -1125,7 +1145,7 @@ async function loadMedia() {
   state.gridTargetIndex = null;
   state.restoreMediaId = '';
   byId('collection-title').textContent = state.category === 'review' ? 'Review'
-    : state.category === 'all' ? 'All items' : `${state.category[0].toUpperCase()}${state.category.slice(1)} items`;
+    : state.category === 'all' ? 'All items' : `${categoryLabel(state.category)} items`;
   renderGrid();
 }
 
@@ -1288,11 +1308,13 @@ async function loadCollections(preferredId) {
     state.classificationPending = false;
     state.collectionId = '';
     state.collectionItemCount = 0;
+    state.customCategories = [];
     state.filters = { search: '', fromDate: '', toDate: '', kind: '', rootId: '' };
     byId('media-search-form').reset();
     state.autoCategorizeCollectionId = '';
     byId('active-collection-name').textContent = 'Photo Sorter';
     byId('archive-collection').disabled = true;
+    updateCustomCategoryFilter();
     byId('root-list').replaceChildren();
     setStatus('Create a collection, then choose a folder from the host desktop app.');
     await loadMedia();
@@ -1343,7 +1365,7 @@ async function loadCollections(preferredId) {
   }
   byId('active-collection-name').textContent = collection.name;
   setStatus(collection.offline_roots ? `${collection.offline_roots} root(s) are currently offline.` : '');
-  await Promise.all([loadRootManagement(), loadArchivedCollections()]);
+  await Promise.all([loadRootManagement(), loadArchivedCollections(), loadCustomCategories()]);
   loadBrowseFilters();
   await loadMedia();
   if (collectionChanged) await maybeStartAutomaticCategorizing();
@@ -1475,6 +1497,37 @@ async function loadRootManagement() {
     list.append(item);
   }
   if (!roots.length) list.append(element('li', 'No folders are registered.'));
+}
+
+function updateCustomCategoryFilter() {
+  const select = byId('custom-category-filter');
+  select.replaceChildren(new Option('Choose category…', ''));
+  for (const category of state.customCategories) {
+    select.append(new Option(`${category.name} (${category.assignedCount})`, category.id));
+  }
+  select.value = state.customCategories.some((item) => item.id === state.category) ? state.category : '';
+  byId('manage-categories').disabled = !state.collectionId;
+}
+
+async function loadCustomCategories() {
+  if (!state.collectionId) {
+    state.customCategories = [];
+    updateCustomCategoryFilter();
+    renderCategoryManager();
+    return [];
+  }
+  const { categories } = await request(
+    `/api/collections/${encodeURIComponent(state.collectionId)}/categories`,
+  );
+  state.customCategories = categories;
+  if (!['all', 'unseen', 'keep', 'delete', 'unsure', 'review'].includes(state.category)
+    && !categories.some((item) => item.id === state.category)) {
+    activateCategory('all');
+  } else {
+    updateCustomCategoryFilter();
+  }
+  renderCategoryManager();
+  return categories;
 }
 
 function loadBrowseFilters() {
@@ -1646,11 +1699,11 @@ async function showAuthentication() {
   };
 }
 
-async function decide(category, item = state.items[state.index]) {
+async function decide(category, item = state.items[state.index], label = categoryLabel(category)) {
   if (!item || state.busy || !state.lockReady || state.lockedItemId !== item.id) return;
   state.busy = true;
   setDecisionButtons(false);
-  const animation = animateDecision(category);
+  const animation = animateDecision(category, label);
   try {
     await request(`/api/media/${encodeURIComponent(item.id)}/decision`, {
       method: 'PUT', body: JSON.stringify({ category }),
@@ -1659,7 +1712,8 @@ async function decide(category, item = state.items[state.index]) {
       state.classificationPending = true;
     }
     await animation;
-    setStatus(`Saved ${category === 'unseen' ? 'unseen' : category} decision.`);
+    const statusLabel = ['keep', 'delete', 'unsure', 'unseen'].includes(category) ? category : label;
+    setStatus(`Saved ${statusLabel} decision.`);
     const staysInQueue = state.category === 'all'
       || (state.category === 'review' && ['unsure', 'unseen'].includes(category))
       || state.category === category;
@@ -1675,6 +1729,7 @@ async function decide(category, item = state.items[state.index]) {
         if (index >= 0) {
           state.index = index;
           state.items[index].category = category === 'unseen' ? null : category;
+          state.items[index].categoryName = category === 'unseen' ? null : label;
         }
         renderGrid();
       }
@@ -1690,12 +1745,27 @@ async function decide(category, item = state.items[state.index]) {
   if (state.classificationPending) await continueClassification();
 }
 
-function showDialog(title, lines, { allowReuse = false, confirmLabel = 'Confirm' } = {}) {
+function showDialog(title, lines, {
+  allowReuse = false,
+  confirmLabel = 'Confirm',
+  replacementOptions = [],
+} = {}) {
   const dialog = byId('confirm-dialog');
   byId('dialog-title').textContent = title;
   const content = byId('dialog-content');
   content.replaceChildren();
   for (const line of lines) content.append(element('p', line));
+  let replacementSelect;
+  if (replacementOptions.length) {
+    const label = element('label', 'Reassign assigned photos to');
+    replacementSelect = element('select');
+    replacementSelect.add(new Option('Choose a destination…', ''));
+    for (const option of replacementOptions) {
+      replacementSelect.add(new Option(option.label, option.value));
+    }
+    label.append(replacementSelect);
+    content.append(label);
+  }
   let reuseCheckbox;
   if (allowReuse) {
     const label = element('label', 'I reviewed the existing folders and explicitly approve reusing them.');
@@ -1706,15 +1776,229 @@ function showDialog(title, lines, { allowReuse = false, confirmLabel = 'Confirm'
   }
   const confirm = byId('dialog-confirm');
   confirm.textContent = confirmLabel;
-  confirm.disabled = Boolean(allowReuse);
-  if (reuseCheckbox) reuseCheckbox.addEventListener('change', () => { confirm.disabled = !reuseCheckbox.checked; });
+  const updateConfirmEnabled = () => {
+    confirm.disabled = Boolean((allowReuse && !reuseCheckbox?.checked)
+      || (replacementSelect && !replacementSelect.value));
+  };
+  reuseCheckbox?.addEventListener('change', updateConfirmEnabled);
+  replacementSelect?.addEventListener('change', updateConfirmEnabled);
+  updateConfirmEnabled();
   dialog.showModal();
   return new Promise((resolve) => {
     dialog.addEventListener('close', () => resolve({
       confirmed: dialog.returnValue === 'confirm',
       reuseOutputFolders: Boolean(reuseCheckbox?.checked),
+      replacementCategory: replacementSelect?.value || null,
     }), { once: true });
   });
+}
+
+function showCategoryNameDialog({ category = null, title = 'Create category' } = {}) {
+  const dialog = byId('category-name-dialog');
+  byId('category-name-title').textContent = title;
+  byId('category-name-save').textContent = category ? 'Save changes' : 'Create category';
+  byId('category-name-input').value = category?.name || '';
+  byId('category-name-error').textContent = '';
+  state.categoryNameAction = {
+    id: category?.id || null,
+    collectionId: state.collectionId,
+  };
+  dialog.showModal();
+  byId('category-name-input').focus();
+  return new Promise((resolve) => {
+    state.categoryNameResolver = resolve;
+  });
+}
+
+async function submitCategoryName(event) {
+  event.preventDefault();
+  const dialog = byId('category-name-dialog');
+  if (state.categoryNameSaving || !state.categoryNameAction) return;
+  if (!byId('category-name-form').reportValidity()) return;
+  state.categoryNameSaving = true;
+  byId('category-name-save').disabled = true;
+  byId('category-name-cancel').disabled = true;
+  const action = state.categoryNameAction;
+  const name = byId('category-name-input').value;
+  try {
+    const response = await request(
+      action.id ? `/api/categories/${encodeURIComponent(action.id)}`
+        : `/api/collections/${encodeURIComponent(action.collectionId)}/categories`,
+      {
+        method: action.id ? 'PUT' : 'POST',
+        body: JSON.stringify({ name }),
+      },
+    );
+    const resolve = state.categoryNameResolver;
+    state.categoryNameResolver = null;
+    state.categoryNameAction = null;
+    state.categoryNameSaving = false;
+    byId('category-name-save').disabled = false;
+    byId('category-name-cancel').disabled = false;
+    dialog.close('saved');
+    resolve?.(response.category);
+  } catch (error) {
+    byId('category-name-error').textContent = error.message;
+    state.categoryNameSaving = false;
+    byId('category-name-save').disabled = false;
+    byId('category-name-cancel').disabled = false;
+  }
+}
+
+function categoryReplacementOptions(deletingId) {
+  const options = [
+    { value: 'unseen', label: 'Unseen (clear decision)' },
+    { value: 'keep', label: 'Keep' },
+    { value: 'delete', label: 'Delete' },
+    { value: 'unsure', label: 'Unsure' },
+  ];
+  for (const category of state.customCategories) {
+    if (category.id !== deletingId) options.push({ value: category.id, label: category.name });
+  }
+  return options;
+}
+
+function renderCategoryManager() {
+  const list = byId('category-manager-list');
+  if (!list) return;
+  list.replaceChildren();
+  if (!state.customCategories.length) {
+    list.append(element('li', 'No custom categories yet.'));
+    return;
+  }
+  for (const category of state.customCategories) {
+    const row = element('li');
+    row.append(element('span', `${category.name} · ${category.assignedCount} photo(s)`));
+    const actions = element('div', undefined, 'category-manager-actions');
+    const rename = element('button', 'Rename', 'quiet');
+    rename.type = 'button';
+    rename.addEventListener('click', () => editCategoryFromManager(category));
+    const remove = element('button', 'Delete', 'danger');
+    remove.type = 'button';
+    remove.addEventListener('click', () => deleteCategoryFromManager(category));
+    actions.append(rename, remove);
+    row.append(actions);
+    list.append(row);
+  }
+}
+
+async function openCategoryManager() {
+  if (!state.collectionId) return;
+  try {
+    await loadCustomCategories();
+    byId('category-manager-error').textContent = '';
+    byId('category-manager-dialog').showModal();
+    byId('new-category-name').focus();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+async function editCategoryFromManager(category) {
+  byId('category-manager-dialog').close();
+  const renamed = await showCategoryNameDialog({ category, title: 'Rename category' });
+  if (renamed) {
+    try {
+      await loadCustomCategories();
+      setStatus(`Renamed category to ${renamed.name}.`);
+    } catch (error) {
+      setStatus(error.message, true);
+    }
+  }
+  if (state.collectionId) byId('category-manager-dialog').showModal();
+}
+
+async function deleteCategoryFromManager(category) {
+  try {
+    category = (await loadCustomCategories()).find((item) => item.id === category.id) || category;
+  } catch (error) {
+    setStatus(error.message, true);
+    return;
+  }
+  byId('category-manager-dialog').close();
+  const replacementOptions = category.assignedCount ? categoryReplacementOptions(category.id) : [];
+  const choice = await showDialog('Delete category', [
+    category.assignedCount
+      ? `This will reassign ${category.assignedCount} photo(s) before deleting ${category.name}. This action cannot be undone.`
+      : `Delete ${category.name}? This action cannot be undone.`,
+    'Any file moves remain staged until you review and confirm Apply.',
+  ], {
+    confirmLabel: category.assignedCount ? 'Reassign and delete' : 'Delete category',
+    replacementOptions,
+  });
+  if (choice.confirmed) {
+    try {
+      await request(`/api/categories/${encodeURIComponent(category.id)}`, {
+        method: 'DELETE',
+        body: JSON.stringify({
+          replacementCategory: choice.replacementCategory,
+          confirm: true,
+        }),
+      });
+      await loadCustomCategories();
+      if (state.view === 'browse') await loadMedia();
+      setStatus(`Deleted category ${category.name}.`);
+    } catch (error) {
+      setStatus(error.message, true);
+    }
+  }
+  if (state.collectionId) byId('category-manager-dialog').showModal();
+}
+
+function renderCategoryPicker() {
+  const options = byId('category-picker-options');
+  options.replaceChildren();
+  byId('category-picker-empty').classList.toggle('hidden', state.customCategories.length > 0);
+  state.customCategories.forEach((category, index) => {
+    const shortcut = index < 9 ? `${index + 1} · ` : '';
+    const button = element('button', `${shortcut}${category.name}`);
+    button.type = 'button';
+    button.dataset.categoryChoice = category.id;
+    button.addEventListener('click', () => choosePickerCategory(category));
+    options.append(button);
+  });
+}
+
+function choosePickerCategory(category) {
+  if (!state.customCategories.some((item) => item.id === category.id)) return;
+  state.categoryPickerSelection = category.id;
+  byId('category-picker-dialog').close();
+}
+
+async function openCategoryPicker() {
+  const item = state.items[state.index];
+  if (!item || state.busy || !state.lockReady || state.lockedItemId !== item.id) return;
+  state.categoryPickerSelection = '';
+  state.categoryPickerCreateRequested = false;
+  state.busy = true;
+  setDecisionButtons(false);
+  const dialog = byId('category-picker-dialog');
+  renderCategoryPicker();
+  dialog.showModal();
+  const categoryRefresh = loadCustomCategories().then(() => {
+    if (dialog.open && !state.categoryPickerSelection && !state.categoryPickerCreateRequested) {
+      renderCategoryPicker();
+    }
+  }).catch((error) => setStatus(error.message, true));
+  try {
+    await new Promise((resolve) => dialog.addEventListener('close', resolve, { once: true }));
+    await categoryRefresh;
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally {
+    state.busy = false;
+    setDecisionButtons(state.lockReady && state.lockedItemId === state.items[state.index]?.id);
+  }
+  if (state.categoryPickerSelection) {
+    const category = state.customCategories.find((entry) => entry.id === state.categoryPickerSelection);
+    if (category) await decide(category.id, item, category.name);
+  } else if (state.categoryPickerCreateRequested) {
+    const created = await showCategoryNameDialog();
+    if (created) {
+      await loadCustomCategories();
+      await openCategoryPicker();
+    }
+  }
 }
 
 function activateCategory(category) {
@@ -1726,6 +2010,8 @@ function activateCategory(category) {
   for (const button of byId('filters').querySelectorAll('button')) {
     button.setAttribute('aria-pressed', String(button.dataset.category === category));
   }
+  byId('custom-category-filter').value = state.customCategories.some((item) => item.id === category)
+    ? category : '';
   if (category !== 'review' && state.collectionId) {
     localStorage.setItem(`photo-sorter-browse-filter:${state.collectionId}`, category);
   }
@@ -1764,7 +2050,7 @@ async function applyDecisions() {
       method: 'POST', body: JSON.stringify({ collectionId: state.collectionId }),
     });
     if (!plan.moveCount) {
-      setStatus('There are no delete/unsure moves to apply.');
+      setStatus('There are no category moves or restores to apply.');
       return;
     }
     const examples = plan.examples.map((item) => `${item.source} → ${item.destination}`);
@@ -1774,7 +2060,7 @@ async function applyDecisions() {
       ...examples,
       ...(plan.moveCount > examples.length ? [`And ${plan.moveCount - examples.length} more…`] : []),
       'No file will be permanently deleted. A failure stops the batch.',
-      ...(plan.requiresOutputFolderConsent ? ['Existing deleted/unsure folder(s) are not marked as app-owned; inspect and approve reuse to continue.'] : []),
+      ...(plan.requiresOutputFolderConsent ? ['Existing category folder(s) are not marked as app-owned; inspect and approve reuse to continue.'] : []),
     ];
     const choice = await showDialog('Review file moves', lines, {
       allowReuse: plan.requiresOutputFolderConsent,
@@ -1879,6 +2165,7 @@ byId('app-navigation').addEventListener('click', async (event) => {
       return;
     }
     if (view === 'browse') {
+      await loadCustomCategories();
       activateCategory(localStorage.getItem(`photo-sorter-browse-filter:${state.collectionId}`) || 'all');
       await loadMedia();
     }
@@ -2093,6 +2380,57 @@ byId('filters').addEventListener('click', async (event) => {
   activateCategory(button.dataset.category);
   await loadMedia();
 });
+byId('custom-category-filter').addEventListener('change', async (event) => {
+  if (!event.target.value) return;
+  state.classificationPending = false;
+  activateCategory(event.target.value);
+  try {
+    await loadMedia();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+byId('manage-categories').addEventListener('click', openCategoryManager);
+byId('category-manager-close').addEventListener('click', () => byId('category-manager-dialog').close());
+byId('category-create-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const name = byId('new-category-name').value;
+  try {
+    await request(`/api/collections/${encodeURIComponent(state.collectionId)}/categories`, {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    });
+    byId('new-category-name').value = '';
+    byId('category-manager-error').textContent = '';
+    await loadCustomCategories();
+    setStatus(`Created category ${name.trim()}.`);
+  } catch (error) {
+    byId('category-manager-error').textContent = error.message;
+  }
+});
+byId('category-name-form').addEventListener('submit', submitCategoryName);
+byId('category-name-cancel').addEventListener('click', () => byId('category-name-dialog').close());
+byId('category-name-dialog').addEventListener('cancel', (event) => {
+  if (state.categoryNameSaving) event.preventDefault();
+});
+byId('category-name-dialog').addEventListener('close', () => {
+  const resolve = state.categoryNameResolver;
+  state.categoryNameResolver = null;
+  state.categoryNameAction = null;
+  state.categoryNameSaving = false;
+  resolve?.(null);
+});
+byId('category-picker-create').addEventListener('click', () => {
+  state.categoryPickerCreateRequested = true;
+  byId('category-picker-dialog').close();
+});
+byId('category-picker-cancel').addEventListener('click', () => byId('category-picker-dialog').close());
+byId('category-picker-dialog').addEventListener('click', (event) => {
+  if (event.target === byId('category-picker-dialog')) byId('category-picker-dialog').close();
+});
+byId('choose-category').addEventListener('click', () => {
+  openCategoryPicker().catch((error) => setStatus(error.message, true));
+});
 byId('previous').addEventListener('click', () => moveSelection(-1));
 byId('next').addEventListener('click', () => moveSelection(1));
 document.querySelectorAll('[data-decision]').forEach((button) => {
@@ -2201,6 +2539,15 @@ setInterval(async () => {
 }, 20_000);
 document.addEventListener('keydown', (event) => {
   if (byId('app-panel').classList.contains('hidden')) return;
+  const activeDialog = document.querySelector('dialog[open]');
+  if (activeDialog) {
+    if (activeDialog.id === 'category-picker-dialog' && /^[1-9]$/.test(event.key)) {
+      event.preventDefault();
+      const category = state.customCategories[Number(event.key) - 1];
+      if (category) choosePickerCategory(category);
+    }
+    return;
+  }
   if (event.key === 'Escape' && state.drawerOpen) {
     setDrawerOpen(false);
     return;
@@ -2214,7 +2561,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'ArrowLeft') decide('delete');
   if (event.key === 'ArrowRight') decide('keep');
   if (event.key === 'ArrowDown') decide('unsure');
-  if (event.key === 'ArrowUp') moveSelection(-1);
+  if (event.key === 'ArrowUp') openCategoryPicker().catch((error) => setStatus(error.message, true));
 });
 let touchStart;
 byId('current-media').addEventListener('touchstart', (event) => {
@@ -2229,6 +2576,7 @@ byId('current-media').addEventListener('touchend', (event) => {
   const dx = event.changedTouches[0].clientX - touchStart.x;
   const dy = event.changedTouches[0].clientY - touchStart.y;
   if (Math.abs(dx) > 65 && Math.abs(dx) > Math.abs(dy)) decide(dx < 0 ? 'delete' : 'keep');
+  else if (dy < -65) openCategoryPicker().catch((error) => setStatus(error.message, true));
   else if (dy > 65) decide('unsure');
   touchStart = null;
 }, { passive: true });
