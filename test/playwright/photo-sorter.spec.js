@@ -1104,9 +1104,12 @@ test('Photo Health progress, duplicate comparison, and safe group review work in
   try {
     await setupAccount(page);
     await page.locator('#app-navigation [data-view="photo-health"]').click();
+    await expect(page.locator('#photo-health-type')).toHaveCount(0);
     await page.locator('#photo-health-enable').click();
     await expect(page.locator('#photo-health-status')).toContainText('Analysis complete');
+    await expect(page.locator('#photo-health-status')).not.toContainText('blur');
     await expect(page.locator('.photo-health-finding h3').first()).toHaveText('Duplicate group · 2 photos');
+    await expect(page.locator('.photo-health-blur-preview, .health-decision')).toHaveCount(0);
     await page.getByRole('button', { name: 'Compare and review' }).click();
     await expect(page.locator('.health-compare img')).toHaveCount(2);
     await expect(page.locator('.health-compare img').first()).toHaveJSProperty('naturalWidth', 96);
@@ -1139,8 +1142,7 @@ test('Photo Health screens, progress, findings, and duplicate review are transla
     await expect(page.locator('#photo-health-view > .photo-health-panel > .section-heading p'))
       .toContainText('Finde exakte Duplikate');
     await expect(page.locator('#photo-health-enable')).toHaveText('Analyse aktivieren');
-    await expect(page.locator('#photo-health-type option[value="all"]'))
-      .toHaveText('Duplikate und Unschärfe');
+    await expect(page.locator('#photo-health-type')).toHaveCount(0);
     await expect(page.locator('#photo-health-handled option[value="handled"]'))
       .toHaveText('Erledigt, einschließlich „Unsicher“');
 

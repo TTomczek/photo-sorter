@@ -129,8 +129,8 @@
       'Dateiverschiebungen bleiben vorgemerkt, bis du sie prüfst und das Anwenden bestätigst.',
     'Photo Health': 'Fotoanalyse',
     'Photo Health analysis progress': 'Fortschritt der Fotoanalyse',
-    'Find exact duplicates, very similar photo copies, and clearly blurry photos. Reviewing findings only changes decisions; it never moves files.':
-      'Finde exakte Duplikate, sehr ähnliche Fotokopien und deutlich unscharfe Fotos. Die Prüfung ändert nur Entscheidungen und verschiebt keine Dateien.',
+    'Find exact duplicates and very similar photo copies. Reviewing findings only changes decisions; it never moves files.':
+      'Finde exakte Duplikate und sehr ähnliche Fotokopien. Die Prüfung ändert nur Entscheidungen und verschiebt keine Dateien.',
     'Enable analysis': 'Analyse aktivieren',
     'Pause analysis': 'Analyse pausieren',
     'Resume analysis': 'Analyse fortsetzen',
@@ -139,10 +139,7 @@
     'Choose a collection to use Photo Health.': 'Wähle eine Sammlung für die Fotoanalyse aus.',
     'This recognized file format could not be analyzed': 'Dieses erkannte Dateiformat konnte nicht analysiert werden',
     'Analysis failed': 'Analyse fehlgeschlagen',
-    'Finding type': 'Fundtyp',
-    'Duplicates and blur': 'Duplikate und Unschärfe',
     'Duplicates': 'Duplikate',
-    'Blur': 'Unschärfe',
     'Review state': 'Prüfstatus',
     'Needs review': 'Zu prüfen',
     'Handled, including Unsure': 'Erledigt, einschließlich „Unsicher“',
@@ -155,10 +152,6 @@
     'Compare and review': 'Vergleichen und prüfen',
     'Compare the files side by side, then choose one or more photos to keep. Every other group member will be staged as Deleted; no files are moved.':
       'Vergleiche die Dateien nebeneinander und wähle anschließend ein oder mehrere Fotos zum Behalten aus. Alle übrigen Gruppenmitglieder werden als gelöscht vorgemerkt; Dateien werden nicht verschoben.',
-    'Clearly blurry photo': 'Deutlich unscharfes Foto',
-    'Preview unavailable; the decision is still available.':
-      'Vorschau nicht verfügbar; die Entscheidung ist weiterhin möglich.',
-    'Stage as Deleted': 'Als gelöscht vormerken',
     'Handled · decision is shared with other views.':
       'Erledigt · die Entscheidung wird mit anderen Ansichten geteilt.',
     'No findings match these filters.': 'Keine Funde entsprechen diesen Filtern.',
@@ -236,8 +229,8 @@
       '←/nach links wischen bedeutet Löschen, →/nach rechts wischen bedeutet Behalten, ↓/nach unten wischen bedeutet Unsicher und ↑/nach oben wischen öffnet eine benutzerdefinierte Kategorie. Drücke 1–9 oder wähle eine Kategorie; die Auswahl wird gespeichert und fährt fort. Entscheidungen verschieben Dateien erst, wenn du sie ausdrücklich anwendest.',
     'Create, rename, and delete custom categories in Browse. Apply shows a move summary first, then requires a separate confirmation; category files move to category-named folders while preserving subfolders. Nothing is permanently deleted.':
       'Erstelle, benenne um und lösche benutzerdefinierte Kategorien unter „Durchsuchen“. Beim Anwenden wird zuerst eine Verschiebungsübersicht angezeigt und eine separate Bestätigung verlangt. Dateien werden in Ordner mit dem jeweiligen Kategorienamen verschoben; Unterordner bleiben erhalten. Nichts wird endgültig gelöscht.',
-    'Photo Health can find exact duplicates, near-identical photo copies, and clearly blurry photos. Analysis can be paused across devices; its review decisions never move files.':
-      'Die Fotoanalyse findet exakte Duplikate, nahezu identische Fotokopien und deutlich unscharfe Fotos. Die Analyse kann auf allen Geräten pausiert werden; Prüfentscheidungen verschieben keine Dateien.',
+    'Photo Health can find exact duplicates and near-identical photo copies. Analysis can be paused across devices; its review decisions never move files.':
+      'Die Fotoanalyse findet exakte Duplikate und nahezu identische Fotokopien. Die Analyse kann auf allen Geräten pausiert werden; Prüfentscheidungen verschieben keine Dateien.',
     'Use the zoom controls or pinch on an image to zoom; drag a zoomed image to pan. Scroll the collection grid to browse large libraries.':
       'Verwende die Zoom-Steuerung oder ziehe zwei Finger auf einem Bild auseinander, um es zu vergrößern. Ziehe ein vergrößertes Bild zum Verschieben. Scrolle im Sammlungsraster, um große Bibliotheken zu durchsuchen.',
     'Use the zoom controls or pinch on an image to zoom; drag a zoomed image to pan. Scroll the collection grid to browse large libraries. Enter fullscreen to focus on categorizing; press Escape or use the close button to leave.':
@@ -487,8 +480,8 @@
         (_, category, count) => `${category} · ${count} Foto(s)`)
       .replace(/^Analysis paused · (\d+) of (\d+) items analyzed\.$/,
         (_, processed, total) => `Analyse pausiert · ${processed} von ${total} Elementen analysiert.`)
-      .replace(/^Analysis complete · (\d+) items checked · (\d+) blur finding\(s\)\.$/,
-        (_, total, blurry) => `Analyse abgeschlossen · ${total} Elemente geprüft · ${blurry} unscharfe Fotos gefunden.`)
+      .replace(/^Analysis complete · (\d+) items checked\.$/,
+        (_, total) => `Analyse abgeschlossen · ${total} Elemente geprüft.`)
       .replace(/^Analysis running · (\d+) of (\d+) items analyzed · (\d+) pending\.$/,
         (_, processed, total, pending) =>
           `Analyse läuft · ${processed} von ${total} Elementen analysiert · ${pending} ausstehend.`)

@@ -381,13 +381,6 @@ function migrateDatabase(db) {
       `),
     },
     {
-      version: 5,
-      apply: () => db.exec(`
-        UPDATE photo_health_items SET status = 'pending'
-        WHERE kind = 'image' AND status = 'analyzed';
-      `),
-    },
-    {
       version: 6,
       apply: () => db.exec(`
         CREATE TABLE IF NOT EXISTS custom_categories (
@@ -1345,9 +1338,7 @@ class PhotoSorter {
         SUM(CASE WHEN h.status = 'unsupported' AND h.size = m.size AND h.modified_at = m.modified_at
           THEN 1 ELSE 0 END) AS unsupported,
         SUM(CASE WHEN h.status = 'failed' AND h.size = m.size AND h.modified_at = m.modified_at
-          THEN 1 ELSE 0 END) AS failed,
-        SUM(CASE WHEN h.is_blurry = 1 AND h.status = 'analyzed'
-          AND h.size = m.size AND h.modified_at = m.modified_at THEN 1 ELSE 0 END) AS blurry
+          THEN 1 ELSE 0 END) AS failed
       FROM media m JOIN roots r ON r.id = m.root_id
       LEFT JOIN photo_health_items h ON h.media_id = m.id
       WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1
@@ -1371,7 +1362,6 @@ class PhotoSorter {
       pending: Math.max(0, total - processed),
       unsupported: totals.unsupported || 0,
       failed: totals.failed || 0,
-      blurry: totals.blurry || 0,
       updatedAt: settings?.updatedAt || null,
       errors,
     };
@@ -1483,7 +1473,7 @@ class PhotoSorter {
       ON CONFLICT(media_id) DO UPDATE SET size = excluded.size, modified_at = excluded.modified_at,
         kind = excluded.kind, status = 'processing', sha256 = NULL, phash = NULL,
         image_signature = NULL, width = NULL,
-        height = NULL, blur_score = NULL, is_blurry = 0, error = NULL, analyzed_at = NULL
+        height = NULL, error = NULL, analyzed_at = NULL
     `).run(media.id, media.size, media.modifiedAt, media.kind);
     let status = 'failed';
     let errorMessage = null;
@@ -1504,7 +1494,7 @@ class PhotoSorter {
         ? await analyzeImage(resolvedPath)
         : {
           sha256: await fileSha256(resolvedPath), phash: null, imageSignature: null,
-          width: null, height: null, blurScore: null, isBlurry: false,
+          width: null, height: null,
         };
       const finalStat = await fs.stat(resolvedPath);
       if (finalStat.size !== media.size || finalStat.mtimeMs !== media.modifiedAt) {
@@ -1520,14 +1510,11 @@ class PhotoSorter {
       const analyzedAt = new Date().toISOString();
       this.db.prepare(`
         UPDATE photo_health_items SET status = 'analyzed', sha256 = ?, phash = ?, image_signature = ?,
-          width = ?, height = ?, blur_score = ?, is_blurry = ?, error = NULL, analyzed_at = ?
+          width = ?, height = ?, error = NULL, analyzed_at = ?
         WHERE media_id = ?
-      `).run(result.sha256, result.phash, result.imageSignature, result.width, result.height, result.blurScore,
-        result.isBlurry ? 1 : 0, analyzedAt, media.id);
+      `).run(result.sha256, result.phash, result.imageSignature, result.width, result.height, analyzedAt, media.id);
       this.recordPhotoHealthMatches(collectionId, media, result);
-      this.log('photo_health_item_analyzed', {
-        collectionId, mediaId: media.id, blurry: Boolean(result.isBlurry),
-      });
+      this.log('photo_health_item_analyzed', { collectionId, mediaId: media.id });
     } catch (error) {
       const unsupported = media.kind === 'image' && !['ENOENT', 'EACCES', 'EPERM'].includes(error.code);
       status = unsupported ? 'unsupported' : 'failed';
@@ -1620,7 +1607,7 @@ class PhotoSorter {
     if (!this.db.prepare('SELECT id FROM collections WHERE id = ? AND active = 1').get(collectionId)) {
       throw new Error('Collection not found.');
     }
-    if (!['all', 'duplicate', 'blur'].includes(type)) throw new Error('Invalid Photo Health finding type.');
+    if (!['all', 'duplicate'].includes(type)) throw new Error('Invalid Photo Health finding type.');
     if (!['open', 'handled', 'all'].includes(handled)) throw new Error('Invalid handled filter.');
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > 2_000_000
       || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
@@ -1629,13 +1616,7 @@ class PhotoSorter {
     const duplicateHandled = handled === 'open'
       ? 'AND SUM(CASE WHEN m.category IS NULL THEN 1 ELSE 0 END) > 0'
       : handled === 'handled' ? 'AND SUM(CASE WHEN m.category IS NULL THEN 1 ELSE 0 END) = 0' : '';
-    const blurHandled = handled === 'open'
-      ? 'AND m.category IS NULL'
-      : handled === 'handled' ? 'AND m.category IS NOT NULL' : '';
-    const duplicateQuery = type === 'blur' ? `
-      SELECT NULL AS groupId, 'duplicate' AS type, NULL AS mediaId, NULL AS reason,
-        NULL AS strength, 0 AS memberCount, 0 AS handled, NULL AS label, NULL AS category WHERE 0
-    ` : `
+    const duplicateQuery = `
       SELECT g.id AS groupId, 'duplicate' AS type, NULL AS mediaId,
         CASE g.match_type WHEN 'exact' THEN 'Exact file match'
           ELSE 'Very similar image framing and content' END AS reason,
@@ -1652,30 +1633,14 @@ class PhotoSorter {
       GROUP BY g.id, g.match_type
       HAVING COUNT(*) >= 2 ${duplicateHandled}
     `;
-    const blurQuery = type === 'duplicate' ? `
-      SELECT NULL AS groupId, 'blur' AS type, NULL AS mediaId, NULL AS reason,
-        NULL AS strength, 0 AS memberCount, 0 AS handled, NULL AS label, NULL AS category WHERE 0
-    ` : `
-      SELECT NULL AS groupId, 'blur' AS type, m.id AS mediaId,
-        'Low edge sharpness (score ' || printf('%.2f', h.blur_score) || ')' AS reason,
-        NULL AS strength, 1 AS memberCount, CASE WHEN m.category IS NULL THEN 0 ELSE 1 END AS handled,
-        m.relative_path AS label, m.category AS category
-      FROM photo_health_items h
-      JOIN media m ON m.id = h.media_id JOIN roots r ON r.id = m.root_id
-      WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1 AND m.kind = 'image'
-        AND h.status = 'analyzed' AND h.is_blurry = 1 AND h.size = m.size AND h.modified_at = m.modified_at
-        ${blurHandled}
-    `;
     const query = `
-      WITH findings AS (${duplicateQuery} UNION ALL ${blurQuery})
-      SELECT * FROM findings ORDER BY type, groupId, mediaId LIMIT ? OFFSET ?
+      WITH findings AS (${duplicateQuery})
+      SELECT * FROM findings ORDER BY type, groupId LIMIT ? OFFSET ?
     `;
-    const values = [];
-    if (type !== 'blur') values.push(collectionId, collectionId);
-    if (type !== 'duplicate') values.push(collectionId);
+    const values = [collectionId, collectionId];
     const items = this.db.prepare(query).all(...values, limit, offset);
     const countQuery = `
-      WITH findings AS (${duplicateQuery} UNION ALL ${blurQuery})
+      WITH findings AS (${duplicateQuery})
       SELECT COUNT(*) AS total FROM findings
     `;
     const total = this.db.prepare(countQuery).get(...values).total;
@@ -1820,7 +1785,7 @@ class PhotoSorter {
         ON CONFLICT(media_id) DO UPDATE SET size = excluded.size, modified_at = excluded.modified_at,
           kind = excluded.kind, status = 'pending', sha256 = NULL, phash = NULL,
           image_signature = NULL, width = NULL,
-          height = NULL, blur_score = NULL, is_blurry = 0, error = NULL, analyzed_at = NULL
+          height = NULL, error = NULL, analyzed_at = NULL
         WHERE photo_health_items.size != excluded.size OR photo_health_items.modified_at != excluded.modified_at
           OR photo_health_items.kind != excluded.kind
       `);

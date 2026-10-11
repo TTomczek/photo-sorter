@@ -127,7 +127,6 @@ button.keep { background: #1d7542; }
 .photo-health-finding { min-width: 0; padding: .8rem; border: 1px solid #d7dce1; border-radius: .65rem; }
 .photo-health-finding h3 { margin: 0 0 .4rem; font-size: 1rem; }
 .photo-health-finding p { margin: .35rem 0; overflow-wrap: anywhere; }
-.health-decision { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .5rem; }
 .health-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; margin: .6rem 0; }
 .health-compare figure { min-width: 0; margin: 0; }
 .health-compare-viewport { height: 15rem; overflow: hidden; display: grid; place-items: center; border-radius: .45rem; background: #101418; touch-action: none; }
@@ -143,7 +142,6 @@ button.keep { background: #1d7542; }
 .health-member-list input { flex: none; }
 .health-zoom-controls { margin: .35rem 0; }
 .photo-health-pagination { justify-content: center; margin-top: .8rem; }
-.photo-health-blur-preview { width: min(100%, 24rem); max-height: 18rem; object-fit: contain; background: #101418; }
 .review { text-align: center; }
 .review-heading { text-align: left; }
 .current-media { min-height: 230px; max-height: min(60vh, 620px); display: grid; place-items: center; overflow: hidden; background: #101418; color: white; border-radius: .55rem; }

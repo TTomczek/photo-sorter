@@ -40,7 +40,6 @@ const state = {
   lastScanUiKey: '',
   statusKind: 'user',
   photoHealth: {
-    type: 'all',
     handled: 'open',
     offset: 0,
     limit: 30,
@@ -657,7 +656,7 @@ function healthStatusText(status) {
   if (!status.enabled) return 'Analysis is not enabled for this collection.';
   if (status.paused) return `Analysis paused · ${status.processed} of ${status.total} items analyzed.`;
   if (status.status === 'completed') {
-    return `Analysis complete · ${status.total} items checked · ${status.blurry} blur finding(s).`;
+    return `Analysis complete · ${status.total} items checked.`;
   }
   return `Analysis running · ${status.processed} of ${status.total} items analyzed · ${status.pending} pending.`;
 }
@@ -696,7 +695,6 @@ async function loadPhotoHealth({ statusOnly = false } = {}) {
 
   const params = new URLSearchParams({
     collectionId: state.collectionId,
-    type: photoHealth.type,
     handled: photoHealth.handled,
     offset: String(photoHealth.offset),
     limit: String(photoHealth.limit),
@@ -708,48 +706,27 @@ async function loadPhotoHealth({ statusOnly = false } = {}) {
   list.replaceChildren();
   for (const finding of findings.items) {
     const card = element('article', undefined, 'photo-health-finding');
-    if (finding.type === 'duplicate') {
-      const strength = finding.reason === 'Exact file match' ? 'Exact match'
-        : `Similarity strength ${Math.round(finding.strength * 100)}%`;
-      card.append(element('h3', `Duplicate group · ${finding.memberCount} photos`));
-      card.append(element('p', `${finding.reason} · ${strength}`));
-      const compare = element('button', photoHealth.openGroupId === finding.groupId ? 'Close comparison' : 'Compare and review');
-      compare.type = 'button';
-      compare.addEventListener('click', () => {
-        if (photoHealth.openGroupId === finding.groupId) {
-          photoHealth.openGroupId = '';
-          loadPhotoHealth().catch((error) => setStatus(error.message, true));
-        } else {
-          photoHealth.openGroupId = finding.groupId;
-          photoHealth.groupOffset = 0;
-          photoHealth.compareIds = [];
-          renderPhotoHealthGroup(card, finding.groupId).catch((error) => setStatus(error.message, true));
-        }
-      });
-      card.append(compare);
+    const strength = finding.reason === 'Exact file match' ? 'Exact match'
+      : `Similarity strength ${Math.round(finding.strength * 100)}%`;
+    card.append(element('h3', `Duplicate group · ${finding.memberCount} photos`));
+    card.append(element('p', `${finding.reason} · ${strength}`));
+    const compare = element('button', photoHealth.openGroupId === finding.groupId ? 'Close comparison' : 'Compare and review');
+    compare.type = 'button';
+    compare.addEventListener('click', () => {
       if (photoHealth.openGroupId === finding.groupId) {
-        card.dataset.groupId = finding.groupId;
+        photoHealth.openGroupId = '';
+        loadPhotoHealth().catch((error) => setStatus(error.message, true));
+      } else {
+        photoHealth.openGroupId = finding.groupId;
+        photoHealth.groupOffset = 0;
+        photoHealth.compareIds = [];
         renderPhotoHealthGroup(card, finding.groupId).catch((error) => setStatus(error.message, true));
       }
-    } else {
-      card.append(element('h3', 'Clearly blurry photo'), element('p', `${finding.label} · ${finding.reason}`));
-      if (finding.category) card.append(element('p', `Current decision: ${finding.category}`));
-      const preview = element('img', undefined, 'photo-health-blur-preview');
-      preview.src = mediaUrl({ id: finding.mediaId });
-      preview.alt = finding.label;
-      preview.loading = 'lazy';
-      preview.onerror = () => preview.replaceWith(element('p', 'Preview unavailable; the decision is still available.'));
-      card.append(preview);
-      const actions = element('div', undefined, 'health-decision');
-      for (const [category, label, className] of [
-        ['keep', 'Keep', 'keep'], ['unsure', 'Unsure', 'unsure'], ['delete', 'Stage as Deleted', 'delete'],
-      ]) {
-        const button = element('button', label, className);
-        button.type = 'button';
-        button.addEventListener('click', () => decidePhotoHealthItem(finding.mediaId, category));
-        actions.append(button);
-      }
-      card.append(actions);
+    });
+    card.append(compare);
+    if (photoHealth.openGroupId === finding.groupId) {
+      card.dataset.groupId = finding.groupId;
+      renderPhotoHealthGroup(card, finding.groupId).catch((error) => setStatus(error.message, true));
     }
     if (finding.handled) card.append(element('p', 'Handled · decision is shared with other views.'));
     list.append(card);
@@ -918,21 +895,6 @@ function updateHealthCompareImages(container, members) {
       caption.textContent = `${member.relativePath} · ${formatBytes(member.size)}`;
     }
     image.style.transform = `translate(${photoHealth.panX}px, ${photoHealth.panY}px) scale(${photoHealth.zoomScale})`;
-  }
-}
-
-async function decidePhotoHealthItem(mediaId, category) {
-  try {
-    await request(`/api/media/${encodeURIComponent(mediaId)}/lock`, { method: 'POST' });
-    await request(`/api/media/${encodeURIComponent(mediaId)}/decision`, {
-      method: 'PUT', body: JSON.stringify({ category }),
-    });
-    setStatus(`Saved ${category} decision. No files were moved.`);
-    await loadPhotoHealth();
-  } catch (error) {
-    setStatus(error.message, true);
-  } finally {
-    request(`/api/media/${encodeURIComponent(mediaId)}/lock`, { method: 'DELETE' }).catch(() => {});
   }
 }
 
@@ -2197,13 +2159,11 @@ for (const [buttonId, action] of [['photo-health-pause', 'pause'], ['photo-healt
     } catch (error) { setStatus(error.message, true); }
   });
 }
-for (const [controlId, key] of [['photo-health-type', 'type'], ['photo-health-handled', 'handled']]) {
-  byId(controlId).addEventListener('change', async (event) => {
-    state.photoHealth[key] = event.target.value;
-    state.photoHealth.offset = 0;
-    try { await loadPhotoHealth(); } catch (error) { setStatus(error.message, true); }
-  });
-}
+byId('photo-health-handled').addEventListener('change', async (event) => {
+  state.photoHealth.handled = event.target.value;
+  state.photoHealth.offset = 0;
+  try { await loadPhotoHealth(); } catch (error) { setStatus(error.message, true); }
+});
 byId('photo-health-previous').addEventListener('click', async () => {
   state.photoHealth.offset = Math.max(0, state.photoHealth.offset - state.photoHealth.limit);
   try { await loadPhotoHealth(); } catch (error) { setStatus(error.message, true); }
