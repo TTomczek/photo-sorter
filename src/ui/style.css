@@ -350,6 +350,7 @@ body.app-active #network-warning .warning-dismiss { padding: .35rem .55rem; }
 #status { flex: none; margin: 0; padding: .3rem .8rem; font-size: .88rem; }
 #status:empty { display: none; }
 .app-view { flex: 1; min-width: 0; min-height: 0; }
+#browse-view { overflow: auto; }
 #review-view { overflow: hidden; }
 #review {
   position: relative;

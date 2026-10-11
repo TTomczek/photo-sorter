@@ -211,6 +211,35 @@ test('a single tap keeps the photo and a double tap marks it for deletion', asyn
   }
 });
 
+test('Browse can scroll down to the image grid on short phone screens', async () => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 480 } });
+  const page = await context.newPage();
+  try {
+    await setupAccount(page);
+    await page.locator('#menu-toggle').click();
+    await page.locator('#app-navigation [data-view="browse"]').click();
+    await expect(page.locator('#browse-view')).toBeVisible();
+    await expect(page.locator('#media-grid')).toContainText('01-red.png');
+
+    const filters = await page.locator('#filters').boundingBox();
+    await page.mouse.move(filters.x + filters.width / 2, filters.y + filters.height / 2);
+    await page.mouse.wheel(0, 600);
+
+    await expect.poll(
+      () => page.locator('#browse-view').evaluate((element) => element.scrollTop),
+      { timeout: 2_000 },
+    ).toBeGreaterThan(0);
+    const gridIsVisible = await page.evaluate(() => {
+      const view = document.querySelector('#browse-view').getBoundingClientRect();
+      const grid = document.querySelector('#media-viewport').getBoundingClientRect();
+      return grid.top < view.bottom && grid.bottom > view.top;
+    });
+    expect(gridIsVisible).toBe(true);
+  } finally {
+    await context.close();
+  }
+});
+
 test('first-run review focus, photo details, category browsing and safe apply/restore', async () => {
   const context = await browser.newContext();
   const page = await context.newPage();
