@@ -109,6 +109,32 @@ test('large-library listing returns a bounded page near the end of 200,000 index
   assert.equal(groupPage.items.length, 1);
   t.diagnostic(`Photo Health page over 200,000 indexed items returned 30 of 100 groups in ${elapsed.toFixed(1)} ms.`);
 
+  const completeAnalysis = app.db.prepare(`
+    INSERT INTO photo_health_items(media_id, size, modified_at, kind, status, sha256, analyzed_at)
+    SELECT m.id, m.size, m.modified_at, m.kind, 'analyzed', 'fixture-hash', ?
+    FROM media m
+    WHERE m.root_id = ? AND NOT EXISTS (
+      SELECT 1 FROM photo_health_items h WHERE h.media_id = m.id
+    )
+  `).run(analyzedAt, rootId);
+  assert.equal(Number(completeAnalysis.changes), 199_800);
+  app.db.prepare(`
+    INSERT INTO photo_health_settings(collection_id, enabled, paused, updated_at)
+    VALUES (?, 1, 0, ?)
+  `).run(collectionId, analyzedAt);
+  const reanalysisStartedAt = performance.now();
+  const reanalysis = app.reanalyzePhotoHealth(collectionId);
+  const reanalysisElapsed = performance.now() - reanalysisStartedAt;
+  assert.equal(reanalysis.queuedCount, 200_000);
+  assert.equal(reanalysis.status.status, 'running');
+  assert.equal(reanalysis.status.pending, 200_000);
+  assert.equal(app.db.prepare(`
+    SELECT COUNT(*) AS count FROM photo_health_reanalysis_queue WHERE collection_id = ?
+  `).get(collectionId).count, 200_000);
+  assert.equal(app.db.prepare('SELECT category FROM media WHERE id = ?')
+    .get('media-199999').category, 'unsure');
+  t.diagnostic(`Photo Health reanalysis queued 200,000 items in ${reanalysisElapsed.toFixed(1)} ms with one bounded-memory database insert.`);
+
   const popularCategory = app.createCategory(collectionId, 'Popular');
   const lessUsedCategory = app.createCategory(collectionId, 'Less used');
   app.db.prepare('UPDATE media SET category = ? WHERE root_id = ? AND id < ?')

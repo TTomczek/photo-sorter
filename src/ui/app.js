@@ -45,8 +45,7 @@ const state = {
     limit: 30,
     openGroupId: '',
     groupOffset: 0,
-    keepSelections: new Map(),
-    compareIds: [],
+    reviewSession: null,
     zoomScale: 1,
     panX: 0,
     panY: 0,
@@ -129,6 +128,10 @@ function updateDrawerOffset() {
 }
 
 function showView(view) {
+  if (state.view === 'photo-health' && view !== 'photo-health') {
+    discardPhotoHealthReview();
+    state.photoHealth.openGroupId = '';
+  }
   state.view = view;
   byId('review-progress').textContent = view === 'review' ? `${state.total} to review` : '';
   for (const panel of document.querySelectorAll('.app-view')) {
@@ -661,7 +664,7 @@ function healthStatusText(status) {
   return `Analysis running · ${status.processed} of ${status.total} items analyzed · ${status.pending} pending.`;
 }
 
-async function loadPhotoHealth({ statusOnly = false } = {}) {
+async function loadPhotoHealth({ statusOnly = false, openFindingIndex = null } = {}) {
   if (!state.collectionId) {
     byId('photo-health-status').textContent = 'Choose a collection to use Photo Health.';
     byId('photo-health-list').replaceChildren();
@@ -670,8 +673,13 @@ async function loadPhotoHealth({ statusOnly = false } = {}) {
     byId('photo-health-enable').classList.add('hidden');
     byId('photo-health-pause').classList.add('hidden');
     byId('photo-health-resume').classList.add('hidden');
+    byId('photo-health-reanalyze').classList.add('hidden');
+    byId('photo-health-undo').disabled = true;
+    byId('photo-health-redo').disabled = true;
     return;
   }
+  byId('photo-health-undo').disabled = false;
+  byId('photo-health-redo').disabled = false;
   const collectionId = encodeURIComponent(state.collectionId);
   const status = await request(`/api/photo-health/status?collectionId=${collectionId}`);
   const photoHealth = state.photoHealth;
@@ -683,6 +691,8 @@ async function loadPhotoHealth({ statusOnly = false } = {}) {
   byId('photo-health-enable').classList.toggle('hidden', status.enabled);
   byId('photo-health-pause').classList.toggle('hidden', !status.enabled || status.paused || status.pending === 0);
   byId('photo-health-resume').classList.toggle('hidden', !status.enabled || !status.paused);
+  byId('photo-health-reanalyze').classList.toggle('hidden',
+    !status.enabled || status.status !== 'completed' || status.total === 0);
   const errors = byId('photo-health-errors');
   errors.replaceChildren(...status.errors.map((entry) => {
     const item = element('li', `${entry.path}: ${entry.status === 'unsupported'
@@ -702,9 +712,23 @@ async function loadPhotoHealth({ statusOnly = false } = {}) {
   const findings = status.enabled
     ? await request(`/api/photo-health/findings?${params}`)
     : { items: [], total: 0 };
+  if (openFindingIndex !== null) {
+    if (openFindingIndex >= findings.total) {
+      photoHealth.openGroupId = '';
+      const lastOffset = findings.total
+        ? Math.floor((findings.total - 1) / photoHealth.limit) * photoHealth.limit : 0;
+      if (photoHealth.offset !== lastOffset) {
+        photoHealth.offset = lastOffset;
+        await loadPhotoHealth();
+        return;
+      }
+    } else {
+      photoHealth.openGroupId = findings.items[openFindingIndex - photoHealth.offset]?.groupId || '';
+    }
+  }
   const list = byId('photo-health-list');
   list.replaceChildren();
-  for (const finding of findings.items) {
+  for (const [index, finding] of findings.items.entries()) {
     const card = element('article', undefined, 'photo-health-finding');
     const strength = finding.reason === 'Exact file match' ? 'Exact match'
       : `Similarity strength ${Math.round(finding.strength * 100)}%`;
@@ -714,19 +738,24 @@ async function loadPhotoHealth({ statusOnly = false } = {}) {
     compare.type = 'button';
     compare.addEventListener('click', () => {
       if (photoHealth.openGroupId === finding.groupId) {
+        discardPhotoHealthReview();
         photoHealth.openGroupId = '';
+        compare.textContent = 'Compare and review';
         loadPhotoHealth().catch((error) => setStatus(error.message, true));
       } else {
+        discardPhotoHealthReview();
         photoHealth.openGroupId = finding.groupId;
-        photoHealth.groupOffset = 0;
-        photoHealth.compareIds = [];
-        renderPhotoHealthGroup(card, finding.groupId).catch((error) => setStatus(error.message, true));
+        compare.textContent = 'Close comparison';
+        card.dataset.groupId = finding.groupId;
+        renderPhotoHealthGroup(card, finding.groupId, photoHealth.offset + index)
+          .catch((error) => setStatus(error.message, true));
       }
     });
     card.append(compare);
     if (photoHealth.openGroupId === finding.groupId) {
       card.dataset.groupId = finding.groupId;
-      renderPhotoHealthGroup(card, finding.groupId).catch((error) => setStatus(error.message, true));
+      renderPhotoHealthGroup(card, finding.groupId, photoHealth.offset + index)
+        .catch((error) => setStatus(error.message, true));
     }
     if (finding.handled) card.append(element('p', 'Handled · decision is shared with other views.'));
     list.append(card);
@@ -744,139 +773,160 @@ async function loadPhotoHealth({ statusOnly = false } = {}) {
   byId('photo-health-next').disabled = photoHealth.offset + photoHealth.limit >= findings.total;
 }
 
-async function renderPhotoHealthGroup(card, groupId) {
+function discardPhotoHealthReview() {
+  state.photoHealth.reviewSession = null;
+  state.photoHealth.zoomScale = 1;
+  state.photoHealth.panX = 0;
+  state.photoHealth.panY = 0;
+}
+
+async function getPhotoHealthMember(session, index) {
+  const pageOffset = Math.floor(index / 100) * 100;
+  let page = session.pages.get(pageOffset);
+  if (!page) {
+    const params = new URLSearchParams({
+      collectionId: state.collectionId,
+      offset: String(pageOffset),
+      limit: '100',
+    });
+    page = await request(`/api/photo-health/groups/${encodeURIComponent(session.groupId)}?${params}`);
+    if (page.total !== session.total) {
+      throw new Error('This duplicate group changed while it was being reviewed. Close and reopen it.');
+    }
+    session.pages.set(pageOffset, page);
+    while (session.pages.size > 2) session.pages.delete(session.pages.keys().next().value);
+  } else {
+    session.pages.delete(pageOffset);
+    session.pages.set(pageOffset, page);
+  }
+  const member = page.items[index - pageOffset];
+  if (!member) throw new Error('A duplicate photo is no longer available. Close and reopen this group.');
+  return member;
+}
+
+async function renderPhotoHealthGroup(card, groupId, queueIndex) {
   const photoHealth = state.photoHealth;
-  const params = new URLSearchParams({
-    collectionId: state.collectionId,
-    offset: String(photoHealth.groupOffset),
-    limit: '100',
-  });
-  const result = await request(`/api/photo-health/groups/${encodeURIComponent(groupId)}?${params}`);
+  let session = photoHealth.reviewSession;
+  if (!session || session.groupId !== groupId) {
+    const params = new URLSearchParams({ collectionId: state.collectionId, offset: '0', limit: '100' });
+    const firstPage = await request(`/api/photo-health/groups/${encodeURIComponent(groupId)}?${params}`);
+    if (!card.isConnected || photoHealth.openGroupId !== groupId) return;
+    if (firstPage.total < 2) throw new Error('This duplicate group no longer has enough available photos to compare.');
+    session = {
+      groupId,
+      total: firstPage.total,
+      queueIndex,
+      pages: new Map([[0, firstPage]]),
+      cursor: 0,
+      winnerIndex: 0,
+      winnerHistory: [],
+      busy: false,
+    };
+    photoHealth.reviewSession = session;
+  }
   if (!card.isConnected || photoHealth.openGroupId !== groupId) return;
-  const members = result.items;
+  const left = await getPhotoHealthMember(session, session.winnerIndex);
+  const right = await getPhotoHealthMember(session, session.cursor + 1);
+  if (!card.isConnected || photoHealth.reviewSession !== session) return;
   const existing = card.querySelector('.health-group-details');
   existing?.remove();
   const details = element('section', undefined, 'health-group-details');
-  details.append(element('p', 'Compare the files side by side, then choose one or more photos to keep. Every other group member will be staged as Deleted; no files are moved.'));
-  const selected = photoHealth.keepSelections.get(groupId) || new Set();
-  photoHealth.keepSelections.set(groupId, selected);
-  if (members.length) {
-    const visibleIds = new Set(members.map((member) => member.id));
-    const selectedCompareIds = photoHealth.compareIds.filter((id) => visibleIds.has(id));
-    photoHealth.compareIds = selectedCompareIds.length
-      ? selectedCompareIds : members.slice(0, 2).map((member) => member.id);
-    const compareControls = element('div', undefined, 'health-zoom-controls');
-    ['Left comparison', 'Right comparison'].forEach((label, index) => {
-      const select = element('select');
-      select.setAttribute('aria-label', label);
-      for (const member of members) {
-        const option = element('option', member.relativePath);
-        option.value = member.id;
-        option.selected = photoHealth.compareIds[index] === member.id;
-        select.append(option);
-      }
-      select.addEventListener('change', () => {
-        photoHealth.compareIds[index] = select.value;
-        updateHealthCompareImages(details, members);
-      });
-      compareControls.append(select);
+  details.append(element('p', `Comparison ${session.cursor + 1} of ${session.total - 1} · Choose which image to keep. Leaving before the last comparison discards these staged choices.`));
+  const compareControls = element('div', undefined, 'health-zoom-controls');
+  for (const [delta, label] of [[-0.25, 'Zoom out'], [0.25, 'Zoom in']]) {
+    const button = element('button', label);
+    button.type = 'button';
+    button.addEventListener('click', () => {
+      photoHealth.zoomScale = Math.max(1, Math.min(4, photoHealth.zoomScale + delta));
+      updateHealthCompareImages(details, [left, right]);
     });
-    for (const [delta, label] of [[-0.25, 'Zoom out'], [0.25, 'Zoom in']]) {
-      const button = element('button', label);
-      button.type = 'button';
-      button.addEventListener('click', () => {
-        photoHealth.zoomScale = Math.max(1, Math.min(4, photoHealth.zoomScale + delta));
-        updateHealthCompareImages(details, members);
-      });
-      compareControls.append(button);
-    }
-    const reset = element('button', 'Reset zoom');
-    reset.type = 'button';
-    reset.addEventListener('click', () => {
-      photoHealth.zoomScale = 1;
-      photoHealth.panX = 0;
-      photoHealth.panY = 0;
-      updateHealthCompareImages(details, members);
-    });
-    compareControls.append(reset);
-    details.append(compareControls);
-
-    const comparison = element('div', undefined, 'health-compare');
-    for (let index = 0; index < 2; index += 1) {
-      const figure = element('figure');
-      const viewport = element('div', undefined, 'health-compare-viewport');
-      const member = members.find((item) => item.id === photoHealth.compareIds[index]);
-      const preview = member?.kind === 'video' ? element('video') : element('img');
-      if (preview instanceof HTMLVideoElement) {
-        preview.controls = true;
-        preview.preload = 'metadata';
-      } else {
-        preview.alt = member?.relativePath || '';
-        preview.draggable = false;
-      }
-      viewport.append(preview);
-      figure.append(viewport, element('figcaption'));
-      comparison.append(figure);
-      viewport.addEventListener('pointerdown', (event) => {
-        if (event.button !== 0 || photoHealth.zoomScale <= 1) return;
-        viewport.setPointerCapture(event.pointerId);
-        photoHealth.lastPointer = { x: event.clientX, y: event.clientY };
-      });
-      viewport.addEventListener('pointermove', (event) => {
-        if (!photoHealth.lastPointer || !viewport.hasPointerCapture(event.pointerId)) return;
-        photoHealth.panX += event.clientX - photoHealth.lastPointer.x;
-        photoHealth.panY += event.clientY - photoHealth.lastPointer.y;
-        photoHealth.lastPointer = { x: event.clientX, y: event.clientY };
-        updateHealthCompareImages(details, members);
-      });
-      viewport.addEventListener('pointerup', () => { photoHealth.lastPointer = null; });
-      viewport.addEventListener('pointercancel', () => { photoHealth.lastPointer = null; });
-    }
-    details.append(comparison);
-    updateHealthCompareImages(details, members);
-
-    const memberList = element('div', undefined, 'health-member-list');
-    for (const member of members) {
-      const label = element('label');
-      const checkbox = element('input');
-      checkbox.type = 'checkbox';
-      checkbox.checked = selected.has(member.id);
-      checkbox.addEventListener('change', () => {
-        if (checkbox.checked) selected.add(member.id);
-        else selected.delete(member.id);
-        apply.disabled = selected.size === 0;
-      });
-      label.append(checkbox, element('span', `${member.relativePath} · ${member.category || 'Unseen'}`));
-      memberList.append(label);
-    }
-    details.append(memberList);
-    const controls = element('div', undefined, 'health-zoom-controls');
-    if (photoHealth.groupOffset > 0) {
-      const previous = element('button', 'Previous members');
-      previous.type = 'button';
-      previous.addEventListener('click', () => {
-        photoHealth.groupOffset = Math.max(0, photoHealth.groupOffset - 100);
-        renderPhotoHealthGroup(card, groupId).catch((error) => setStatus(error.message, true));
-      });
-      controls.append(previous);
-    }
-    if (photoHealth.groupOffset + result.items.length < result.total) {
-      const next = element('button', 'Next members');
-      next.type = 'button';
-      next.addEventListener('click', () => {
-        photoHealth.groupOffset += 100;
-        renderPhotoHealthGroup(card, groupId).catch((error) => setStatus(error.message, true));
-      });
-      controls.append(next);
-    }
-    controls.append(element('span', `Showing ${photoHealth.groupOffset + 1}–${photoHealth.groupOffset + members.length} of ${result.total}`));
-    details.append(controls);
-    const apply = element('button', 'Keep selected; stage the rest as Deleted', 'delete');
-    apply.type = 'button';
-    apply.disabled = selected.size === 0;
-    apply.addEventListener('click', () => decidePhotoHealthGroup(groupId, result.total, selected));
-    details.append(apply);
+    compareControls.append(button);
   }
+  const reset = element('button', 'Reset zoom');
+  reset.type = 'button';
+  reset.addEventListener('click', () => {
+    photoHealth.zoomScale = 1;
+    photoHealth.panX = 0;
+    photoHealth.panY = 0;
+    updateHealthCompareImages(details, [left, right]);
+  });
+  compareControls.append(reset);
+  details.append(compareControls);
+
+  const comparison = element('div', undefined, 'health-compare');
+  for (const member of [left, right]) {
+    const figure = element('figure');
+    const viewport = element('div', undefined, 'health-compare-viewport');
+    const preview = member.kind === 'video' ? element('video') : element('img');
+    if (preview instanceof HTMLVideoElement) {
+      preview.controls = true;
+      preview.preload = 'metadata';
+    } else {
+      preview.alt = member.relativePath;
+      preview.draggable = false;
+    }
+    viewport.append(preview);
+    figure.append(viewport, element('figcaption'));
+    comparison.append(figure);
+    viewport.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || photoHealth.zoomScale <= 1) return;
+      viewport.setPointerCapture(event.pointerId);
+      photoHealth.lastPointer = { x: event.clientX, y: event.clientY };
+    });
+    viewport.addEventListener('pointermove', (event) => {
+      if (!photoHealth.lastPointer || !viewport.hasPointerCapture(event.pointerId)) return;
+      photoHealth.panX += event.clientX - photoHealth.lastPointer.x;
+      photoHealth.panY += event.clientY - photoHealth.lastPointer.y;
+      photoHealth.lastPointer = { x: event.clientX, y: event.clientY };
+      updateHealthCompareImages(details, [left, right]);
+    });
+    viewport.addEventListener('pointerup', () => { photoHealth.lastPointer = null; });
+    viewport.addEventListener('pointercancel', () => { photoHealth.lastPointer = null; });
+  }
+  details.append(comparison);
+  updateHealthCompareImages(details, [left, right]);
+  let touchStart = null;
+  comparison.addEventListener('touchstart', (event) => {
+    if (event.touches.length !== 1 || photoHealth.zoomScale > 1
+      || event.target.closest('video')) return;
+    touchStart = { x: event.changedTouches[0].clientX, y: event.changedTouches[0].clientY };
+  }, { passive: true });
+  comparison.addEventListener('touchend', (event) => {
+    if (!touchStart || photoHealth.zoomScale > 1) {
+      touchStart = null;
+      return;
+    }
+    const dx = event.changedTouches[0].clientX - touchStart.x;
+    const dy = event.changedTouches[0].clientY - touchStart.y;
+    touchStart = null;
+    if (Math.abs(dx) > 65 && Math.abs(dx) > Math.abs(dy)) {
+      choosePhotoHealthWinner(session, dx < 0).catch((error) => setStatus(error.message, true));
+    }
+  }, { passive: true });
+
+  const decisions = element('div', undefined, 'health-review-actions');
+  const keepLeft = element('button', 'Keep left', 'keep');
+  keepLeft.type = 'button';
+  keepLeft.dataset.action = 'keep-left';
+  keepLeft.disabled = session.busy;
+  keepLeft.addEventListener('click', () => choosePhotoHealthWinner(session, false));
+  const undo = element('button', 'Undo comparison', 'quiet');
+  undo.type = 'button';
+  undo.dataset.action = 'undo';
+  undo.disabled = session.cursor === 0 || session.busy;
+  undo.addEventListener('click', () => undoPhotoHealthComparison(session));
+  const redo = element('button', 'Redo comparison', 'quiet');
+  redo.type = 'button';
+  redo.dataset.action = 'redo';
+  redo.disabled = session.cursor >= session.winnerHistory.length || session.busy;
+  redo.addEventListener('click', () => redoPhotoHealthComparison(session));
+  const keepRight = element('button', 'Keep right', 'keep');
+  keepRight.type = 'button';
+  keepRight.dataset.action = 'keep-right';
+  keepRight.disabled = session.busy;
+  keepRight.addEventListener('click', () => choosePhotoHealthWinner(session, true));
+  decisions.append(keepLeft, undo, redo, keepRight);
+  details.append(decisions);
   card.append(details);
 }
 
@@ -884,10 +934,9 @@ function updateHealthCompareImages(container, members) {
   const photoHealth = state.photoHealth;
   const figures = container.querySelectorAll('.health-compare figure');
   for (let index = 0; index < figures.length; index += 1) {
-    const member = members.find((item) => item.id === photoHealth.compareIds[index]);
+    const member = members[index];
     const image = figures[index].querySelector('img, video');
     const caption = figures[index].querySelector('figcaption');
-    if (!member) continue;
     if (image.dataset.mediaId !== member.id) {
       image.dataset.mediaId = member.id;
       image.src = mediaUrl(member);
@@ -898,24 +947,128 @@ function updateHealthCompareImages(container, members) {
   }
 }
 
-async function decidePhotoHealthGroup(groupId, total, selected) {
-  const keepIds = [...selected];
-  const choice = await showDialog('Save duplicate decisions', [
-    `Keep ${keepIds.length} selected photo(s) and stage ${total - keepIds.length} other group member(s) as Deleted?`,
-    'This only changes review decisions. No files will be moved or deleted.',
-  ], { confirmLabel: 'Save decisions' });
-  if (!choice.confirmed) return;
+async function choosePhotoHealthWinner(session, keepRight) {
+  if (session.busy || state.photoHealth.reviewSession !== session) return;
+  session.busy = true;
+  session.winnerHistory.length = session.cursor;
+  session.winnerIndex = keepRight ? session.cursor + 1 : session.winnerIndex;
+  session.winnerHistory.push(session.winnerIndex);
+  session.cursor += 1;
+  if (session.cursor === session.total - 1) {
+    session.busy = false;
+    await commitPhotoHealthReview(session);
+    return;
+  }
+  state.photoHealth.zoomScale = 1;
+  state.photoHealth.panX = 0;
+  state.photoHealth.panY = 0;
+  const card = [...document.querySelectorAll('.photo-health-finding')]
+    .find((item) => item.dataset.groupId === session.groupId);
+  if (card) {
+    try { await renderPhotoHealthGroup(card, session.groupId, session.queueIndex); }
+    catch (error) { setStatus(error.message, true); }
+    finally {
+      session.busy = false;
+      updatePhotoHealthReviewActions(card, session);
+    }
+  } else {
+    session.busy = false;
+  }
+}
+
+async function undoPhotoHealthComparison(session) {
+  if (session.busy || session.cursor === 0 || state.photoHealth.reviewSession !== session) return;
+  session.busy = true;
+  session.cursor -= 1;
+  session.winnerIndex = session.cursor === 0 ? 0 : session.winnerHistory[session.cursor - 1];
+  state.photoHealth.zoomScale = 1;
+  state.photoHealth.panX = 0;
+  state.photoHealth.panY = 0;
+  const card = [...document.querySelectorAll('.photo-health-finding')]
+    .find((item) => item.dataset.groupId === session.groupId);
+  if (card) {
+    try { await renderPhotoHealthGroup(card, session.groupId, session.queueIndex); }
+    catch (error) { setStatus(error.message, true); }
+    finally {
+      session.busy = false;
+      updatePhotoHealthReviewActions(card, session);
+    }
+  } else {
+    session.busy = false;
+  }
+}
+
+async function redoPhotoHealthComparison(session) {
+  if (session.busy || session.cursor >= session.winnerHistory.length
+    || state.photoHealth.reviewSession !== session) return;
+  session.busy = true;
+  session.winnerIndex = session.winnerHistory[session.cursor];
+  session.cursor += 1;
+  if (session.cursor === session.total - 1) {
+    session.busy = false;
+    await commitPhotoHealthReview(session);
+    return;
+  }
+  state.photoHealth.zoomScale = 1;
+  state.photoHealth.panX = 0;
+  state.photoHealth.panY = 0;
+  const card = [...document.querySelectorAll('.photo-health-finding')]
+    .find((item) => item.dataset.groupId === session.groupId);
+  if (card) {
+    try { await renderPhotoHealthGroup(card, session.groupId, session.queueIndex); }
+    catch (error) { setStatus(error.message, true); }
+    finally {
+      session.busy = false;
+      updatePhotoHealthReviewActions(card, session);
+    }
+  } else {
+    session.busy = false;
+  }
+}
+
+function updatePhotoHealthReviewActions(card, session) {
+  const buttons = card.querySelectorAll('.health-review-actions button');
+  buttons.forEach((button) => {
+    button.disabled = session.busy
+      || (button.dataset.action === 'undo' && session.cursor === 0)
+      || (button.dataset.action === 'redo' && session.cursor >= session.winnerHistory.length);
+  });
+}
+
+async function commitPhotoHealthReview(session) {
+  if (session.busy || state.photoHealth.reviewSession !== session) return;
+  session.busy = true;
   try {
-    const result = await request(`/api/photo-health/groups/${encodeURIComponent(groupId)}/decisions`, {
+    const winner = await getPhotoHealthMember(session, session.winnerIndex);
+    const result = await request(`/api/photo-health/groups/${encodeURIComponent(session.groupId)}/decisions`, {
       method: 'POST',
-      body: JSON.stringify({ collectionId: state.collectionId, keepIds }),
+      body: JSON.stringify({
+        collectionId: state.collectionId,
+        keepIds: [winner.id],
+        expectedMemberCount: session.total,
+      }),
     });
-    setStatus(`Saved duplicate decisions: ${result.keptCount} kept and ${result.deletedCount} staged as Deleted. No files were moved.`);
+    setStatus(`Saved duplicate decision: 1 kept and ${result.deletedCount} marked delete. No files were moved.`);
+    if (state.photoHealth.reviewSession !== session || state.view !== 'photo-health') return;
     state.photoHealth.openGroupId = '';
-    state.photoHealth.keepSelections.delete(groupId);
-    await loadPhotoHealth();
+    discardPhotoHealthReview();
+    const advanceBy = state.photoHealth.handled === 'open' ? 0 : 1;
+    const nextIndex = session.queueIndex + advanceBy;
+    state.photoHealth.offset = Math.floor(nextIndex / state.photoHealth.limit) * state.photoHealth.limit;
+    await loadPhotoHealth({ openFindingIndex: nextIndex });
   } catch (error) {
+    session.busy = false;
     setStatus(error.message, true);
+    if (state.photoHealth.reviewSession === session && session.cursor === session.total - 1) {
+      session.cursor -= 1;
+      session.winnerIndex = session.cursor === 0 ? 0 : session.winnerHistory[session.cursor - 1];
+      const card = [...document.querySelectorAll('.photo-health-finding')]
+        .find((item) => item.dataset.groupId === session.groupId);
+      if (card) {
+        try { await renderPhotoHealthGroup(card, session.groupId, session.queueIndex); }
+        catch (renderError) { setStatus(renderError.message, true); }
+      }
+    }
   }
 }
 
@@ -1293,9 +1446,9 @@ async function loadCollections(preferredId) {
     state.classificationPending = false;
     state.autoCategorizeCollectionId = state.collectionId;
     state.lastScanStatusKey = '';
+    discardPhotoHealthReview();
     state.photoHealth.openGroupId = '';
     state.photoHealth.groupOffset = 0;
-    state.photoHealth.keepSelections.clear();
     state.photoHealth.lastProcessed = null;
   }
   state.offset = 0;
@@ -2148,6 +2301,24 @@ byId('photo-health-enable').addEventListener('click', async () => {
     await loadPhotoHealth();
   } catch (error) { setStatus(error.message, true); }
 });
+byId('photo-health-reanalyze').addEventListener('click', async () => {
+  try {
+    const status = await request(`/api/photo-health/status?collectionId=${encodeURIComponent(state.collectionId)}`);
+    const choice = await showDialog('Reanalyze Photo Health', [
+      `Reanalyze all ${status.total} item(s) tracked in this collection?`,
+      'Existing Keep/Delete decisions are preserved. Duplicate findings disappear progressively as each item is rechecked.',
+    ], { confirmLabel: 'Reanalyze' });
+    if (!choice.confirmed) return;
+    const result = await request('/api/photo-health/reanalyze', {
+      method: 'POST',
+      body: JSON.stringify({ collectionId: state.collectionId }),
+    });
+    setStatus(`Queued Photo Health reanalysis for ${result.queuedCount} item(s). Review decisions are unchanged.`);
+    await loadPhotoHealth();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
 for (const [buttonId, action] of [['photo-health-pause', 'pause'], ['photo-health-resume', 'resume']]) {
   byId(buttonId).addEventListener('click', async () => {
     try {
@@ -2160,18 +2331,42 @@ for (const [buttonId, action] of [['photo-health-pause', 'pause'], ['photo-healt
   });
 }
 byId('photo-health-handled').addEventListener('change', async (event) => {
+  discardPhotoHealthReview();
+  state.photoHealth.openGroupId = '';
   state.photoHealth.handled = event.target.value;
   state.photoHealth.offset = 0;
   try { await loadPhotoHealth(); } catch (error) { setStatus(error.message, true); }
 });
 byId('photo-health-previous').addEventListener('click', async () => {
+  discardPhotoHealthReview();
+  state.photoHealth.openGroupId = '';
   state.photoHealth.offset = Math.max(0, state.photoHealth.offset - state.photoHealth.limit);
   try { await loadPhotoHealth(); } catch (error) { setStatus(error.message, true); }
 });
 byId('photo-health-next').addEventListener('click', async () => {
+  discardPhotoHealthReview();
+  state.photoHealth.openGroupId = '';
   state.photoHealth.offset += state.photoHealth.limit;
   try { await loadPhotoHealth(); } catch (error) { setStatus(error.message, true); }
 });
+for (const [buttonId, direction] of [
+  ['photo-health-undo', 'undo'],
+  ['photo-health-redo', 'redo'],
+]) {
+  byId(buttonId).addEventListener('click', async () => {
+    try {
+      const result = await request(`/api/decisions/${direction}`, { method: 'POST', body: '{}' });
+      if (!result.changed) {
+        setStatus(result.message);
+        return;
+      }
+      setStatus(`${direction === 'undo' ? 'Undid' : 'Redid'} the last saved ${result.batch ? 'duplicate group' : 'review'} decision.`);
+      await loadPhotoHealth();
+    } catch (error) {
+      setStatus(error.message, true);
+    }
+  });
+}
 
 async function saveSettings() {
   const form = byId('settings-form');
@@ -2516,7 +2711,26 @@ document.addEventListener('keydown', (event) => {
     pauseReview().catch((error) => setStatus(error.message, true));
     return;
   }
+  if (event.key === 'Escape' && state.view === 'photo-health' && state.photoHealth.reviewSession) {
+    discardPhotoHealthReview();
+    state.photoHealth.openGroupId = '';
+    loadPhotoHealth().catch((error) => setStatus(error.message, true));
+    return;
+  }
   if (event.target.matches('input, textarea, select')) return;
+  if (state.view === 'photo-health' && state.photoHealth.reviewSession) {
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      choosePhotoHealthWinner(state.photoHealth.reviewSession, false)
+        .catch((error) => setStatus(error.message, true));
+    }
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      choosePhotoHealthWinner(state.photoHealth.reviewSession, true)
+        .catch((error) => setStatus(error.message, true));
+    }
+    return;
+  }
   if (state.view !== 'review') return;
   if (event.key === 'ArrowLeft') decide('delete');
   if (event.key === 'ArrowRight') decide('keep');

@@ -134,6 +134,13 @@
     'Enable analysis': 'Analyse aktivieren',
     'Pause analysis': 'Analyse pausieren',
     'Resume analysis': 'Analyse fortsetzen',
+    'Reanalyze collection': 'Sammlung erneut analysieren',
+    'Reanalyze Photo Health': 'Fotoanalyse erneut durchführen',
+    'Reanalyze': 'Erneut analysieren',
+    'Existing Keep/Delete decisions are preserved. Duplicate findings disappear progressively as each item is rechecked.':
+      'Bestehende Entscheidungen zum Behalten/Löschen bleiben erhalten. Duplikatfunde verschwinden schrittweise, während die Elemente erneut geprüft werden.',
+    'Photo Health can only be reanalyzed after the current analysis is complete.':
+      'Die Fotoanalyse kann erst nach Abschluss der aktuellen Analyse erneut gestartet werden.',
     'Analysis is not enabled.': 'Die Analyse ist nicht aktiviert.',
     'Analysis is not enabled for this collection.': 'Die Analyse ist für diese Sammlung nicht aktiviert.',
     'Choose a collection to use Photo Health.': 'Wähle eine Sammlung für die Fotoanalyse aus.',
@@ -150,29 +157,39 @@
     'Very similar image framing and content': 'Sehr ähnlicher Bildausschnitt und Bildinhalt',
     'Close comparison': 'Vergleich schließen',
     'Compare and review': 'Vergleichen und prüfen',
-    'Compare the files side by side, then choose one or more photos to keep. Every other group member will be staged as Deleted; no files are moved.':
-      'Vergleiche die Dateien nebeneinander und wähle anschließend ein oder mehrere Fotos zum Behalten aus. Alle übrigen Gruppenmitglieder werden als gelöscht vorgemerkt; Dateien werden nicht verschoben.',
+    'Choose which image to keep. Leaving before the last comparison discards these staged choices.':
+      'Wähle das Bild aus, das behalten werden soll. Wenn du den Vergleich vorher verlässt, werden die vorgemerkten Entscheidungen verworfen.',
+    'Keep left': 'Linkes behalten',
+    'Keep right': 'Rechtes behalten',
+    'Undo comparison': 'Vergleich rückgängig',
+    'Redo comparison': 'Vergleich wiederholen',
+    'Undo saved decision': 'Gespeicherte Entscheidung rückgängig',
+    'Redo saved decision': 'Gespeicherte Entscheidung wiederholen',
     'Handled · decision is shared with other views.':
       'Erledigt · die Entscheidung wird mit anderen Ansichten geteilt.',
     'No findings match these filters.': 'Keine Funde entsprechen diesen Filtern.',
     'Enable analysis to discover findings.': 'Aktiviere die Analyse, um Funde zu entdecken.',
-    'Previous members': 'Vorherige Elemente',
-    'Next members': 'Nächste Elemente',
-    'Keep selected; stage the rest as Deleted': 'Ausgewählte behalten; übrige als gelöscht vormerken',
-    'Save duplicate decisions': 'Duplikatentscheidungen speichern',
-    'This only changes review decisions. No files will be moved or deleted.':
-      'Dies ändert nur die Prüfentscheidungen. Es werden keine Dateien verschoben oder gelöscht.',
-    'Save decisions': 'Entscheidungen speichern',
-    'Left comparison': 'Linker Vergleich',
-    'Right comparison': 'Rechter Vergleich',
+    'This duplicate group changed while it was being reviewed. Close and reopen it.':
+      'Diese Duplikatgruppe wurde während der Prüfung geändert. Schließe sie und öffne sie erneut.',
+    'A duplicate photo is no longer available. Close and reopen this group.':
+      'Ein Duplikatfoto ist nicht mehr verfügbar. Schließe die Gruppe und öffne sie erneut.',
+    'This duplicate group no longer has enough available photos to compare.':
+      'Diese Duplikatgruppe enthält nicht mehr genügend verfügbare Fotos für einen Vergleich.',
+    'The duplicate group changed while it was being reviewed. Close and reopen it.':
+      'Diese Duplikatgruppe wurde während der Prüfung geändert. Schließe sie und öffne sie erneut.',
+    'Undid the last saved duplicate group decision.': 'Die letzte gespeicherte Duplikatgruppen-Entscheidung wurde rückgängig gemacht.',
+    'Redid the last saved duplicate group decision.': 'Die letzte gespeicherte Duplikatgruppen-Entscheidung wurde wiederholt.',
+    'Undid the last saved review decision.': 'Die letzte gespeicherte Prüfentscheidung wurde rückgängig gemacht.',
+    'Redid the last saved review decision.': 'Die letzte gespeicherte Prüfentscheidung wurde wiederholt.',
     'photo_health_state_changed': 'Fotoanalyse-Status geändert',
+    'photo_health_reanalysis_queued': 'Erneute Fotoanalyse eingereiht',
     'photo_health_group_decided': 'Duplikatentscheidungen gespeichert',
     'Invalid Photo Health action.': 'Ungültige Aktion für die Fotoanalyse.',
     'Invalid Photo Health finding type.': 'Ungültiger Fundtyp für die Fotoanalyse.',
     'Invalid handled filter.': 'Ungültiger Prüfstatusfilter.',
     'Invalid Photo Health page.': 'Ungültige Seite der Fotoanalyse.',
     'Duplicate group not found in this collection.': 'Duplikatgruppe in dieser Sammlung nicht gefunden.',
-    'Choose between one and 100 photos to keep.': 'Wähle zwischen einem und 100 Fotos zum Behalten aus.',
+    'Choose exactly one photo to keep.': 'Wähle genau ein Foto zum Behalten aus.',
     'Every selected photo must belong to this duplicate group.':
       'Jedes ausgewählte Foto muss zu dieser Duplikatgruppe gehören.',
     'A photo in this duplicate group is being reviewed on another device.':
@@ -501,6 +518,8 @@
         (_, score) => ` · Geringe Kantenschärfe (Wert ${score})`)
       .replace(/^Current decision: (keep|delete|unsure|unseen)$/,
         (_, category) => `Aktuelle Entscheidung: ${translate(category)}`)
+      .replace(/^Comparison (\d+) of (\d+) · Choose which image to keep\. Leaving before the last comparison discards these staged choices\.$/,
+        (_, current, total) => `Vergleich ${current} von ${total} · Wähle das Bild aus, das behalten werden soll. Wenn du vorher gehst, werden die vorgemerkten Entscheidungen verworfen.`)
       .replace(/^(\d+) finding\(s\) · (\d+) unsupported · (\d+) analysis failure\(s\)$/,
         (_, findings, unsupported, failed) =>
           `${findings} Ergebnisse · ${unsupported} nicht unterstützte Dateien · ${failed} Analysefehler`)
@@ -516,11 +535,19 @@
         })
       .replace(/^Saved (keep|delete|unsure|unseen) decision\. No files were moved\.$/,
         (_, category) => `Entscheidung „${translate(category)}“ gespeichert. Es wurden keine Dateien verschoben.`)
+      .replace(/^Saved duplicate decision: 1 kept and (\d+) marked delete\. No files were moved\.$/,
+        (_, deleted) => `Duplikatentscheidung gespeichert: 1 behalten und ${deleted} zum Löschen vorgemerkt. Es wurden keine Dateien verschoben.`)
+      .replace(/^(Undid|Redid) the last saved (duplicate group|review) decision\.$/,
+        (_, action, kind) => `${action === 'Undid' ? 'Rückgängig gemacht' : 'Wiederholt'}: letzte gespeicherte ${kind === 'duplicate group' ? 'Duplikatgruppen-' : ''}Prüfentscheidung.`)
       .replace(/^Saved duplicate decisions: (\d+) kept and (\d+) staged as Deleted\. No files were moved\.$/,
         (_, kept, deleted) =>
           `Duplikatentscheidungen gespeichert: ${kept} behalten und ${deleted} als gelöscht vorgemerkt. Es wurden keine Dateien verschoben.`)
       .replace(/^Photo Health analysis enabled for this collection\.$/,
         'Fotoanalyse für diese Sammlung aktiviert.')
+      .replace(/^Reanalyze all (\d+) item\(s\) tracked in this collection\?$/,
+        (_, count) => `Alle ${count} in dieser Sammlung erfassten Elemente erneut analysieren?`)
+      .replace(/^Queued Photo Health reanalysis for (\d+) item\(s\)\. Review decisions are unchanged\.$/,
+        (_, count) => `Die erneute Fotoanalyse wurde für ${count} Elemente eingereiht. Prüfentscheidungen bleiben unverändert.`)
       .replace(/(\d+) root\(s\) are currently offline\./,
         (_, count) => `${count} Ordner sind derzeit offline.`)
       .replace(/Unable to start installation: (.*)/,

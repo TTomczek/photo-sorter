@@ -398,6 +398,25 @@ function migrateDatabase(db) {
         );
       `),
     },
+    {
+      version: 7,
+      apply: () => db.exec(`
+        ALTER TABLE decision_history ADD COLUMN batch_id TEXT;
+        CREATE INDEX decision_history_batch ON decision_history(device_id, batch_id, id);
+      `),
+    },
+    {
+      version: 8,
+      apply: () => db.exec(`
+        CREATE TABLE photo_health_reanalysis_queue (
+          collection_id TEXT NOT NULL REFERENCES collections(id),
+          media_id TEXT NOT NULL REFERENCES media(id),
+          PRIMARY KEY(collection_id, media_id)
+        );
+        CREATE INDEX photo_health_reanalysis_collection
+          ON photo_health_reanalysis_queue(collection_id, media_id);
+      `),
+    },
   ];
   if (currentVersion > migrations.at(-1).version) {
     throw new Error(`Database schema version ${currentVersion} is newer than this application supports.`);
@@ -987,8 +1006,13 @@ class PhotoSorter {
         `).run(next, replacement, Date.now(), categoryId);
       }
       this.db.prepare(`
-        DELETE FROM decision_history WHERE previous_category = ? OR next_category = ?
-      `).run(categoryId, categoryId);
+        DELETE FROM decision_history
+        WHERE previous_category = ? OR next_category = ?
+          OR batch_id IN (
+            SELECT batch_id FROM decision_history
+            WHERE batch_id IS NOT NULL AND (previous_category = ? OR next_category = ?)
+          )
+      `).run(categoryId, categoryId, categoryId, categoryId);
       this.db.prepare('DELETE FROM custom_categories WHERE id = ?').run(categoryId);
       this.log('category_deleted', {
         collectionId: category.collectionId,
@@ -1353,18 +1377,58 @@ class PhotoSorter {
     `).all(collectionId);
     const total = totals.total || 0;
     const processed = totals.processed || 0;
+    const reanalysisPending = this.db.prepare(`
+      SELECT COUNT(*) AS count FROM photo_health_reanalysis_queue q
+      JOIN media m ON m.id = q.media_id
+      JOIN roots r ON r.id = m.root_id
+      JOIN photo_health_items h ON h.media_id = m.id
+      WHERE q.collection_id = ? AND r.collection_id = ? AND r.active = 1 AND m.present = 1
+        AND h.status IN ('analyzed', 'unsupported', 'failed')
+        AND h.size = m.size AND h.modified_at = m.modified_at
+    `).get(collectionId, collectionId).count;
+    const pending = Math.max(0, total - processed) + reanalysisPending;
     return {
       enabled: Boolean(settings?.enabled),
       paused: Boolean(settings?.paused),
-      status: !settings?.enabled ? 'disabled' : settings.paused ? 'paused' : total === processed ? 'completed' : 'running',
+      status: !settings?.enabled ? 'disabled' : settings.paused ? 'paused' : pending === 0 ? 'completed' : 'running',
       total,
-      processed,
-      pending: Math.max(0, total - processed),
+      processed: Math.max(0, total - pending),
+      pending,
       unsupported: totals.unsupported || 0,
       failed: totals.failed || 0,
       updatedAt: settings?.updatedAt || null,
       errors,
     };
+  }
+
+  reanalyzePhotoHealth(collectionId) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const status = this.getPhotoHealthStatus(collectionId);
+      if (!status.enabled || status.status !== 'completed') {
+        throw new Error('Photo Health can only be reanalyzed after the current analysis is complete.');
+      }
+      this.db.prepare('DELETE FROM photo_health_reanalysis_queue WHERE collection_id = ?').run(collectionId);
+      const result = this.db.prepare(`
+        INSERT INTO photo_health_reanalysis_queue(collection_id, media_id)
+        SELECT ?, m.id FROM media m JOIN roots r ON r.id = m.root_id
+        WHERE r.collection_id = ? AND r.active = 1 AND m.present = 1
+          AND m.kind IN ('image', 'video')
+      `).run(collectionId, collectionId);
+      const queuedCount = Number(result.changes);
+      if (queuedCount) {
+        this.db.prepare(`
+          UPDATE photo_health_settings SET updated_at = ? WHERE collection_id = ?
+        `).run(new Date().toISOString(), collectionId);
+      }
+      this.log('photo_health_reanalysis_queued', { collectionId, queuedCount });
+      this.publishQueueChange(collectionId);
+      this.db.exec('COMMIT');
+      return { queuedCount, status: this.getPhotoHealthStatus(collectionId) };
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   setPhotoHealthState(collectionId, action) {
@@ -1421,6 +1485,17 @@ class PhotoSorter {
           AND h.size = m.size AND h.modified_at = m.modified_at)
       ORDER BY m.rowid LIMIT 1
     `).get(state.collectionId);
+    if (!media) {
+      media = this.db.prepare(`
+        SELECT m.id, m.root_id AS rootId, m.relative_path AS relativePath, m.size,
+          m.modified_at AS modifiedAt, m.kind, r.path AS rootPath, m.rowid AS rowId
+        FROM photo_health_reanalysis_queue q
+        JOIN media m ON m.id = q.media_id
+        JOIN roots r ON r.id = m.root_id
+        WHERE q.collection_id = ? AND r.collection_id = ? AND r.active = 1 AND m.present = 1
+        ORDER BY m.rowid LIMIT 1
+      `).get(state.collectionId, state.collectionId);
+    }
     if (!media && !this.photoHealthBackfillComplete.has(state.collectionId)) {
       let cursor = this.photoHealthCursors.get(state.collectionId) || 0;
       const nextUnindexed = (afterRowId) => this.db.prepare(`
@@ -1446,6 +1521,9 @@ class PhotoSorter {
     this.photoHealthBusy = true;
     try {
       await this.analyzePhotoHealthItem(state.collectionId, media);
+      this.db.prepare(`
+        DELETE FROM photo_health_reanalysis_queue WHERE collection_id = ? AND media_id = ?
+      `).run(state.collectionId, media.id);
       return true;
     } finally {
       this.photoHealthBusy = false;
@@ -1676,10 +1754,13 @@ class PhotoSorter {
     return { items, total, offset, limit };
   }
 
-  decidePhotoHealthGroup(collectionId, groupId, keepIds, deviceId) {
-    if (!Array.isArray(keepIds) || keepIds.length < 1 || keepIds.length > 100
+  decidePhotoHealthGroup(collectionId, groupId, keepIds, expectedMemberCount, deviceId) {
+    if (!Array.isArray(keepIds) || keepIds.length !== 1
       || keepIds.some((id) => typeof id !== 'string') || new Set(keepIds).size !== keepIds.length) {
-      throw new Error('Choose between one and 100 photos to keep.');
+      throw new Error('Choose exactly one photo to keep.');
+    }
+    if (!Number.isSafeInteger(expectedMemberCount) || expectedMemberCount < 2) {
+      throw new Error('The duplicate group changed while it was being reviewed. Close and reopen it.');
     }
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -1697,6 +1778,9 @@ class PhotoSorter {
         WHERE pm.group_id = ? AND r.collection_id = ? AND r.active = 1 AND m.present = 1
       `;
       const memberCount = this.db.prepare(`SELECT COUNT(*) AS count ${memberFilter}`).get(groupId, collectionId).count;
+      if (memberCount !== expectedMemberCount) {
+        throw new Error('The duplicate group changed while it was being reviewed. Close and reopen it.');
+      }
       const selectedCount = this.db.prepare(`
         SELECT COUNT(*) AS count ${memberFilter} AND m.id IN (${keepIds.map(() => '?').join(',')})
       `).get(groupId, collectionId, ...keepIds).count;
@@ -1717,11 +1801,12 @@ class PhotoSorter {
       const selected = keepIds.map(() => '?').join(',');
       const nextCategory = `CASE WHEN m.id IN (${selected}) THEN 'keep' ELSE 'delete' END`;
       const at = new Date().toISOString();
+      const batchId = crypto.randomUUID();
       this.db.prepare(`
-        INSERT INTO decision_history(media_id, device_id, previous_category, next_category, created_at)
-        SELECT m.id, ?, m.category, ${nextCategory}, ?
+        INSERT INTO decision_history(media_id, device_id, previous_category, next_category, created_at, batch_id)
+        SELECT m.id, ?, m.category, ${nextCategory}, ?, ?
         ${memberFilter} AND COALESCE(m.category, '') != ${nextCategory}
-      `).run(deviceId, ...keepIds, at, groupId, collectionId, ...keepIds);
+      `).run(deviceId, ...keepIds, at, batchId, groupId, collectionId, ...keepIds);
       this.db.prepare(`
         UPDATE media SET category = CASE WHEN id IN (${selected}) THEN 'keep' ELSE 'delete' END
         WHERE id IN (SELECT pm.media_id FROM photo_health_members pm
@@ -2168,28 +2253,68 @@ class PhotoSorter {
       ORDER BY h.id ${order} LIMIT 1
     `).get(deviceId, undone);
     if (!entry) return { changed: false, message: `There is no decision to ${direction}.` };
-    this.claimMediaLock(entry.media_id, deviceId);
-    const item = this.db.prepare(`
-      SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id WHERE m.id = ?
-    `).get(entry.media_id);
-    const expected = direction === 'undo' ? entry.next_category : entry.previous_category;
-    if (!item || item.category !== expected) {
-      throw Object.assign(new Error('This decision changed on another device; history was not altered.'), { status: 409 });
+    const entries = entry.batch_id
+      ? this.db.prepare(`
+        SELECT * FROM decision_history WHERE batch_id = ? AND device_id = ? AND undone = ?
+        ORDER BY id
+      `).all(entry.batch_id, deviceId, undone)
+      : [entry];
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const changes = entries.map((historyEntry) => {
+        this.claimMediaLock(historyEntry.media_id, deviceId);
+        const item = this.db.prepare(`
+          SELECT m.category, r.collection_id FROM media m JOIN roots r ON r.id = m.root_id
+          JOIN collections c ON c.id = r.collection_id
+          WHERE m.id = ? AND m.present = 1 AND r.active = 1 AND c.active = 1
+        `).get(historyEntry.media_id);
+        const expected = direction === 'undo'
+          ? historyEntry.next_category : historyEntry.previous_category;
+        if (!item || item.category !== expected) {
+          throw Object.assign(new Error('This decision changed on another device; history was not altered.'), { status: 409 });
+        }
+        const category = direction === 'undo'
+          ? historyEntry.previous_category : historyEntry.next_category;
+        return { historyEntry, item, category };
+      });
+      for (const { historyEntry, item, category } of changes) {
+        this.setMediaCategory(historyEntry.media_id, category || 'unseen');
+        if (!entry.batch_id) {
+          this.log(direction === 'undo' ? 'decision_undone' : 'decision_redone', {
+            mediaId: historyEntry.media_id,
+            category,
+            categoryName: this.getCategoryDisplayName(item.collection_id, category),
+          });
+        }
+      }
+      if (entry.batch_id) {
+        this.db.prepare(`
+          UPDATE decision_history SET undone = ? WHERE batch_id = ? AND device_id = ?
+        `).run(direction === 'undo' ? 1 : 0, entry.batch_id, deviceId);
+        this.log(direction === 'undo' ? 'decision_batch_undone' : 'decision_batch_redone', {
+          batchId: entry.batch_id,
+          itemCount: changes.length,
+          collectionId: changes[0]?.item.collection_id,
+        });
+      } else if (direction === 'undo') {
+        this.db.prepare('UPDATE decision_history SET undone = 1 WHERE id = ?').run(entry.id);
+      } else {
+        this.db.prepare('UPDATE decision_history SET undone = 0 WHERE id = ?').run(entry.id);
+      }
+      if (changes.length) this.publishQueueChange(changes[0].item.collection_id);
+      this.db.exec('COMMIT');
+      const firstChange = changes[0];
+      return {
+        changed: true,
+        mediaId: firstChange?.historyEntry.media_id,
+        category: firstChange?.category || 'unseen',
+        batch: Boolean(entry.batch_id),
+        count: changes.length,
+      };
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
     }
-    const category = direction === 'undo' ? entry.previous_category : entry.next_category;
-    this.setMediaCategory(entry.media_id, category || 'unseen');
-    if (direction === 'undo') {
-      this.db.prepare('UPDATE decision_history SET undone = 1 WHERE id = ?').run(entry.id);
-    } else {
-      this.db.prepare('UPDATE decision_history SET undone = 0 WHERE id = ?').run(entry.id);
-    }
-    this.log(direction === 'undo' ? 'decision_undone' : 'decision_redone', {
-      mediaId: entry.media_id,
-      category,
-      categoryName: this.getCategoryDisplayName(item.collection_id, category),
-    });
-    this.publishQueueChange(item.collection_id);
-    return { changed: true, mediaId: entry.media_id, category: category || 'unseen' };
   }
 
   listAudit(limit = 200) {
@@ -2856,6 +2981,10 @@ class PhotoSorter {
         const { collectionId, action } = await this.readJson(request);
         return this.sendJson(response, 200, this.setPhotoHealthState(collectionId, action));
       }
+      if (request.method === 'POST' && url.pathname === '/api/photo-health/reanalyze') {
+        const { collectionId } = await this.readJson(request);
+        return this.sendJson(response, 200, this.reanalyzePhotoHealth(collectionId));
+      }
       if (request.method === 'GET' && url.pathname === '/api/photo-health/findings') {
         const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 30));
         const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
@@ -2879,9 +3008,9 @@ class PhotoSorter {
       }
       const healthGroupDecision = url.pathname.match(/^\/api\/photo-health\/groups\/([0-9a-f-]+)\/decisions$/i);
       if (request.method === 'POST' && healthGroupDecision) {
-        const { collectionId, keepIds } = await this.readJson(request);
+        const { collectionId, keepIds, expectedMemberCount } = await this.readJson(request);
         return this.sendJson(response, 200, this.decidePhotoHealthGroup(
-          collectionId, healthGroupDecision[1], keepIds, session.deviceId,
+          collectionId, healthGroupDecision[1], keepIds, expectedMemberCount, session.deviceId,
         ));
       }
       if (request.method === 'POST' && ['/api/decisions/undo', '/api/decisions/redo'].includes(url.pathname)) {

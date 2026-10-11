@@ -127,6 +127,18 @@ Implement the application from scratch using this handoff as the product source 
 
 - The local-network HTTP warning can be dismissed per browser and stays dismissed across page reloads.
 
+### Confirmed duplicate review behavior (2026-10-11)
+
+- Compare duplicate-group members in case-insensitive relative-path order, side by side. Each comparison offers only Keep left or Keep right; left/right arrows and swipes choose that side.
+- Compare the current winner with each next member. Keep/delete decisions remain staged until the group's last comparison, then save automatically with exactly one winner kept and every other member marked Delete. Leaving early discards the staged choices, and reopening starts at the first pair.
+- Undo/Redo steps through staged pair choices while reviewing; after commit, the whole group is one device-scoped history operation. Automatically open the next group and return to Photo Health findings after the last group.
+- Duplicate review changes decision state only. It never moves or deletes media files.
+
+### Confirmed Photo Health reanalysis behavior (2026-10-11)
+
+- Provide a Photo Health reanalysis action (not a filesystem/root rescan) only after analysis completes. Require confirmation showing the item count and the effect on findings.
+- Requeue every present item tracked by Photo Health, including prior failures and unsupported items. Preserve existing Keep/Delete decisions and keep each finding visible until its members are rechecked; report normal progress as the durable queue drains.
+
 ### Confirmed custom categories (2026-10-10)
 
 - Each collection has its own flat custom-category list, shared across devices and retained when the collection is archived. Custom categories and Keep/Delete/Unsure are mutually exclusive decisions; the picker offers custom categories only.

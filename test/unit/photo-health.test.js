@@ -95,27 +95,81 @@ test('Photo Health finds exact and resized copies without classifying blur, and 
 
   const members = app.listPhotoHealthGroup(collectionId, exactGroup.groupId).items;
   app.claimMediaLock(members[1].id, 'other-device');
-  assert.throws(() => app.decidePhotoHealthGroup(collectionId, exactGroup.groupId, [members[0].id], 'phone'),
+  assert.throws(() => app.decidePhotoHealthGroup(collectionId, exactGroup.groupId, [members[0].id], 2, 'phone'),
     (error) => error.status === 409);
   app.releaseMediaLock(members[1].id, 'other-device');
-  const result = app.decidePhotoHealthGroup(collectionId, exactGroup.groupId, [members[0].id], 'phone');
+  assert.throws(
+    () => app.decidePhotoHealthGroup(collectionId, exactGroup.groupId, members.map((member) => member.id), 2, 'phone'),
+    /Choose exactly one photo to keep/,
+  );
+  assert.throws(
+    () => app.decidePhotoHealthGroup(collectionId, exactGroup.groupId, [members[0].id], 3, 'phone'),
+    /group changed while it was being reviewed/,
+  );
+  const result = app.decidePhotoHealthGroup(collectionId, exactGroup.groupId, [members[0].id], 2, 'phone');
   assert.deepEqual(result, { changed: true, keptCount: 1, deletedCount: 1 });
   assert.deepEqual(app.db.prepare(`
     SELECT category FROM media WHERE id IN (?, ?) ORDER BY category
   `).all(...members.map((member) => member.id)).map((row) => row.category), ['delete', 'keep']);
+  const historyBatch = app.db.prepare(`
+    SELECT DISTINCT batch_id FROM decision_history WHERE media_id IN (?, ?)
+  `).all(...members.map((member) => member.id));
+  assert.equal(historyBatch.length, 1);
+  assert.ok(historyBatch[0].batch_id);
+  app.claimMediaLock(members[1].id, 'other-device');
+  await assert.rejects(app.changeDecisionHistory('phone', 'undo'), (error) => error.status === 409);
+  assert.deepEqual(app.db.prepare(`
+    SELECT category FROM media WHERE id IN (?, ?) ORDER BY category
+  `).all(...members.map((member) => member.id)).map((row) => row.category), ['delete', 'keep']);
+  app.releaseMediaLock(members[1].id, 'other-device');
+  const undo = await app.changeDecisionHistory('phone', 'undo');
+  assert.equal(undo.changed, true);
+  assert.equal(undo.batch, true);
+  assert.equal(undo.count, 2);
+  assert.deepEqual(app.db.prepare(`
+    SELECT category FROM media WHERE id IN (?, ?) ORDER BY category
+  `).all(...members.map((member) => member.id)).map((row) => row.category), [null, null]);
+  const redo = await app.changeDecisionHistory('phone', 'redo');
+  assert.equal(redo.changed, true);
+  assert.equal(redo.batch, true);
+  assert.equal(redo.count, 2);
+  assert.deepEqual(app.db.prepare(`
+    SELECT category FROM media WHERE id IN (?, ?) ORDER BY category
+  `).all(...members.map((member) => member.id)).map((row) => row.category), ['delete', 'keep']);
+  const reanalysis = app.reanalyzePhotoHealth(collectionId);
+  assert.equal(reanalysis.queuedCount, status.total);
+  assert.equal(reanalysis.status.status, 'running');
+  assert.equal(reanalysis.status.pending, status.total);
+  assert.equal(app.listPhotoHealthFindings(collectionId, { type: 'duplicate', handled: 'all' })
+    .items.some((finding) => app.listPhotoHealthGroup(collectionId, finding.groupId).items
+      .some((member) => member.id === members[0].id)), true);
+  assert.throws(() => app.reanalyzePhotoHealth(collectionId), /only be reanalyzed after/);
+  const reanalysisStatus = await waitForHealth(app, collectionId);
+  assert.equal(reanalysisStatus.status, 'completed');
+  assert.deepEqual(app.db.prepare(`
+    SELECT category FROM media WHERE id IN (?, ?) ORDER BY category
+  `).all(...members.map((member) => member.id)).map((row) => row.category), ['delete', 'keep']);
+  const refreshedGroup = app.listPhotoHealthFindings(collectionId, { type: 'duplicate', handled: 'all' })
+    .items.find((finding) => app.listPhotoHealthGroup(collectionId, finding.groupId).items
+      .some((member) => member.id === members[0].id));
+  assert.ok(refreshedGroup);
   assert.equal(app.listPhotoHealthFindings(collectionId, { type: 'duplicate', handled: 'open' })
-    .items.some((finding) => finding.groupId === exactGroup.groupId), false);
+    .items.some((finding) => finding.groupId === refreshedGroup.groupId), false);
   assert.equal(app.listPhotoHealthFindings(collectionId, { type: 'duplicate', handled: 'handled' })
-    .items.some((finding) => finding.groupId === exactGroup.groupId), true);
+    .items.some((finding) => finding.groupId === refreshedGroup.groupId), true);
   assert.equal((await fs.readFile(path.join(root, '01-exact-a.png'))).equals(exact), true);
-  assert.throws(() => app.listPhotoHealthGroup('another-collection', exactGroup.groupId), /not found/);
+  assert.throws(() => app.listPhotoHealthGroup('another-collection', refreshedGroup.groupId), /not found/);
 
   await fs.writeFile(path.join(root, '12-video-c.mp4'), 'same video bytes');
   await app.scanRoot(rootId);
   const updatedStatus = await waitForHealth(app, collectionId);
   assert.equal(updatedStatus.total, 12);
   assert.equal(updatedStatus.processed, 12);
-  assert.equal(app.listPhotoHealthGroup(collectionId, videoGroup.groupId).total, 3);
+  const refreshedVideoGroup = app.listPhotoHealthFindings(collectionId, { type: 'duplicate', handled: 'all' })
+    .items.find((finding) => app.listPhotoHealthGroup(collectionId, finding.groupId).items
+      .some((member) => member.relativePath === '09-video-a.mp4'));
+  assert.ok(refreshedVideoGroup);
+  assert.equal(app.listPhotoHealthGroup(collectionId, refreshedVideoGroup.groupId).total, 3);
 });
 
 test('image analysis retains duplicate matching data without classifying blur', async (t) => {

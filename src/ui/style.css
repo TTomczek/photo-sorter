@@ -113,7 +113,8 @@ button.keep { background: #1d7542; }
 .photo-health-panel > .section-heading { align-items: flex-start; }
 .photo-health-panel h2 { margin-bottom: .35rem; }
 .photo-health-panel .section-heading p { margin-bottom: .5rem; }
-.photo-health-actions, .photo-health-filters, .photo-health-pagination, .health-zoom-controls {
+.photo-health-actions, .photo-health-filters, .photo-health-pagination, .health-zoom-controls,
+.health-review-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -137,10 +138,9 @@ button.keep { background: #1d7542; }
   user-select: none;
 }
 .health-compare figcaption { margin-top: .25rem; overflow-wrap: anywhere; font-size: .82rem; }
-.health-member-list { display: grid; gap: .35rem; max-height: 14rem; overflow: auto; padding: .4rem; border: 1px solid #d7dce1; border-radius: .45rem; }
-.health-member-list label { display: flex; align-items: center; gap: .5rem; min-width: 0; overflow-wrap: anywhere; }
-.health-member-list input { flex: none; }
 .health-zoom-controls { margin: .35rem 0; }
+.health-review-actions { justify-content: center; margin-top: .65rem; }
+.health-review-actions .keep { min-width: 7rem; }
 .photo-health-pagination { justify-content: center; margin-top: .8rem; }
 .review { text-align: center; }
 .review-heading { text-align: left; }
@@ -212,6 +212,7 @@ code { overflow-wrap: anywhere; }
   .photo-health-panel > .section-heading { display: grid; }
   .health-compare { gap: .35rem; }
   .health-compare-viewport { height: 11rem; }
+  .health-review-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 :root[data-grid-columns="auto"] .media-grid { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
 :root[data-grid-columns="2"] .media-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -238,7 +239,6 @@ code { overflow-wrap: anywhere; }
   :root[data-theme="system"] .lan { background: #1c3047; }
   :root[data-theme="system"] .media-card { border-color: #414a53; }
   :root[data-theme="system"] .photo-health-finding,
-  :root[data-theme="system"] .health-member-list { border-color: #414a53; }
   :root[data-theme="system"] .audit-entry { border-color: #414a53; }
   :root[data-theme="system"] .audit-fields dt { color: #b3bdc7; }
 }
@@ -264,7 +264,6 @@ code { overflow-wrap: anywhere; }
 :root[data-theme="dark"] .lan { background: #1c3047; }
 :root[data-theme="dark"] .media-card { border-color: #414a53; }
 :root[data-theme="dark"] .photo-health-finding,
-:root[data-theme="dark"] .health-member-list { border-color: #414a53; }
 :root[data-theme="dark"] .audit-entry { border-color: #414a53; }
 :root[data-theme="dark"] .audit-fields dt { color: #b3bdc7; }
 

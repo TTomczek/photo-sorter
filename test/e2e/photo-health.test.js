@@ -75,7 +75,11 @@ test('authenticated Photo Health APIs share collection progress and stage safe g
   assert.equal(group.body.total, 2);
   const decision = await phone.request(`/api/photo-health/groups/${page.body.items[0].groupId}/decisions`, {
     method: 'POST',
-    body: JSON.stringify({ collectionId, keepIds: [group.body.items[0].id] }),
+    body: JSON.stringify({
+      collectionId,
+      keepIds: [group.body.items[0].id],
+      expectedMemberCount: group.body.total,
+    }),
   });
   assert.deepEqual(decision.body, { changed: true, keptCount: 1, deletedCount: 1 });
   assert.equal((await desktop.request(`/api/photo-health/findings?collectionId=${collectionId}&handled=open`))

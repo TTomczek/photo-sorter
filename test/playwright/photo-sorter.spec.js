@@ -1097,7 +1097,9 @@ test('bounded grid pagination and real-time updates between browser devices', as
 
 test('Photo Health progress, duplicate comparison, and safe group review work in the browser', async () => {
   const copyPath = path.join(fixture.root, '04-copy.png');
+  const thirdCopyPath = path.join(fixture.root, '05-copy.png');
   await fs.copyFile(path.join(fixture.root, '01-red.png'), copyPath);
+  await fs.copyFile(path.join(fixture.root, '01-red.png'), thirdCopyPath);
   await fixture.app.rescanCollection(fixture.collectionId);
   const context = await browser.newContext();
   const page = await context.newPage();
@@ -1108,19 +1110,67 @@ test('Photo Health progress, duplicate comparison, and safe group review work in
     await page.locator('#photo-health-enable').click();
     await expect(page.locator('#photo-health-status')).toContainText('Analysis complete');
     await expect(page.locator('#photo-health-status')).not.toContainText('blur');
-    await expect(page.locator('.photo-health-finding h3').first()).toHaveText('Duplicate group · 2 photos');
+    await expect(page.locator('.photo-health-finding h3').first()).toHaveText('Duplicate group · 3 photos');
     await expect(page.locator('.photo-health-blur-preview, .health-decision')).toHaveCount(0);
     await page.getByRole('button', { name: 'Compare and review' }).click();
     await expect(page.locator('.health-compare img')).toHaveCount(2);
     await expect(page.locator('.health-compare img').first()).toHaveJSProperty('naturalWidth', 96);
-    await expect(page.locator('.health-member-list input[type="checkbox"]')).toHaveCount(2);
-    await page.locator('.health-member-list input[type="checkbox"]').first().check();
-    await page.getByRole('button', { name: 'Keep selected; stage the rest as Deleted' }).click();
-    await expect(page.locator('#confirm-dialog')).toBeVisible();
-    await page.locator('#dialog-confirm').click();
+    await expect(page.locator('.health-review-actions')).toContainText('Keep left');
+    await expect(page.locator('.health-review-actions')).toContainText('Keep right');
+    const group = fixture.app.listPhotoHealthFindings(fixture.collectionId, { handled: 'all' }).items
+      .find((finding) => finding.memberCount === 3);
+    const members = fixture.app.listPhotoHealthGroup(fixture.collectionId, group.groupId).items;
+    expect(members.map((member) => member.relativePath)).toEqual(['01-red.png', '04-copy.png', '05-copy.png']);
+    expect(fixture.app.db.prepare('SELECT category FROM media WHERE id = ?').get(members[0].id).category).toBeNull();
+
+    await page.keyboard.press('ArrowLeft');
+    await expect(page.locator('.health-group-details')).toContainText('Comparison 2 of 2');
+    await expect(page.locator('.health-compare figcaption').first()).toContainText('01-red.png');
+    await expect(page.locator('.health-compare figcaption').nth(1)).toContainText('05-copy.png');
+    expect(fixture.app.db.prepare('SELECT category FROM media WHERE id = ?').get(members[0].id).category).toBeNull();
+    await page.getByRole('button', { name: 'Undo comparison' }).click();
+    await expect(page.locator('.health-group-details')).toContainText('Comparison 1 of 2');
+    await page.getByRole('button', { name: 'Redo comparison' }).click();
+    await expect(page.locator('.health-group-details')).toContainText('Comparison 2 of 2');
+
+    await page.getByRole('button', { name: 'Close comparison' }).click();
+    await page.getByRole('button', { name: 'Compare and review' }).click();
+    await expect(page.locator('.health-group-details')).toContainText('Comparison 1 of 2');
+    await page.getByRole('button', { name: 'Keep left' }).click();
+    await expect(page.locator('.health-group-details')).toContainText('Comparison 2 of 2');
+    await page.getByRole('button', { name: 'Keep right' }).click();
     await expect(page.locator('#photo-health-list')).toContainText('No findings match');
+    expect(fixture.app.db.prepare('SELECT category FROM media WHERE id = ?').get(members[0].id).category).toBe('delete');
+    expect(fixture.app.db.prepare('SELECT category FROM media WHERE id = ?').get(members[1].id).category).toBe('delete');
+    expect(fixture.app.db.prepare('SELECT category FROM media WHERE id = ?').get(members[2].id).category).toBe('keep');
+    await page.locator('#photo-health-undo').click();
+    await expect.poll(() => members.map((member) => (
+      fixture.app.db.prepare('SELECT category FROM media WHERE id = ?').get(member.id).category
+    ))).toEqual([null, null, null]);
+    expect(fixture.app.db.prepare('SELECT category FROM media WHERE id = ?').get(members[0].id).category).toBeNull();
+    expect(fixture.app.db.prepare('SELECT category FROM media WHERE id = ?').get(members[1].id).category).toBeNull();
+    expect(fixture.app.db.prepare('SELECT category FROM media WHERE id = ?').get(members[2].id).category).toBeNull();
+    await page.locator('#photo-health-redo').click();
+    await expect.poll(() => members.map((member) => (
+      fixture.app.db.prepare('SELECT category FROM media WHERE id = ?').get(member.id).category
+    ))).toEqual(['delete', 'delete', 'keep']);
+    expect(fixture.app.db.prepare('SELECT category FROM media WHERE id = ?').get(members[0].id).category).toBe('delete');
+    expect(fixture.app.db.prepare('SELECT category FROM media WHERE id = ?').get(members[1].id).category).toBe('delete');
+    expect(fixture.app.db.prepare('SELECT category FROM media WHERE id = ?').get(members[2].id).category).toBe('keep');
+    await expect(page.locator('#photo-health-reanalyze')).toBeVisible();
+    await page.locator('#photo-health-reanalyze').click();
+    await expect(page.locator('#confirm-dialog')).toContainText('Reanalyze all 6 item(s)');
+    await expect(page.locator('#confirm-dialog')).toContainText('Existing Keep/Delete decisions are preserved.');
+    await page.locator('#dialog-confirm').click();
+    await expect(page.locator('#photo-health-status')).toContainText('Analysis complete', { timeout: 15000 });
+    await expect.poll(() => members.map((member) => (
+      fixture.app.db.prepare('SELECT category FROM media WHERE id = ?').get(member.id).category
+    ))).toEqual(['delete', 'delete', 'keep']);
     expect((await fs.readFile(path.join(fixture.root, '01-red.png'))).equals(
       await fs.readFile(copyPath),
+    )).toBe(true);
+    expect((await fs.readFile(path.join(fixture.root, '01-red.png'))).equals(
+      await fs.readFile(thirdCopyPath),
     )).toBe(true);
   } finally {
     await context.close();
