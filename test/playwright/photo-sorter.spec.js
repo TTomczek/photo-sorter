@@ -179,6 +179,38 @@ test('network security warning can be dismissed and stays dismissed after reload
   }
 });
 
+test('a single tap keeps the photo and a double tap marks it for deletion', async () => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+  });
+  const page = await context.newPage();
+  try {
+    await setupAccount(page);
+    const tapCurrentPhoto = async () => {
+      const bounds = await page.locator('#current-media img').boundingBox();
+      await page.touchscreen.tap(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+    };
+
+    await tapCurrentPhoto();
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '02-green.png');
+    expect(fixture.app.listMedia({
+      collectionId: fixture.collectionId, category: 'keep', sort: 'filename',
+    }).items.map((item) => item.relative_path)).toContain('01-red.png');
+
+    await tapCurrentPhoto();
+    await tapCurrentPhoto();
+    await expect(page.locator('#current-media img')).toHaveAttribute('alt', '03-blue.png');
+    expect(fixture.app.listMedia({
+      collectionId: fixture.collectionId, category: 'delete', sort: 'filename',
+    }).items.map((item) => item.relative_path)).toContain('02-green.png');
+    await expect(fs.access(path.join(fixture.root, '02-green.png'))).resolves.toBeUndefined();
+  } finally {
+    await context.close();
+  }
+});
+
 test('first-run review focus, photo details, category browsing and safe apply/restore', async () => {
   const context = await browser.newContext();
   const page = await context.newPage();

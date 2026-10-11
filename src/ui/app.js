@@ -1815,6 +1815,7 @@ async function showAuthentication() {
 }
 
 async function decide(category, item = state.items[state.index], label = categoryLabel(category)) {
+  clearReviewTap();
   if (!item || state.busy || !state.lockReady || state.lockedItemId !== item.id) return;
   state.busy = true;
   setDecisionButtons(false);
@@ -2736,6 +2737,32 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'ArrowRight') decide('keep');
   if (event.key === 'ArrowDown') decide('unsure');
   if (event.key === 'ArrowUp') openCategoryPicker().catch((error) => setStatus(error.message, true));
+});
+let reviewTapTimer = null;
+let reviewTapItemId = '';
+function clearReviewTap() {
+  if (reviewTapTimer !== null) clearTimeout(reviewTapTimer);
+  reviewTapTimer = null;
+  reviewTapItemId = '';
+}
+
+byId('current-media').addEventListener('click', (event) => {
+  const item = state.items[state.index];
+  if (state.view !== 'review' || !item || state.zoomScale > 1
+    || !(event.target instanceof Element) || !event.target.closest('img')) return;
+  if (reviewTapTimer !== null && reviewTapItemId === item.id) {
+    clearReviewTap();
+    decide('delete', item);
+    return;
+  }
+  clearReviewTap();
+  reviewTapItemId = item.id;
+  reviewTapTimer = setTimeout(() => {
+    clearReviewTap();
+    if (state.view === 'review' && state.items[state.index]?.id === item.id) {
+      decide('keep', item);
+    }
+  }, 350);
 });
 let touchStart;
 byId('current-media').addEventListener('touchstart', (event) => {

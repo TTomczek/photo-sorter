@@ -62,7 +62,7 @@ Implement the application from scratch using this handoff as the product source 
 | 36 | What if two devices open the same photo? | Prevent simultaneous edits with an item lock. Expire the lock automatically after a short idle timeout. |
 | 37 | What happens when a review decision changes category? | Remove the photo from the current category queue immediately and advance. In the combined review queue, keep/delete removes it; unsure remains pending and moves to the end of the unsure pass. |
 | 38 | Can a decision be cleared? | Yes, provide a clear-to-unseen action. |
-| 39 | What controls categorize a photo? | Left arrow/swipe = delete; right arrow/swipe = keep; down arrow/swipe = unsure; up arrow/swipe opens the custom-category picker. Also show explicit action buttons on phones. |
+| 39 | What controls categorize a photo? | Left arrow/swipe = delete; right arrow/swipe = keep; down arrow/swipe = unsure; up arrow/swipe opens the custom-category picker. In Review, a single tap keeps a photo and a double tap marks it Delete. Also show explicit action buttons on phones. |
 | 40 | Undo/redo? | Provide undo; redo too if practical. |
 | 41 | Should photos zoom? | Yes, support zoom and pan on desktop and phone. |
 | 42 | Grid navigation for large libraries? | Virtualized scrolling and category filters only. No filename/date/folder search in the agreed MVP. |
@@ -205,7 +205,7 @@ Implement the application from scratch using this handoff as the product source 
 - Implement unseen and keep/delete/unsure queues, capture-date ascending default with descending/filename choices, fallback date ordering, category filter grid, and visible category icons.
 - Implement per-device mode/current item persistence and immediate shared decision updates.
 - Implement edit locks with heartbeat/release and short idle expiry; communicate a lock conflict clearly.
-- Implement keyboard arrows, touch swipe mappings, visible buttons, zoom/pan, undo/redo, clear-to-unseen, and dynamic removal from the reviewed category queue.
+- Implement keyboard arrows, touch swipe and tap mappings, visible buttons, zoom/pan, undo/redo, clear-to-unseen, and dynamic removal from the reviewed category queue.
 - Launch pending work directly into the combined photo-first review queue; defer unsure items to the tail of their pass, support pause, and route pause/completion to Browse.
 - Keep the responsive navigation sheet pinned/collapsible on desktop and burger-controlled/overlay on phones; expose collection, apply, history, help, and settings workflows there.
 - Implement a virtualized grid appropriate for 200k items and progressive refresh as scans find new content.

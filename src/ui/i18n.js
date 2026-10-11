@@ -242,8 +242,8 @@
     'Confirm': 'Bestätigen',
     'Cancel': 'Abbrechen',
     'Confirm move': 'Verschiebung bestätigen',
-    'Use ←/swipe left for Delete, →/swipe right for Keep, ↓/swipe down for Unsure, and ↑/swipe up for a custom category. Press 1–9 or choose a category; selection saves and advances. Decisions never move files until you explicitly Apply.':
-      '←/nach links wischen bedeutet Löschen, →/nach rechts wischen bedeutet Behalten, ↓/nach unten wischen bedeutet Unsicher und ↑/nach oben wischen öffnet eine benutzerdefinierte Kategorie. Drücke 1–9 oder wähle eine Kategorie; die Auswahl wird gespeichert und fährt fort. Entscheidungen verschieben Dateien erst, wenn du sie ausdrücklich anwendest.',
+    'Use ←/swipe left for Delete, →/swipe right for Keep, ↓/swipe down for Unsure, and ↑/swipe up for a custom category. Tap once to Keep or twice to Delete. Press 1–9 or choose a category; selection saves and advances. Decisions never move files until you explicitly Apply.':
+      '←/nach links wischen bedeutet Löschen, →/nach rechts wischen bedeutet Behalten, ↓/nach unten wischen bedeutet Unsicher und ↑/nach oben wischen öffnet eine benutzerdefinierte Kategorie. Einmal tippen bedeutet Behalten, zweimal tippen bedeutet Löschen. Drücke 1–9 oder wähle eine Kategorie; die Auswahl wird gespeichert und fährt fort. Entscheidungen verschieben Dateien erst, wenn du sie ausdrücklich anwendest.',
     'Create, rename, and delete custom categories in Browse. Apply shows a move summary first, then requires a separate confirmation; category files move to category-named folders while preserving subfolders. Nothing is permanently deleted.':
       'Erstelle, benenne um und lösche benutzerdefinierte Kategorien unter „Durchsuchen“. Beim Anwenden wird zuerst eine Verschiebungsübersicht angezeigt und eine separate Bestätigung verlangt. Dateien werden in Ordner mit dem jeweiligen Kategorienamen verschoben; Unterordner bleiben erhalten. Nichts wird endgültig gelöscht.',
     'Photo Health can find exact duplicates and near-identical photo copies. Analysis can be paused across devices; its review decisions never move files.':
